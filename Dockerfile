@@ -10,6 +10,7 @@ FROM golang:1.26-bookworm AS server
 
 WORKDIR /src/zenmind-tunnel-server
 COPY zenmind-tunnel-server/go.mod zenmind-tunnel-server/go.sum* ./
+COPY zenmind-tunnel-server/third_party/yamux ./third_party/yamux
 RUN go mod download
 COPY zenmind-tunnel-server/ ./
 RUN CGO_ENABLED=0 go build -o /out/relay ./cmd/relay
@@ -26,4 +27,3 @@ ENV RELAY_ADDR=:8080
 ENV WEBSITE_DIST=/app/website
 
 ENTRYPOINT ["/app/relay"]
-
