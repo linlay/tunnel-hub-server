@@ -1,0 +1,16 @@
+{
+	email admin@example.com
+}
+
+admin.example.com {
+	reverse_proxy relay:8080
+}
+
+app.example.com {
+	reverse_proxy relay:8080
+}
+
+api.example.com {
+	reverse_proxy relay:8080
+}
+

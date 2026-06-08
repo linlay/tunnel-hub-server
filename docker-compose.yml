@@ -1,0 +1,20 @@
+services:
+  relay:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      RELAY_ADDR: ":8080"
+      RELAY_DB_PATH: "/data/zenmind-tunnel.db"
+      ADMIN_HOST: "admin.localhost"
+      WEBSITE_DIST: "/app/website"
+      COOKIE_SECRET: "replace-with-a-long-random-secret"
+      BOOTSTRAP_ADMIN_USERNAME: "admin"
+      BOOTSTRAP_ADMIN_PASSWORD: "admin"
+    ports:
+      - "8080:8080"
+    volumes:
+      - relay-data:/data
+
+volumes:
+  relay-data:
