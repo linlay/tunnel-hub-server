@@ -28,6 +28,8 @@ type AgentConfig struct {
 }
 
 func LoadRelayConfig() RelayConfig {
+	loadDotEnv()
+
 	return RelayConfig{
 		Addr:                   env("RELAY_ADDR", ":8080"),
 		DatabasePath:           env("RELAY_DB_PATH", "zenmind-tunnel.db"),
@@ -42,6 +44,8 @@ func LoadRelayConfig() RelayConfig {
 }
 
 func LoadAgentConfig() AgentConfig {
+	loadDotEnv()
+
 	return AgentConfig{
 		RelayURL:           env("AGENT_RELAY_URL", "ws://127.0.0.1:8080/tunnel"),
 		Token:              os.Getenv("AGENT_TOKEN"),

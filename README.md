@@ -11,6 +11,8 @@ This repository contains only the Go relay/agent server. The React + Vite manage
 
 ## Relay Environment
 
+Copy `.env.example` to `.env` for local development, then replace any placeholders before production use. Go commands load `.env` from the current working directory automatically, while real shell/container environment variables take precedence.
+
 | Name | Default | Purpose |
 | --- | --- | --- |
 | `RELAY_ADDR` | `:8080` | Relay listen address behind the TLS-terminating reverse proxy. |
@@ -22,6 +24,8 @@ This repository contains only the Go relay/agent server. The React + Vite manage
 | `BOOTSTRAP_ADMIN_USERNAME` | `admin` | First admin username. |
 | `BOOTSTRAP_ADMIN_PASSWORD` | `admin` | First admin password. |
 | `MAX_REQUEST_BODY_BYTES` | `67108864` | Maximum buffered HTTP request body. |
+
+Do not commit real production secrets. `COOKIE_SECRET` must be a long, stable random value in production so admin sessions remain valid across restarts.
 
 ## Agent Environment
 

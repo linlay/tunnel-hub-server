@@ -3,13 +3,11 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+    env_file:
+      - .env
     environment:
       RELAY_ADDR: ":8080"
       RELAY_DB_PATH: "/data/zenmind-tunnel.db"
-      PUBLIC_BASE_DOMAIN: "localhost"
-      COOKIE_SECRET: "replace-with-a-long-random-secret"
-      BOOTSTRAP_ADMIN_USERNAME: "admin"
-      BOOTSTRAP_ADMIN_PASSWORD: "admin"
     ports:
       - "8080:8080"
     volumes:
