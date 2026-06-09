@@ -1,16 +1,13 @@
 {
-	email admin@example.com
+	email admin@tunnel-hub.zenmind.cc
 }
 
-admin.example.com {
+admin.tunnel-hub.zenmind.cc {
 	reverse_proxy relay:8080
 }
 
-app.example.com {
+# Public wildcard routes require DNS for *.tunnel-hub.zenmind.cc.
+# Public ACME wildcard certificates usually require a DNS challenge provider.
+*.tunnel-hub.zenmind.cc {
 	reverse_proxy relay:8080
 }
-
-api.example.com {
-	reverse_proxy relay:8080
-}
-

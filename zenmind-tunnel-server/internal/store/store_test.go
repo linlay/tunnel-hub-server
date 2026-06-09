@@ -68,6 +68,52 @@ func TestTokenValidation(t *testing.T) {
 	}
 }
 
+func TestAdminAPIKeyCRUDAndLastUsed(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+
+	raw, err := auth.NewAdminAPIKey()
+	if err != nil {
+		t.Fatalf("new admin api key: %v", err)
+	}
+	key, err := db.CreateAdminAPIKey(ctx, "automation", raw)
+	if err != nil {
+		t.Fatalf("create admin api key: %v", err)
+	}
+	if key.KeyHash == raw {
+		t.Fatal("admin api key should be hashed")
+	}
+	if key.KeyPrefix != raw[:12] {
+		t.Fatalf("key prefix = %q", key.KeyPrefix)
+	}
+
+	found, err := db.FindActiveAdminAPIKeyBySecret(ctx, raw)
+	if err != nil {
+		t.Fatalf("find active admin api key: %v", err)
+	}
+	if found.ID != key.ID {
+		t.Fatalf("wrong admin api key: %s", found.ID)
+	}
+
+	if err := db.TouchAdminAPIKey(ctx, key.ID); err != nil {
+		t.Fatalf("touch admin api key: %v", err)
+	}
+	keys, err := db.ListAdminAPIKeys(ctx)
+	if err != nil {
+		t.Fatalf("list admin api keys: %v", err)
+	}
+	if len(keys) != 1 || keys[0].LastUsedAt == nil {
+		t.Fatalf("last used was not set: %+v", keys)
+	}
+
+	if err := db.DeactivateAdminAPIKey(ctx, key.ID); err != nil {
+		t.Fatalf("deactivate admin api key: %v", err)
+	}
+	if _, err := db.FindActiveAdminAPIKeyBySecret(ctx, raw); err != ErrNotFound {
+		t.Fatalf("inactive admin api key should not validate, got %v", err)
+	}
+}
+
 func openTestDB(t *testing.T) *DB {
 	t.Helper()
 	db, err := Open(":memory:")

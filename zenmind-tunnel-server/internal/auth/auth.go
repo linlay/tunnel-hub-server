@@ -17,11 +17,19 @@ import (
 var ErrInvalid = errors.New("invalid credential")
 
 func NewToken() (string, error) {
+	return newPrefixedSecret("zt_")
+}
+
+func NewAdminAPIKey() (string, error) {
+	return newPrefixedSecret("za_")
+}
+
+func newPrefixedSecret(prefix string) (string, error) {
 	raw := make([]byte, 32)
 	if _, err := rand.Read(raw); err != nil {
 		return "", err
 	}
-	return "zt_" + base64.RawURLEncoding.EncodeToString(raw), nil
+	return prefix + base64.RawURLEncoding.EncodeToString(raw), nil
 }
 
 func HashSecret(secret string) (string, error) {

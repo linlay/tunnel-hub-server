@@ -38,6 +38,16 @@ type TunnelToken struct {
 	LastUsedAt  *time.Time `json:"lastUsedAt,omitempty"`
 }
 
+type AdminAPIKey struct {
+	ID         string     `json:"id"`
+	Name       string     `json:"name"`
+	KeyHash    string     `json:"-"`
+	KeyPrefix  string     `json:"keyPrefix"`
+	Active     bool       `json:"active"`
+	CreatedAt  time.Time  `json:"createdAt"`
+	LastUsedAt *time.Time `json:"lastUsedAt,omitempty"`
+}
+
 type AgentSession struct {
 	ID             string     `json:"id"`
 	TokenID        string     `json:"tokenId"`
@@ -169,12 +179,35 @@ func (db *DB) GetRoute(ctx context.Context, id string) (Route, error) {
 	return scanRoute(row)
 }
 
+func (db *DB) GetRouteByHost(ctx context.Context, host string) (Route, error) {
+	row := db.sql.QueryRowContext(ctx, `
+		SELECT id, public_host, target_url, active, created_at, updated_at
+		FROM routes WHERE public_host = ?
+	`, tunnel.NormalizeHost(host))
+	return scanRoute(row)
+}
+
 func (db *DB) GetActiveRouteByHost(ctx context.Context, host string) (Route, error) {
 	row := db.sql.QueryRowContext(ctx, `
 		SELECT id, public_host, target_url, active, created_at, updated_at
 		FROM routes WHERE public_host = ? AND active = 1
 	`, tunnel.NormalizeHost(host))
 	return scanRoute(row)
+}
+
+func (db *DB) DeleteRouteByHost(ctx context.Context, host string) error {
+	result, err := db.sql.ExecContext(ctx, `DELETE FROM routes WHERE public_host = ?`, tunnel.NormalizeHost(host))
+	if err != nil {
+		return err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected == 0 {
+		return ErrNotFound
+	}
+	return nil
 }
 
 func (db *DB) ListRoutes(ctx context.Context) ([]Route, error) {
@@ -272,6 +305,95 @@ func (db *DB) ListTokens(ctx context.Context) ([]TunnelToken, error) {
 func (db *DB) DeactivateToken(ctx context.Context, id string) error {
 	result, err := db.sql.ExecContext(ctx, `
 		UPDATE tunnel_tokens SET active = 0 WHERE id = ?
+	`, id)
+	if err != nil {
+		return err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func (db *DB) CreateAdminAPIKey(ctx context.Context, name, rawKey string) (AdminAPIKey, error) {
+	hash, err := auth.HashSecret(rawKey)
+	if err != nil {
+		return AdminAPIKey{}, err
+	}
+	now := time.Now().UTC()
+	key := AdminAPIKey{
+		ID:        newID("apikey"),
+		Name:      strings.TrimSpace(name),
+		KeyHash:   hash,
+		KeyPrefix: tokenPrefix(rawKey),
+		Active:    true,
+		CreatedAt: now,
+	}
+	_, err = db.sql.ExecContext(ctx, `
+		INSERT INTO admin_api_keys (id, name, key_hash, key_prefix, active, created_at)
+		VALUES (?, ?, ?, ?, ?, ?)
+	`, key.ID, key.Name, key.KeyHash, key.KeyPrefix, key.Active, key.CreatedAt)
+	return key, err
+}
+
+func (db *DB) FindActiveAdminAPIKeyBySecret(ctx context.Context, rawKey string) (AdminAPIKey, error) {
+	rows, err := db.sql.QueryContext(ctx, `
+		SELECT id, name, key_hash, key_prefix, active, created_at, last_used_at
+		FROM admin_api_keys WHERE active = 1
+	`)
+	if err != nil {
+		return AdminAPIKey{}, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		key, err := scanAdminAPIKey(rows)
+		if err != nil {
+			return AdminAPIKey{}, err
+		}
+		if auth.VerifySecret(rawKey, key.KeyHash) {
+			return key, nil
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return AdminAPIKey{}, err
+	}
+	return AdminAPIKey{}, ErrNotFound
+}
+
+func (db *DB) TouchAdminAPIKey(ctx context.Context, id string) error {
+	_, err := db.sql.ExecContext(ctx, `
+		UPDATE admin_api_keys SET last_used_at = ? WHERE id = ?
+	`, time.Now().UTC(), id)
+	return err
+}
+
+func (db *DB) ListAdminAPIKeys(ctx context.Context) ([]AdminAPIKey, error) {
+	rows, err := db.sql.QueryContext(ctx, `
+		SELECT id, name, key_hash, key_prefix, active, created_at, last_used_at
+		FROM admin_api_keys ORDER BY created_at DESC
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	keys := make([]AdminAPIKey, 0)
+	for rows.Next() {
+		key, err := scanAdminAPIKey(rows)
+		if err != nil {
+			return nil, err
+		}
+		keys = append(keys, key)
+	}
+	return keys, rows.Err()
+}
+
+func (db *DB) DeactivateAdminAPIKey(ctx context.Context, id string) error {
+	result, err := db.sql.ExecContext(ctx, `
+		UPDATE admin_api_keys SET active = 0 WHERE id = ?
 	`, id)
 	if err != nil {
 		return err
@@ -391,6 +513,22 @@ func scanToken(row rowScanner) (TunnelToken, error) {
 	return token, nil
 }
 
+func scanAdminAPIKey(row rowScanner) (AdminAPIKey, error) {
+	var key AdminAPIKey
+	var lastUsed sql.NullTime
+	err := row.Scan(&key.ID, &key.Name, &key.KeyHash, &key.KeyPrefix, &key.Active, &key.CreatedAt, &lastUsed)
+	if errors.Is(err, sql.ErrNoRows) {
+		return AdminAPIKey{}, ErrNotFound
+	}
+	if err != nil {
+		return AdminAPIKey{}, err
+	}
+	if lastUsed.Valid {
+		key.LastUsedAt = &lastUsed.Time
+	}
+	return key, nil
+}
+
 func scanAgentSession(row rowScanner) (AgentSession, error) {
 	var session AgentSession
 	var disconnected sql.NullTime
@@ -431,6 +569,16 @@ CREATE TABLE IF NOT EXISTS tunnel_tokens (
 	name TEXT NOT NULL,
 	token_hash TEXT NOT NULL,
 	token_prefix TEXT NOT NULL,
+	active BOOLEAN NOT NULL DEFAULT 1,
+	created_at TIMESTAMP NOT NULL,
+	last_used_at TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS admin_api_keys (
+	id TEXT PRIMARY KEY,
+	name TEXT NOT NULL,
+	key_hash TEXT NOT NULL,
+	key_prefix TEXT NOT NULL,
 	active BOOLEAN NOT NULL DEFAULT 1,
 	created_at TIMESTAMP NOT NULL,
 	last_used_at TIMESTAMP

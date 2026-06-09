@@ -8,6 +8,7 @@ services:
       RELAY_DB_PATH: "/data/zenmind-tunnel.db"
       ADMIN_HOST: "admin.localhost"
       WEBSITE_DIST: "/app/website"
+      PUBLIC_BASE_DOMAIN: "localhost"
       COOKIE_SECRET: "replace-with-a-long-random-secret"
       BOOTSTRAP_ADMIN_USERNAME: "admin"
       BOOTSTRAP_ADMIN_PASSWORD: "admin"

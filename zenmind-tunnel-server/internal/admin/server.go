@@ -6,6 +6,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -48,6 +49,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.requireAuth(w, r, s.handleMe)
 	case path == "/routes" || strings.HasPrefix(path, "/routes/"):
 		s.requireAuth(w, r, s.handleRoutes)
+	case path == "/api-keys" || strings.HasPrefix(path, "/api-keys/"):
+		s.requireAuth(w, r, s.handleAPIKeys)
+	case path == "/services" || strings.HasPrefix(path, "/services/"):
+		s.requireAuth(w, r, s.handleServices)
 	case path == "/tokens" || strings.HasPrefix(path, "/tokens/"):
 		s.requireAuth(w, r, s.handleTokens)
 	case path == "/sessions" && r.Method == http.MethodGet:
@@ -105,8 +110,8 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
-	username, _ := s.currentUser(r)
-	writeJSON(w, http.StatusOK, map[string]any{"username": username})
+	principal, _ := s.currentPrincipal(r)
+	writeJSON(w, http.StatusOK, map[string]any{"username": principal})
 }
 
 func (s *Server) handleRoutes(w http.ResponseWriter, r *http.Request) {
@@ -238,6 +243,134 @@ func (s *Server) handleTokens(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func (s *Server) handleAPIKeys(w http.ResponseWriter, r *http.Request) {
+	id := strings.TrimPrefix(strings.TrimPrefix(r.URL.Path, "/api/admin/api-keys"), "/")
+	switch r.Method {
+	case http.MethodGet:
+		keys, err := s.DB.ListAdminAPIKeys(r.Context())
+		if err != nil {
+			s.writeInternal(w, "list admin api keys", err)
+			return
+		}
+		writeJSON(w, http.StatusOK, keys)
+	case http.MethodPost:
+		var payload struct {
+			Name string `json:"name"`
+		}
+		if err := decodeJSON(r, &payload); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid json")
+			return
+		}
+		payload.Name = strings.TrimSpace(payload.Name)
+		if payload.Name == "" {
+			writeError(w, http.StatusBadRequest, "name is required")
+			return
+		}
+		rawKey, err := auth.NewAdminAPIKey()
+		if err != nil {
+			s.writeInternal(w, "generate admin api key", err)
+			return
+		}
+		key, err := s.DB.CreateAdminAPIKey(r.Context(), payload.Name, rawKey)
+		if err != nil {
+			s.writeInternal(w, "create admin api key", err)
+			return
+		}
+		_ = s.DB.AddEvent(context.Background(), "admin_api_key.created", "Admin API key created", key.Name)
+		writeJSON(w, http.StatusCreated, map[string]any{"apiKey": key, "secret": rawKey})
+	case http.MethodDelete:
+		if id == "" {
+			writeError(w, http.StatusBadRequest, "api key id is required")
+			return
+		}
+		err := s.DB.DeactivateAdminAPIKey(r.Context(), id)
+		if errors.Is(err, store.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "api key not found")
+			return
+		}
+		if err != nil {
+			s.writeInternal(w, "deactivate admin api key", err)
+			return
+		}
+		_ = s.DB.AddEvent(context.Background(), "admin_api_key.deactivated", "Admin API key deactivated", id)
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+	default:
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+	}
+}
+
+func (s *Server) handleServices(w http.ResponseWriter, r *http.Request) {
+	name := strings.TrimPrefix(strings.TrimPrefix(r.URL.Path, "/api/admin/services"), "/")
+	if name == "" {
+		writeError(w, http.StatusBadRequest, "service name is required")
+		return
+	}
+	if err := validateServiceName(name); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	publicHost := s.servicePublicHost(name)
+	switch r.Method {
+	case http.MethodGet:
+		route, err := s.DB.GetRouteByHost(r.Context(), publicHost)
+		if errors.Is(err, store.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "service not found")
+			return
+		}
+		if err != nil {
+			s.writeInternal(w, "get service route", err)
+			return
+		}
+		writeJSON(w, http.StatusOK, s.serviceResponse(route))
+	case http.MethodPut:
+		var payload servicePayload
+		if err := decodeJSON(r, &payload); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid json")
+			return
+		}
+		if err := payload.Validate(); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		active := true
+		if payload.Active != nil {
+			active = *payload.Active
+		}
+		route, err := s.DB.GetRouteByHost(r.Context(), publicHost)
+		switch {
+		case errors.Is(err, store.ErrNotFound):
+			route, err = s.DB.CreateRoute(r.Context(), publicHost, payload.TargetURL, active)
+			if err == nil {
+				_ = s.DB.AddEvent(context.Background(), "service.published", "Service published", publicHost)
+			}
+		case err == nil:
+			route, err = s.DB.UpdateRoute(r.Context(), route.ID, publicHost, payload.TargetURL, active)
+			if err == nil {
+				_ = s.DB.AddEvent(context.Background(), "service.updated", "Service updated", publicHost)
+			}
+		}
+		if err != nil {
+			s.writeInternal(w, "publish service", err)
+			return
+		}
+		writeJSON(w, http.StatusOK, s.serviceResponse(route))
+	case http.MethodDelete:
+		err := s.DB.DeleteRouteByHost(r.Context(), publicHost)
+		if errors.Is(err, store.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "service not found")
+			return
+		}
+		if err != nil {
+			s.writeInternal(w, "delete service", err)
+			return
+		}
+		_ = s.DB.AddEvent(context.Background(), "service.deleted", "Service deleted", publicHost)
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "publicHost": publicHost})
+	default:
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+	}
+}
+
 func (s *Server) handleSessions(w http.ResponseWriter, r *http.Request) {
 	sessions, err := s.DB.ListAgentSessions(r.Context(), 100)
 	if err != nil {
@@ -261,19 +394,35 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) requireAuth(w http.ResponseWriter, r *http.Request, next http.HandlerFunc) {
-	if _, ok := s.currentUser(r); !ok {
+	if _, ok := s.currentPrincipal(r); !ok {
 		writeError(w, http.StatusUnauthorized, "authentication required")
 		return
 	}
 	next(w, r)
 }
 
-func (s *Server) currentUser(r *http.Request) (string, bool) {
+func (s *Server) currentPrincipal(r *http.Request) (string, bool) {
 	cookie, err := r.Cookie(sessionCookie)
-	if err != nil {
+	if err == nil {
+		if username, ok := auth.VerifySession(s.Config.CookieSecret, cookie.Value); ok {
+			return username, true
+		}
+	}
+	rawKey := bearerToken(r.Header.Get("Authorization"))
+	if rawKey == "" {
 		return "", false
 	}
-	return auth.VerifySession(s.Config.CookieSecret, cookie.Value)
+	key, err := s.DB.FindActiveAdminAPIKeyBySecret(r.Context(), rawKey)
+	if err != nil {
+		if !errors.Is(err, store.ErrNotFound) {
+			s.Logger.Error("validate admin api key", "error", err)
+		}
+		return "", false
+	}
+	if err := s.DB.TouchAdminAPIKey(r.Context(), key.ID); err != nil {
+		s.Logger.Error("touch admin api key", "error", err)
+	}
+	return "api-key:" + key.Name, true
 }
 
 func (s *Server) writeInternal(w http.ResponseWriter, message string, err error) {
@@ -305,6 +454,104 @@ func (p routePayload) Validate() error {
 		return errors.New("targetUrl is required")
 	}
 	return nil
+}
+
+type servicePayload struct {
+	TargetURL string `json:"targetUrl"`
+	Active    *bool  `json:"active"`
+}
+
+func (p servicePayload) Validate() error {
+	if strings.TrimSpace(p.TargetURL) == "" {
+		return errors.New("targetUrl is required")
+	}
+	return validateTargetURL(p.TargetURL)
+}
+
+type servicePublishResponse struct {
+	Route      store.Route `json:"route"`
+	PublicHost string      `json:"publicHost"`
+	PublicURL  string      `json:"publicUrl"`
+}
+
+func (s *Server) servicePublicHost(name string) string {
+	baseDomain := strings.TrimPrefix(tunnelHost(s.Config.PublicBaseDomain), ".")
+	if baseDomain == "" {
+		baseDomain = "tunnel-hub.zenmind.cc"
+	}
+	return name + "." + baseDomain
+}
+
+func (s *Server) serviceResponse(route store.Route) servicePublishResponse {
+	return servicePublishResponse{
+		Route:      route,
+		PublicHost: route.PublicHost,
+		PublicURL:  "https://" + route.PublicHost,
+	}
+}
+
+func validateServiceName(name string) error {
+	if name != strings.ToLower(name) {
+		return errors.New("service name must be lowercase")
+	}
+	if len(name) > 63 {
+		return errors.New("service name must be 63 characters or fewer")
+	}
+	if strings.HasPrefix(name, "-") || strings.HasSuffix(name, "-") {
+		return errors.New("service name cannot start or end with hyphen")
+	}
+	if reservedServiceNames[name] {
+		return errors.New("service name is reserved")
+	}
+	for _, char := range name {
+		if char >= 'a' && char <= 'z' {
+			continue
+		}
+		if char >= '0' && char <= '9' {
+			continue
+		}
+		if char == '-' {
+			continue
+		}
+		return errors.New("service name must contain only lowercase letters, numbers, and hyphens")
+	}
+	return nil
+}
+
+func validateTargetURL(raw string) error {
+	parsed, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil {
+		return errors.New("targetUrl must be a valid URL")
+	}
+	if parsed.Scheme != "http" && parsed.Scheme != "https" {
+		return errors.New("targetUrl must use http or https")
+	}
+	if parsed.Host == "" {
+		return errors.New("targetUrl must include a host")
+	}
+	return nil
+}
+
+func tunnelHost(host string) string {
+	host = strings.ToLower(strings.TrimSpace(host))
+	host = strings.TrimSuffix(host, ".")
+	return host
+}
+
+func bearerToken(header string) string {
+	const prefix = "Bearer "
+	if !strings.HasPrefix(header, prefix) {
+		return ""
+	}
+	return strings.TrimSpace(strings.TrimPrefix(header, prefix))
+}
+
+var reservedServiceNames = map[string]bool{
+	"admin":  true,
+	"api":    true,
+	"www":    true,
+	"tunnel": true,
+	"relay":  true,
 }
 
 func decodeJSON(r *http.Request, value any) error {

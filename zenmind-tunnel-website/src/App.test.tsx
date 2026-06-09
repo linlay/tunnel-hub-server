@@ -43,6 +43,7 @@ describe('App', () => {
       .mockResolvedValueOnce(json([]))
       .mockResolvedValueOnce(json([]))
       .mockResolvedValueOnce(json([]))
+      .mockResolvedValueOnce(json([]))
       .mockResolvedValueOnce(json({ hasActiveAgent: true, totalStreams: 3, activeStreams: 1 }));
 
     render(<App />);
@@ -58,4 +59,3 @@ function json(payload: unknown, status = 200) {
     headers: { 'Content-Type': 'application/json' }
   });
 }
-

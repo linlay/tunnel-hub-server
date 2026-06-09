@@ -17,6 +17,7 @@ import {
   Wifi
 } from 'lucide-react';
 import {
+  AdminApiKey,
   AgentSession,
   ApiError,
   EventLog,
@@ -56,7 +57,7 @@ export function App() {
   }, []);
 
   if (loadState === 'loading') {
-    return <div className="boot">Zenmind Tunnel</div>;
+    return <div className="boot">Tunnel Hub</div>;
   }
 
   if (loadState === 'anonymous') {
@@ -107,7 +108,7 @@ function Login({ onLogin }: { onLogin: (username: string) => void }) {
         <div className="login-mark">
           <ShieldCheck size={24} />
         </div>
-        <h1>Zenmind Tunnel</h1>
+        <h1>Tunnel Hub</h1>
         <label>
           Username
           <input value={username} onChange={(event) => setUsername(event.target.value)} />
@@ -133,6 +134,7 @@ function Login({ onLogin }: { onLogin: (username: string) => void }) {
 function Dashboard({ username, onLogout }: { username: string; onLogout: () => void }) {
   const [routes, setRoutes] = useState<Route[]>([]);
   const [tokens, setTokens] = useState<TunnelToken[]>([]);
+  const [apiKeys, setApiKeys] = useState<AdminApiKey[]>([]);
   const [sessions, setSessions] = useState<AgentSession[]>([]);
   const [events, setEvents] = useState<EventLog[]>([]);
   const [metrics, setMetrics] = useState<Metrics>({
@@ -142,7 +144,9 @@ function Dashboard({ username, onLogout }: { username: string; onLogout: () => v
   });
   const [routeForm, setRouteForm] = useState<RouteForm>(emptyRoute);
   const [tokenName, setTokenName] = useState('primary-agent');
+  const [apiKeyName, setApiKeyName] = useState('automation');
   const [newSecret, setNewSecret] = useState('');
+  const [newApiKeySecret, setNewApiKeySecret] = useState('');
   const [notice, setNotice] = useState('');
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
@@ -150,15 +154,17 @@ function Dashboard({ username, onLogout }: { username: string; onLogout: () => v
   const refresh = useCallback(async () => {
     setError('');
     try {
-      const [nextRoutes, nextTokens, nextSessions, nextEvents, nextMetrics] = await Promise.all([
+      const [nextRoutes, nextTokens, nextApiKeys, nextSessions, nextEvents, nextMetrics] = await Promise.all([
         api.routes(),
         api.tokens(),
+        api.apiKeys(),
         api.sessions(),
         api.events(),
         api.metrics()
       ]);
       setRoutes(nextRoutes ?? []);
       setTokens(nextTokens ?? []);
+      setApiKeys(nextApiKeys ?? []);
       setSessions(nextSessions ?? []);
       setEvents(nextEvents ?? []);
       setMetrics(nextMetrics);
@@ -244,6 +250,38 @@ function Dashboard({ username, onLogout }: { username: string; onLogout: () => v
     }
   }
 
+  async function createApiKey(event: FormEvent) {
+    event.preventDefault();
+    setBusy(true);
+    setError('');
+    setNotice('');
+    try {
+      const created = await api.createApiKey(apiKeyName);
+      setNewApiKeySecret(created.secret);
+      setNotice('Admin API key created');
+      await refresh();
+    } catch (err) {
+      setError(errorMessage(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function removeApiKey(apiKey: AdminApiKey) {
+    setBusy(true);
+    setError('');
+    setNotice('');
+    try {
+      await api.deleteApiKey(apiKey.id);
+      setNotice('Admin API key deactivated');
+      await refresh();
+    } catch (err) {
+      setError(errorMessage(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function logout() {
     await api.logout();
     onLogout();
@@ -257,8 +295,8 @@ function Dashboard({ username, onLogout }: { username: string; onLogout: () => v
             <Wifi size={20} />
           </div>
           <div>
-            <strong>Zenmind</strong>
-            <span>Tunnel</span>
+            <strong>Tunnel</strong>
+            <span>Hub</span>
           </div>
         </div>
         <nav>
@@ -269,6 +307,10 @@ function Dashboard({ username, onLogout }: { username: string; onLogout: () => v
           <a href="#tokens">
             <KeyRound size={16} />
             Tokens
+          </a>
+          <a href="#api-keys">
+            <KeyRound size={16} />
+            API Keys
           </a>
           <a href="#sessions">
             <Server size={16} />
@@ -413,6 +455,46 @@ function Dashboard({ username, onLogout }: { username: string; onLogout: () => v
                   <StatusPill active={token.active} />
                   {token.active ? (
                     <button className="icon danger" title="Deactivate token" onClick={() => removeToken(token)}>
+                      <Trash2 size={15} />
+                    </button>
+                  ) : null}
+                </div>
+              ])}
+            />
+          </section>
+
+          <section className="panel" id="api-keys">
+            <PanelTitle icon={<KeyRound size={18} />} title="Admin API Keys" />
+            <form className="inline-form" onSubmit={createApiKey}>
+              <input value={apiKeyName} onChange={(event) => setApiKeyName(event.target.value)} />
+              <button className="primary" disabled={busy}>
+                <Plus size={16} />
+                Create
+              </button>
+            </form>
+            {newApiKeySecret ? (
+              <div className="secret-box">
+                <code>{newApiKeySecret}</code>
+                <button
+                  className="icon"
+                  title="Copy admin API key"
+                  onClick={() => navigator.clipboard.writeText(newApiKeySecret)}
+                >
+                  <Copy size={15} />
+                </button>
+              </div>
+            ) : null}
+            <DataTable
+              empty="No admin API keys"
+              columns={['Name', 'Prefix', 'Used', '']}
+              rows={apiKeys.map((apiKey) => [
+                <strong className={apiKey.active ? '' : 'muted'}>{apiKey.name}</strong>,
+                <code>{apiKey.keyPrefix}</code>,
+                apiKey.lastUsedAt ? formatTime(apiKey.lastUsedAt) : <span className="muted">Never</span>,
+                <div className="row-actions">
+                  <StatusPill active={apiKey.active} />
+                  {apiKey.active ? (
+                    <button className="icon danger" title="Deactivate admin API key" onClick={() => removeApiKey(apiKey)}>
                       <Trash2 size={15} />
                     </button>
                   ) : null}

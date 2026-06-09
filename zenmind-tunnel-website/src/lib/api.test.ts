@@ -37,5 +37,69 @@ describe('api client', () => {
 
     await expect(api.routes()).rejects.toEqual(new ApiError(401, 'authentication required'));
   });
-});
 
+  it('creates admin api keys', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          apiKey: { id: 'apikey_1', name: 'bot', keyPrefix: 'za_abc', active: true, createdAt: 'now' },
+          secret: 'za_secret'
+        }),
+        {
+          status: 201,
+          headers: { 'Content-Type': 'application/json' }
+        }
+      )
+    );
+
+    const response = await api.createApiKey('bot');
+
+    expect(response.secret).toBe('za_secret');
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/admin/api-keys',
+      expect.objectContaining({
+        method: 'POST',
+        credentials: 'include',
+        body: JSON.stringify({ name: 'bot' })
+      })
+    );
+  });
+
+  it('publishes managed services', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          publicHost: 'auditor.tunnel-hub.zenmind.cc',
+          publicUrl: 'https://auditor.tunnel-hub.zenmind.cc',
+          route: {
+            id: 'route_1',
+            publicHost: 'auditor.tunnel-hub.zenmind.cc',
+            targetUrl: 'http://127.0.0.1:3000',
+            active: true,
+            createdAt: 'now',
+            updatedAt: 'now'
+          }
+        }),
+        {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' }
+        }
+      )
+    );
+
+    const response = await api.publishService('auditor', {
+      targetUrl: 'http://127.0.0.1:3000',
+      active: true
+    });
+
+    expect(response.publicHost).toBe('auditor.tunnel-hub.zenmind.cc');
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/admin/services/auditor',
+      expect.objectContaining({
+        method: 'PUT',
+        credentials: 'include',
+        body: JSON.stringify({ targetUrl: 'http://127.0.0.1:3000', active: true })
+      })
+    );
+  });
+});

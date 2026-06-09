@@ -16,6 +16,15 @@ export type TunnelToken = {
   lastUsedAt?: string;
 };
 
+export type AdminApiKey = {
+  id: string;
+  name: string;
+  keyPrefix: string;
+  active: boolean;
+  createdAt: string;
+  lastUsedAt?: string;
+};
+
 export type AgentSession = {
   id: string;
   tokenId: string;
@@ -47,6 +56,17 @@ export type LoginResponse = {
 export type TokenCreateResponse = {
   token: TunnelToken;
   secret: string;
+};
+
+export type AdminApiKeyCreateResponse = {
+  apiKey: AdminApiKey;
+  secret: string;
+};
+
+export type ServicePublishResponse = {
+  route: Route;
+  publicHost: string;
+  publicUrl: string;
 };
 
 export class ApiError extends Error {
@@ -120,6 +140,32 @@ export const api = {
   deleteToken(id: string) {
     return request<{ ok: boolean }>(`/api/admin/tokens/${id}`, { method: 'DELETE' });
   },
+  apiKeys() {
+    return request<AdminApiKey[]>('/api/admin/api-keys');
+  },
+  createApiKey(name: string) {
+    return request<AdminApiKeyCreateResponse>('/api/admin/api-keys', {
+      method: 'POST',
+      body: JSON.stringify({ name })
+    });
+  },
+  deleteApiKey(id: string) {
+    return request<{ ok: boolean }>(`/api/admin/api-keys/${id}`, { method: 'DELETE' });
+  },
+  service(name: string) {
+    return request<ServicePublishResponse>(`/api/admin/services/${name}`);
+  },
+  publishService(name: string, input: Pick<Route, 'targetUrl' | 'active'>) {
+    return request<ServicePublishResponse>(`/api/admin/services/${name}`, {
+      method: 'PUT',
+      body: JSON.stringify(input)
+    });
+  },
+  deleteService(name: string) {
+    return request<{ ok: boolean; publicHost: string }>(`/api/admin/services/${name}`, {
+      method: 'DELETE'
+    });
+  },
   sessions() {
     return request<AgentSession[]>('/api/admin/sessions');
   },
@@ -130,4 +176,3 @@ export const api = {
     return request<Metrics>('/api/admin/metrics');
   }
 };
-

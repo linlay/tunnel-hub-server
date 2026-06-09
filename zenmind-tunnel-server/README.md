@@ -1,6 +1,6 @@
-# Zenmind Tunnel Server
+# Tunnel Hub Server
 
-Self-hosted HTTP/WebSocket reverse tunnel with an AWS relay and a local agent.
+Self-hosted HTTP/WebSocket reverse tunnel with a public relay and a local agent. Managed services default to `*.tunnel-hub.zenmind.cc`.
 
 ## Commands
 
@@ -15,6 +15,7 @@ Self-hosted HTTP/WebSocket reverse tunnel with an AWS relay and a local agent.
 | `RELAY_DB_PATH` | `zenmind-tunnel.db` | SQLite database path. |
 | `ADMIN_HOST` | empty | Admin hostname, for example `admin.example.com`. |
 | `WEBSITE_DIST` | empty | Optional built website directory to serve on `ADMIN_HOST`. |
+| `PUBLIC_BASE_DOMAIN` | `tunnel-hub.zenmind.cc` | Base domain used by `/api/admin/services/{name}`. |
 | `COOKIE_SECRET` | random dev value | HMAC secret for admin sessions. |
 | `BOOTSTRAP_ADMIN_USERNAME` | `admin` | First admin username. |
 | `BOOTSTRAP_ADMIN_PASSWORD` | `admin` | First admin password. |
@@ -37,3 +38,15 @@ go run ./cmd/relay
 AGENT_TOKEN=<token> AGENT_RELAY_URL=ws://127.0.0.1:8080/tunnel go run ./cmd/agent
 ```
 
+## Managed Service Publish API
+
+Create an Admin API Key from the console or `/api/admin/api-keys`, then publish a local service:
+
+```bash
+curl -X PUT https://admin.tunnel-hub.zenmind.cc/api/admin/services/auditor \
+  -H "Authorization: Bearer $TUNNEL_HUB_ADMIN_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"targetUrl":"http://127.0.0.1:3000","active":true}'
+```
+
+This creates or updates `auditor.tunnel-hub.zenmind.cc`. Service names must be one lowercase DNS label and cannot be `admin`, `api`, `www`, `tunnel`, or `relay`.

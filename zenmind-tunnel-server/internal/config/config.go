@@ -13,6 +13,7 @@ type RelayConfig struct {
 	DatabasePath           string
 	AdminHost              string
 	WebsiteDist            string
+	PublicBaseDomain       string
 	CookieSecret           string
 	BootstrapAdminUsername string
 	BootstrapAdminPassword string
@@ -32,6 +33,7 @@ func LoadRelayConfig() RelayConfig {
 		DatabasePath:           env("RELAY_DB_PATH", "zenmind-tunnel.db"),
 		AdminHost:              env("ADMIN_HOST", ""),
 		WebsiteDist:            env("WEBSITE_DIST", ""),
+		PublicBaseDomain:       env("PUBLIC_BASE_DOMAIN", "tunnel-hub.zenmind.cc"),
 		CookieSecret:           env("COOKIE_SECRET", randomSecret()),
 		BootstrapAdminUsername: env("BOOTSTRAP_ADMIN_USERNAME", "admin"),
 		BootstrapAdminPassword: env("BOOTSTRAP_ADMIN_PASSWORD", "admin"),
