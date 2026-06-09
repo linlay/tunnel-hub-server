@@ -10,13 +10,17 @@ import (
 func TestRouteCRUDAndHostNormalization(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
+	token := createTestToken(t, db, "laptop")
 
-	route, err := db.CreateRoute(ctx, "App.Example.COM:443", "http://127.0.0.1:3000", true)
+	route, err := db.CreateRoute(ctx, "App.Example.COM:443", "http://127.0.0.1:3000", true, token.ID)
 	if err != nil {
 		t.Fatalf("create route: %v", err)
 	}
 	if route.PublicHost != "app.example.com" {
 		t.Fatalf("host was not normalized: %q", route.PublicHost)
+	}
+	if route.TokenID != token.ID {
+		t.Fatalf("route token id = %q", route.TokenID)
 	}
 
 	found, err := db.GetActiveRouteByHost(ctx, "app.example.com")
@@ -27,7 +31,7 @@ func TestRouteCRUDAndHostNormalization(t *testing.T) {
 		t.Fatalf("unexpected target: %q", found.TargetURL)
 	}
 
-	updated, err := db.UpdateRoute(ctx, route.ID, "api.example.com", "http://127.0.0.1:8080", false)
+	updated, err := db.UpdateRoute(ctx, route.ID, "api.example.com", "http://127.0.0.1:8080", false, token.ID)
 	if err != nil {
 		t.Fatalf("update route: %v", err)
 	}
@@ -36,6 +40,21 @@ func TestRouteCRUDAndHostNormalization(t *testing.T) {
 	}
 	if _, err := db.GetActiveRouteByHost(ctx, "api.example.com"); err != ErrNotFound {
 		t.Fatalf("inactive route should not match, got %v", err)
+	}
+}
+
+func TestUnassignedRoutesAreNotActive(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+
+	if _, err := db.CreateRoute(ctx, "legacy.example.com", "http://127.0.0.1:3000", true, ""); err != nil {
+		t.Fatalf("create legacy route: %v", err)
+	}
+	if _, err := db.GetRouteByHost(ctx, "legacy.example.com"); err != nil {
+		t.Fatalf("legacy route should remain listable: %v", err)
+	}
+	if _, err := db.GetActiveRouteByHost(ctx, "legacy.example.com"); err != ErrNotFound {
+		t.Fatalf("unassigned route should not be active, got %v", err)
 	}
 }
 
@@ -125,4 +144,17 @@ func openTestDB(t *testing.T) *DB {
 		t.Fatalf("migrate: %v", err)
 	}
 	return db
+}
+
+func createTestToken(t *testing.T, db *DB, name string) TunnelToken {
+	t.Helper()
+	raw, err := auth.NewToken()
+	if err != nil {
+		t.Fatalf("new token: %v", err)
+	}
+	token, err := db.CreateToken(context.Background(), name, raw)
+	if err != nil {
+		t.Fatalf("create token: %v", err)
+	}
+	return token
 }

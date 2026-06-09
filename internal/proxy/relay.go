@@ -71,7 +71,13 @@ func (r *Relay) HandleTunnel(w http.ResponseWriter, req *http.Request) {
 	}
 	_ = r.DB.TouchToken(context.Background(), token.ID)
 	_ = r.DB.AddEvent(context.Background(), "agent.connected", "Agent connected", dbSession.ID)
-	r.Manager.SetActive(&ActiveAgent{SessionID: dbSession.ID, TokenID: token.ID, Yamux: session})
+	r.Manager.SetActive(&ActiveAgent{
+		SessionID:   dbSession.ID,
+		TokenID:     token.ID,
+		RemoteAddr:  req.RemoteAddr,
+		ConnectedAt: dbSession.ConnectedAt,
+		Yamux:       session,
+	})
 	r.Logger.Info("agent connected", "session", dbSession.ID, "remote", req.RemoteAddr)
 
 	<-session.CloseChan()
@@ -100,9 +106,9 @@ func (r *Relay) HandlePublic(w http.ResponseWriter, req *http.Request) {
 }
 
 func (r *Relay) handlePublicHTTP(w http.ResponseWriter, req *http.Request, route store.Route) {
-	stream, err := r.Manager.OpenStream(req.Context())
+	stream, err := r.Manager.OpenStream(req.Context(), route.TokenID)
 	if errors.Is(err, ErrNoAgent) {
-		http.Error(w, "no active agent", http.StatusBadGateway)
+		http.Error(w, "assigned agent is offline", http.StatusBadGateway)
 		return
 	}
 	if err != nil {
@@ -160,9 +166,9 @@ func (r *Relay) handlePublicHTTP(w http.ResponseWriter, req *http.Request, route
 }
 
 func (r *Relay) handlePublicWebSocket(w http.ResponseWriter, req *http.Request, route store.Route) {
-	stream, err := r.Manager.OpenStream(req.Context())
+	stream, err := r.Manager.OpenStream(req.Context(), route.TokenID)
 	if errors.Is(err, ErrNoAgent) {
-		http.Error(w, "no active agent", http.StatusBadGateway)
+		http.Error(w, "assigned agent is offline", http.StatusBadGateway)
 		return
 	}
 	if err != nil {

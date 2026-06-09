@@ -3,12 +3,15 @@ package admin
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/hashicorp/yamux"
 	"github.com/linlay/zenmind-tunnel-server/internal/auth"
 	"github.com/linlay/zenmind-tunnel-server/internal/config"
 	"github.com/linlay/zenmind-tunnel-server/internal/proxy"
@@ -74,7 +77,8 @@ func TestCreateAdminAPIKeyEndpoint(t *testing.T) {
 
 func TestServicePublishUpsertsManagedRoute(t *testing.T) {
 	server, db := newAdminTestServer(t)
-	req := authedAdminRequest(http.MethodPut, "/api/admin/services/auditor", `{"targetUrl":"http://127.0.0.1:3000","active":true}`)
+	token := createAdminTestToken(t, db, "mac-mini")
+	req := authedAdminRequest(http.MethodPut, "/api/admin/services/auditor", fmt.Sprintf(`{"targetUrl":"http://127.0.0.1:3000","active":true,"tokenId":%q}`, token.ID))
 	rec := httptest.NewRecorder()
 
 	server.ServeHTTP(rec, req)
@@ -92,8 +96,11 @@ func TestServicePublishUpsertsManagedRoute(t *testing.T) {
 	if created.Route.TargetURL != "http://127.0.0.1:3000" || !created.Route.Active {
 		t.Fatalf("unexpected created route: %+v", created.Route)
 	}
+	if created.Route.TokenID != token.ID {
+		t.Fatalf("route token id = %q", created.Route.TokenID)
+	}
 
-	req = authedAdminRequest(http.MethodPut, "/api/admin/services/auditor", `{"targetUrl":"http://127.0.0.1:4000","active":false}`)
+	req = authedAdminRequest(http.MethodPut, "/api/admin/services/auditor", fmt.Sprintf(`{"targetUrl":"http://127.0.0.1:4000","active":false,"tokenId":%q}`, token.ID))
 	rec = httptest.NewRecorder()
 	server.ServeHTTP(rec, req)
 
@@ -117,8 +124,9 @@ func TestServicePublishUpsertsManagedRoute(t *testing.T) {
 }
 
 func TestServiceGetAndDeleteManagedRoute(t *testing.T) {
-	server, _ := newAdminTestServer(t)
-	req := authedAdminRequest(http.MethodPut, "/api/admin/services/auditor", `{"targetUrl":"http://127.0.0.1:3000"}`)
+	server, db := newAdminTestServer(t)
+	token := createAdminTestToken(t, db, "mac-mini")
+	req := authedAdminRequest(http.MethodPut, "/api/admin/services/auditor", fmt.Sprintf(`{"targetUrl":"http://127.0.0.1:3000","tokenId":%q}`, token.ID))
 	rec := httptest.NewRecorder()
 	server.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
@@ -148,17 +156,19 @@ func TestServiceGetAndDeleteManagedRoute(t *testing.T) {
 }
 
 func TestServicePublishValidation(t *testing.T) {
-	server, _ := newAdminTestServer(t)
+	server, db := newAdminTestServer(t)
+	token := createAdminTestToken(t, db, "mac-mini")
 	cases := []struct {
 		name string
 		path string
 		body string
 	}{
-		{name: "uppercase", path: "/api/admin/services/Auditor", body: `{"targetUrl":"http://127.0.0.1:3000"}`},
-		{name: "dot", path: "/api/admin/services/auditor.dev", body: `{"targetUrl":"http://127.0.0.1:3000"}`},
-		{name: "reserved", path: "/api/admin/services/admin", body: `{"targetUrl":"http://127.0.0.1:3000"}`},
-		{name: "bad target", path: "/api/admin/services/auditor", body: `{"targetUrl":"ftp://127.0.0.1:3000"}`},
-		{name: "missing host", path: "/api/admin/services/auditor", body: `{"targetUrl":"http:///missing"}`},
+		{name: "uppercase", path: "/api/admin/services/Auditor", body: fmt.Sprintf(`{"targetUrl":"http://127.0.0.1:3000","tokenId":%q}`, token.ID)},
+		{name: "dot", path: "/api/admin/services/auditor.dev", body: fmt.Sprintf(`{"targetUrl":"http://127.0.0.1:3000","tokenId":%q}`, token.ID)},
+		{name: "reserved", path: "/api/admin/services/admin", body: fmt.Sprintf(`{"targetUrl":"http://127.0.0.1:3000","tokenId":%q}`, token.ID)},
+		{name: "bad target", path: "/api/admin/services/auditor", body: fmt.Sprintf(`{"targetUrl":"ftp://127.0.0.1:3000","tokenId":%q}`, token.ID)},
+		{name: "missing host", path: "/api/admin/services/auditor", body: fmt.Sprintf(`{"targetUrl":"http:///missing","tokenId":%q}`, token.ID)},
+		{name: "missing token", path: "/api/admin/services/auditor", body: `{"targetUrl":"http://127.0.0.1:3000"}`},
 	}
 
 	for _, tc := range cases {
@@ -170,6 +180,66 @@ func TestServicePublishValidation(t *testing.T) {
 				t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
 			}
 		})
+	}
+}
+
+func TestCreateRouteRequiresActiveToken(t *testing.T) {
+	server, db := newAdminTestServer(t)
+	token := createAdminTestToken(t, db, "mac-mini")
+	req := authedAdminRequest(http.MethodPost, "/api/admin/routes", fmt.Sprintf(`{"publicHost":"app.example.com","targetUrl":"http://127.0.0.1:3000","active":true,"tokenId":%q}`, token.ID))
+	rec := httptest.NewRecorder()
+
+	server.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var route store.Route
+	if err := json.NewDecoder(rec.Body).Decode(&route); err != nil {
+		t.Fatalf("decode route: %v", err)
+	}
+	if route.TokenID != token.ID {
+		t.Fatalf("route token id = %q", route.TokenID)
+	}
+
+	req = authedAdminRequest(http.MethodPost, "/api/admin/routes", `{"publicHost":"bad.example.com","targetUrl":"http://127.0.0.1:3000","active":true}`)
+	rec = httptest.NewRecorder()
+	server.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("missing token status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestAgentsEndpointCombinesTokenConnectionAndRoutes(t *testing.T) {
+	server, db := newAdminTestServer(t)
+	token := createAdminTestToken(t, db, "mac-mini")
+	if _, err := db.CreateRoute(context.Background(), "app.example.com", "http://127.0.0.1:3000", true, token.ID); err != nil {
+		t.Fatalf("create route: %v", err)
+	}
+	session, peer := newAdminTestSession(t)
+	connectedAt := time.Now().UTC()
+	server.Manager.SetActive(&proxy.ActiveAgent{
+		SessionID:   "session_1",
+		TokenID:     token.ID,
+		RemoteAddr:  "127.0.0.1:50000",
+		ConnectedAt: connectedAt,
+		Yamux:       session,
+	})
+	defer peer.Close()
+
+	req := authedAdminRequest(http.MethodGet, "/api/admin/agents", "")
+	rec := httptest.NewRecorder()
+	server.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var agents []agentResponse
+	if err := json.NewDecoder(rec.Body).Decode(&agents); err != nil {
+		t.Fatalf("decode agents: %v", err)
+	}
+	if len(agents) != 1 || !agents[0].Online || agents[0].RouteCount != 1 || agents[0].Token.ID != token.ID {
+		t.Fatalf("unexpected agents response: %+v", agents)
 	}
 }
 
@@ -213,4 +283,35 @@ func decodeServiceResponse(t *testing.T, rec *httptest.ResponseRecorder) service
 		t.Fatalf("decode service response: %v", err)
 	}
 	return response
+}
+
+func createAdminTestToken(t *testing.T, db *store.DB, name string) store.TunnelToken {
+	t.Helper()
+	raw, err := auth.NewToken()
+	if err != nil {
+		t.Fatalf("new token: %v", err)
+	}
+	token, err := db.CreateToken(context.Background(), name, raw)
+	if err != nil {
+		t.Fatalf("create token: %v", err)
+	}
+	return token
+}
+
+func newAdminTestSession(t *testing.T) (*yamux.Session, *yamux.Session) {
+	t.Helper()
+	left, right := net.Pipe()
+	server, err := yamux.Server(left, yamux.DefaultConfig())
+	if err != nil {
+		t.Fatalf("start yamux server: %v", err)
+	}
+	client, err := yamux.Client(right, yamux.DefaultConfig())
+	if err != nil {
+		t.Fatalf("start yamux client: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = server.Close()
+		_ = client.Close()
+	})
+	return server, client
 }

@@ -55,6 +55,8 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.requireAuth(w, r, s.handleServices)
 	case path == "/tokens" || strings.HasPrefix(path, "/tokens/"):
 		s.requireAuth(w, r, s.handleTokens)
+	case path == "/agents" && r.Method == http.MethodGet:
+		s.requireAuth(w, r, s.handleAgents)
 	case path == "/sessions" && r.Method == http.MethodGet:
 		s.requireAuth(w, r, s.handleSessions)
 	case path == "/events" && r.Method == http.MethodGet:
@@ -134,7 +136,11 @@ func (s *Server) handleRoutes(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, err.Error())
 			return
 		}
-		route, err := s.DB.CreateRoute(r.Context(), payload.PublicHost, payload.TargetURL, payload.Active)
+		if err := s.validateActiveTokenID(r.Context(), payload.TokenID); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		route, err := s.DB.CreateRoute(r.Context(), payload.PublicHost, payload.TargetURL, payload.Active, payload.TokenID)
 		if err != nil {
 			s.writeInternal(w, "create route", err)
 			return
@@ -155,7 +161,11 @@ func (s *Server) handleRoutes(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, err.Error())
 			return
 		}
-		route, err := s.DB.UpdateRoute(r.Context(), id, payload.PublicHost, payload.TargetURL, payload.Active)
+		if err := s.validateActiveTokenID(r.Context(), payload.TokenID); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		route, err := s.DB.UpdateRoute(r.Context(), id, payload.PublicHost, payload.TargetURL, payload.Active, payload.TokenID)
 		if errors.Is(err, store.ErrNotFound) {
 			writeError(w, http.StatusNotFound, "route not found")
 			return
@@ -332,6 +342,10 @@ func (s *Server) handleServices(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, err.Error())
 			return
 		}
+		if err := s.validateActiveTokenID(r.Context(), payload.TokenID); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
 		active := true
 		if payload.Active != nil {
 			active = *payload.Active
@@ -339,12 +353,12 @@ func (s *Server) handleServices(w http.ResponseWriter, r *http.Request) {
 		route, err := s.DB.GetRouteByHost(r.Context(), publicHost)
 		switch {
 		case errors.Is(err, store.ErrNotFound):
-			route, err = s.DB.CreateRoute(r.Context(), publicHost, payload.TargetURL, active)
+			route, err = s.DB.CreateRoute(r.Context(), publicHost, payload.TargetURL, active, payload.TokenID)
 			if err == nil {
 				_ = s.DB.AddEvent(context.Background(), "service.published", "Service published", publicHost)
 			}
 		case err == nil:
-			route, err = s.DB.UpdateRoute(r.Context(), route.ID, publicHost, payload.TargetURL, active)
+			route, err = s.DB.UpdateRoute(r.Context(), route.ID, publicHost, payload.TargetURL, active, payload.TokenID)
 			if err == nil {
 				_ = s.DB.AddEvent(context.Background(), "service.updated", "Service updated", publicHost)
 			}
@@ -369,6 +383,54 @@ func (s *Server) handleServices(w http.ResponseWriter, r *http.Request) {
 	default:
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 	}
+}
+
+func (s *Server) handleAgents(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	tokens, err := s.DB.ListTokens(r.Context())
+	if err != nil {
+		s.writeInternal(w, "list tokens for agents", err)
+		return
+	}
+	routes, err := s.DB.ListRoutes(r.Context())
+	if err != nil {
+		s.writeInternal(w, "list routes for agents", err)
+		return
+	}
+	routesByToken := make(map[string][]store.Route)
+	for _, route := range routes {
+		if route.TokenID == "" {
+			continue
+		}
+		routesByToken[route.TokenID] = append(routesByToken[route.TokenID], route)
+	}
+	activeByToken := make(map[string]proxy.ActiveAgentMetric)
+	for _, agent := range s.Manager.ActiveAgents() {
+		activeByToken[agent.TokenID] = agent
+	}
+	agents := make([]agentResponse, 0, len(tokens))
+	for _, token := range tokens {
+		routes := routesByToken[token.ID]
+		if routes == nil {
+			routes = []store.Route{}
+		}
+		response := agentResponse{
+			Token:      token,
+			Routes:     routes,
+			RouteCount: len(routes),
+		}
+		if active, ok := activeByToken[token.ID]; ok {
+			response.Online = true
+			response.SessionID = active.SessionID
+			response.RemoteAddr = active.RemoteAddr
+			response.ConnectedAt = &active.ConnectedAt
+		}
+		agents = append(agents, response)
+	}
+	writeJSON(w, http.StatusOK, agents)
 }
 
 func (s *Server) handleSessions(w http.ResponseWriter, r *http.Request) {
@@ -443,6 +505,7 @@ func (s *Server) withCORS(w http.ResponseWriter, r *http.Request) {
 type routePayload struct {
 	PublicHost string `json:"publicHost"`
 	TargetURL  string `json:"targetUrl"`
+	TokenID    string `json:"tokenId"`
 	Active     bool   `json:"active"`
 }
 
@@ -453,17 +516,24 @@ func (p routePayload) Validate() error {
 	if strings.TrimSpace(p.TargetURL) == "" {
 		return errors.New("targetUrl is required")
 	}
-	return nil
+	if strings.TrimSpace(p.TokenID) == "" {
+		return errors.New("tokenId is required")
+	}
+	return validateTargetURL(p.TargetURL)
 }
 
 type servicePayload struct {
 	TargetURL string `json:"targetUrl"`
+	TokenID   string `json:"tokenId"`
 	Active    *bool  `json:"active"`
 }
 
 func (p servicePayload) Validate() error {
 	if strings.TrimSpace(p.TargetURL) == "" {
 		return errors.New("targetUrl is required")
+	}
+	if strings.TrimSpace(p.TokenID) == "" {
+		return errors.New("tokenId is required")
 	}
 	return validateTargetURL(p.TargetURL)
 }
@@ -472,6 +542,16 @@ type servicePublishResponse struct {
 	Route      store.Route `json:"route"`
 	PublicHost string      `json:"publicHost"`
 	PublicURL  string      `json:"publicUrl"`
+}
+
+type agentResponse struct {
+	Token       store.TunnelToken `json:"token"`
+	Online      bool              `json:"online"`
+	SessionID   string            `json:"sessionId,omitempty"`
+	RemoteAddr  string            `json:"remoteAddr,omitempty"`
+	ConnectedAt *time.Time        `json:"connectedAt,omitempty"`
+	Routes      []store.Route     `json:"routes"`
+	RouteCount  int               `json:"routeCount"`
 }
 
 func (s *Server) servicePublicHost(name string) string {
@@ -528,6 +608,19 @@ func validateTargetURL(raw string) error {
 	}
 	if parsed.Host == "" {
 		return errors.New("targetUrl must include a host")
+	}
+	return nil
+}
+
+func (s *Server) validateActiveTokenID(ctx context.Context, tokenID string) error {
+	if strings.TrimSpace(tokenID) == "" {
+		return errors.New("tokenId is required")
+	}
+	if _, err := s.DB.GetActiveToken(ctx, tokenID); err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return errors.New("tokenId must reference an active token")
+		}
+		return err
 	}
 	return nil
 }

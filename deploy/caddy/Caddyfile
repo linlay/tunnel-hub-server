@@ -2,8 +2,18 @@
 	email admin@tunnel-hub.zenmind.cc
 }
 
-admin.tunnel-hub.zenmind.cc {
-	reverse_proxy relay:8080
+tunnel-hub.zenmind.cc {
+	handle /api/admin* {
+		reverse_proxy relay:8080
+	}
+
+	handle /tunnel {
+		reverse_proxy relay:8080
+	}
+
+	handle {
+		reverse_proxy website:80
+	}
 }
 
 # Public wildcard routes require DNS for *.tunnel-hub.zenmind.cc.

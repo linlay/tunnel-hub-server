@@ -23,6 +23,7 @@ type Route struct {
 	ID         string    `json:"id"`
 	PublicHost string    `json:"publicHost"`
 	TargetURL  string    `json:"targetUrl"`
+	TokenID    string    `json:"tokenId,omitempty"`
 	Active     bool      `json:"active"`
 	CreatedAt  time.Time `json:"createdAt"`
 	UpdatedAt  time.Time `json:"updatedAt"`
@@ -82,8 +83,10 @@ func (db *DB) Close() error {
 }
 
 func (db *DB) Migrate(ctx context.Context) error {
-	_, err := db.sql.ExecContext(ctx, schema)
-	return err
+	if _, err := db.sql.ExecContext(ctx, schema); err != nil {
+		return err
+	}
+	return db.ensureRouteTokenIDColumn(ctx)
 }
 
 func (db *DB) BootstrapAdmin(ctx context.Context, username, password string) error {
@@ -119,30 +122,31 @@ func (db *DB) ValidateAdmin(ctx context.Context, username, password string) (boo
 	return auth.VerifySecret(password, hash), nil
 }
 
-func (db *DB) CreateRoute(ctx context.Context, publicHost, targetURL string, active bool) (Route, error) {
+func (db *DB) CreateRoute(ctx context.Context, publicHost, targetURL string, active bool, tokenID string) (Route, error) {
 	now := time.Now().UTC()
 	route := Route{
 		ID:         newID("route"),
 		PublicHost: tunnel.NormalizeHost(publicHost),
 		TargetURL:  strings.TrimSpace(targetURL),
+		TokenID:    strings.TrimSpace(tokenID),
 		Active:     active,
 		CreatedAt:  now,
 		UpdatedAt:  now,
 	}
 	_, err := db.sql.ExecContext(ctx, `
-		INSERT INTO routes (id, public_host, target_url, active, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?)
-	`, route.ID, route.PublicHost, route.TargetURL, route.Active, route.CreatedAt, route.UpdatedAt)
+		INSERT INTO routes (id, public_host, target_url, token_id, active, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?)
+	`, route.ID, route.PublicHost, route.TargetURL, nullableTokenID(route.TokenID), route.Active, route.CreatedAt, route.UpdatedAt)
 	return route, err
 }
 
-func (db *DB) UpdateRoute(ctx context.Context, id, publicHost, targetURL string, active bool) (Route, error) {
+func (db *DB) UpdateRoute(ctx context.Context, id, publicHost, targetURL string, active bool, tokenID string) (Route, error) {
 	now := time.Now().UTC()
 	result, err := db.sql.ExecContext(ctx, `
 		UPDATE routes
-		SET public_host = ?, target_url = ?, active = ?, updated_at = ?
+		SET public_host = ?, target_url = ?, token_id = ?, active = ?, updated_at = ?
 		WHERE id = ?
-	`, tunnel.NormalizeHost(publicHost), strings.TrimSpace(targetURL), active, now, id)
+	`, tunnel.NormalizeHost(publicHost), strings.TrimSpace(targetURL), nullableTokenID(tokenID), active, now, id)
 	if err != nil {
 		return Route{}, err
 	}
@@ -173,7 +177,7 @@ func (db *DB) DeleteRoute(ctx context.Context, id string) error {
 
 func (db *DB) GetRoute(ctx context.Context, id string) (Route, error) {
 	row := db.sql.QueryRowContext(ctx, `
-		SELECT id, public_host, target_url, active, created_at, updated_at
+		SELECT id, public_host, target_url, token_id, active, created_at, updated_at
 		FROM routes WHERE id = ?
 	`, id)
 	return scanRoute(row)
@@ -181,7 +185,7 @@ func (db *DB) GetRoute(ctx context.Context, id string) (Route, error) {
 
 func (db *DB) GetRouteByHost(ctx context.Context, host string) (Route, error) {
 	row := db.sql.QueryRowContext(ctx, `
-		SELECT id, public_host, target_url, active, created_at, updated_at
+		SELECT id, public_host, target_url, token_id, active, created_at, updated_at
 		FROM routes WHERE public_host = ?
 	`, tunnel.NormalizeHost(host))
 	return scanRoute(row)
@@ -189,8 +193,8 @@ func (db *DB) GetRouteByHost(ctx context.Context, host string) (Route, error) {
 
 func (db *DB) GetActiveRouteByHost(ctx context.Context, host string) (Route, error) {
 	row := db.sql.QueryRowContext(ctx, `
-		SELECT id, public_host, target_url, active, created_at, updated_at
-		FROM routes WHERE public_host = ? AND active = 1
+		SELECT id, public_host, target_url, token_id, active, created_at, updated_at
+		FROM routes WHERE public_host = ? AND active = 1 AND token_id IS NOT NULL AND token_id != ''
 	`, tunnel.NormalizeHost(host))
 	return scanRoute(row)
 }
@@ -212,7 +216,7 @@ func (db *DB) DeleteRouteByHost(ctx context.Context, host string) error {
 
 func (db *DB) ListRoutes(ctx context.Context) ([]Route, error) {
 	rows, err := db.sql.QueryContext(ctx, `
-		SELECT id, public_host, target_url, active, created_at, updated_at
+		SELECT id, public_host, target_url, token_id, active, created_at, updated_at
 		FROM routes ORDER BY public_host ASC
 	`)
 	if err != nil {
@@ -280,6 +284,14 @@ func (db *DB) TouchToken(ctx context.Context, id string) error {
 		UPDATE tunnel_tokens SET last_used_at = ? WHERE id = ?
 	`, time.Now().UTC(), id)
 	return err
+}
+
+func (db *DB) GetActiveToken(ctx context.Context, id string) (TunnelToken, error) {
+	row := db.sql.QueryRowContext(ctx, `
+		SELECT id, name, token_hash, token_prefix, active, created_at, last_used_at
+		FROM tunnel_tokens WHERE id = ? AND active = 1
+	`, id)
+	return scanToken(row)
 }
 
 func (db *DB) ListTokens(ctx context.Context) ([]TunnelToken, error) {
@@ -490,11 +502,18 @@ type rowScanner interface {
 
 func scanRoute(row rowScanner) (Route, error) {
 	var route Route
-	err := row.Scan(&route.ID, &route.PublicHost, &route.TargetURL, &route.Active, &route.CreatedAt, &route.UpdatedAt)
+	var tokenID sql.NullString
+	err := row.Scan(&route.ID, &route.PublicHost, &route.TargetURL, &tokenID, &route.Active, &route.CreatedAt, &route.UpdatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Route{}, ErrNotFound
 	}
-	return route, err
+	if err != nil {
+		return Route{}, err
+	}
+	if tokenID.Valid {
+		route.TokenID = tokenID.String
+	}
+	return route, nil
 }
 
 func scanToken(row rowScanner) (TunnelToken, error) {
@@ -556,6 +575,40 @@ func tokenPrefix(token string) string {
 	return token[:12]
 }
 
+func nullableTokenID(tokenID string) any {
+	tokenID = strings.TrimSpace(tokenID)
+	if tokenID == "" {
+		return nil
+	}
+	return tokenID
+}
+
+func (db *DB) ensureRouteTokenIDColumn(ctx context.Context) error {
+	rows, err := db.sql.QueryContext(ctx, `PRAGMA table_info(routes)`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid int
+		var name, columnType string
+		var notNull int
+		var defaultValue any
+		var pk int
+		if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &pk); err != nil {
+			return err
+		}
+		if name == "token_id" {
+			return nil
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	_, err = db.sql.ExecContext(ctx, `ALTER TABLE routes ADD COLUMN token_id TEXT`)
+	return err
+}
+
 const schema = `
 CREATE TABLE IF NOT EXISTS admin_users (
 	id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -588,9 +641,11 @@ CREATE TABLE IF NOT EXISTS routes (
 	id TEXT PRIMARY KEY,
 	public_host TEXT NOT NULL UNIQUE,
 	target_url TEXT NOT NULL,
+	token_id TEXT,
 	active BOOLEAN NOT NULL DEFAULT 1,
 	created_at TIMESTAMP NOT NULL,
-	updated_at TIMESTAMP NOT NULL
+	updated_at TIMESTAMP NOT NULL,
+	FOREIGN KEY (token_id) REFERENCES tunnel_tokens(id)
 );
 
 CREATE TABLE IF NOT EXISTS agent_sessions (
