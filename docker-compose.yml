@@ -1,5 +1,7 @@
+name: tunnel-hub
+
 services:
-  relay:
+  server:
     build:
       context: .
       dockerfile: Dockerfile
@@ -15,3 +17,4 @@ services:
 
 volumes:
   relay-data:
+    name: tunnel-hub-server_relay-data
