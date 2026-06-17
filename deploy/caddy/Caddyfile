@@ -7,6 +7,10 @@ tunnel-hub.zenmind.cc {
 		reverse_proxy relay:8080
 	}
 
+	handle /api/desktop* {
+		reverse_proxy relay:8080
+	}
+
 	handle /tunnel {
 		reverse_proxy relay:8080
 	}

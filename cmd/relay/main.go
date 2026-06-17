@@ -13,6 +13,7 @@ import (
 
 	"github.com/linlay/zenmind-tunnel-server/internal/admin"
 	"github.com/linlay/zenmind-tunnel-server/internal/config"
+	desktopapi "github.com/linlay/zenmind-tunnel-server/internal/desktop"
 	"github.com/linlay/zenmind-tunnel-server/internal/proxy"
 	"github.com/linlay/zenmind-tunnel-server/internal/store"
 	"github.com/linlay/zenmind-tunnel-server/internal/tunnel"
@@ -37,12 +38,15 @@ func main() {
 	manager := proxy.NewManager()
 	relay := proxy.NewRelay(db, manager, logger, cfg.MaxRequestBodyBytes)
 	adminServer := admin.NewServer(db, manager, cfg, logger)
+	desktopServer := desktopapi.NewServer(db, cfg, logger)
 	static := staticHandler(cfg.WebsiteDist)
 
 	root := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.URL.Path == "/tunnel":
 			relay.HandleTunnel(w, r)
+		case strings.HasPrefix(r.URL.Path, "/api/desktop"):
+			desktopServer.ServeHTTP(w, r)
 		case strings.HasPrefix(r.URL.Path, "/api/admin"):
 			adminServer.ServeHTTP(w, r)
 		case cfg.AdminHost != "" && tunnel.NormalizeHost(r.Host) == tunnel.NormalizeHost(cfg.AdminHost) && static != nil:

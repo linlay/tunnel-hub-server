@@ -13,7 +13,11 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-var ErrNotFound = errors.New("not found")
+var (
+	ErrNotFound                   = errors.New("not found")
+	ErrInvalidDesktopDeviceSecret = errors.New("invalid desktop device secret")
+	ErrDesktopDeviceHostConflict  = errors.New("desktop device host already exists")
+)
 
 type DB struct {
 	sql *sql.DB
@@ -47,6 +51,34 @@ type AdminAPIKey struct {
 	Active     bool       `json:"active"`
 	CreatedAt  time.Time  `json:"createdAt"`
 	LastUsedAt *time.Time `json:"lastUsedAt,omitempty"`
+}
+
+type DesktopDevice struct {
+	DeviceID         string    `json:"deviceId"`
+	DeviceSecretHash string    `json:"-"`
+	TokenID          string    `json:"tokenId"`
+	RouteID          string    `json:"routeId"`
+	PublicHost       string    `json:"publicHost"`
+	TargetURL        string    `json:"targetUrl"`
+	CreatedAt        time.Time `json:"createdAt"`
+	UpdatedAt        time.Time `json:"updatedAt"`
+}
+
+type RegisterDesktopDeviceInput struct {
+	DeviceID     string
+	DeviceSecret string
+	PublicHost   string
+	TargetURL    string
+	RotateToken  bool
+}
+
+type RegisterDesktopDeviceResult struct {
+	Device     DesktopDevice
+	Route      Route
+	Token      TunnelToken
+	AgentToken string
+	Created    bool
+	Rotated    bool
 }
 
 type AgentSession struct {
@@ -331,6 +363,78 @@ func (db *DB) DeactivateToken(ctx context.Context, id string) error {
 	return nil
 }
 
+func (db *DB) RegisterDesktopDevice(ctx context.Context, input RegisterDesktopDeviceInput) (RegisterDesktopDeviceResult, error) {
+	input.DeviceID = strings.TrimSpace(input.DeviceID)
+	input.PublicHost = tunnel.NormalizeHost(input.PublicHost)
+	input.TargetURL = strings.TrimSpace(input.TargetURL)
+	if input.DeviceID == "" {
+		return RegisterDesktopDeviceResult{}, errors.New("deviceId is required")
+	}
+	if strings.TrimSpace(input.DeviceSecret) == "" {
+		return RegisterDesktopDeviceResult{}, errors.New("deviceSecret is required")
+	}
+	if input.PublicHost == "" {
+		return RegisterDesktopDeviceResult{}, errors.New("publicHost is required")
+	}
+	if input.TargetURL == "" {
+		return RegisterDesktopDeviceResult{}, errors.New("targetUrl is required")
+	}
+
+	tx, err := db.sql.BeginTx(ctx, nil)
+	if err != nil {
+		return RegisterDesktopDeviceResult{}, err
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+
+	device, err := getDesktopDeviceTx(ctx, tx, input.DeviceID)
+	if errors.Is(err, ErrNotFound) {
+		result, err := createDesktopDeviceRegistration(ctx, tx, input)
+		if err != nil {
+			return RegisterDesktopDeviceResult{}, err
+		}
+		if err := tx.Commit(); err != nil {
+			return RegisterDesktopDeviceResult{}, err
+		}
+		committed = true
+		return result, nil
+	}
+	if err != nil {
+		return RegisterDesktopDeviceResult{}, err
+	}
+	if !auth.VerifySecret(input.DeviceSecret, device.DeviceSecretHash) {
+		return RegisterDesktopDeviceResult{}, ErrInvalidDesktopDeviceSecret
+	}
+
+	token, rawToken, err := tokenForDesktopRegistration(ctx, tx, device.TokenID, input.DeviceID, input.RotateToken)
+	if err != nil {
+		return RegisterDesktopDeviceResult{}, err
+	}
+	route, err := updateDesktopRouteTx(ctx, tx, device.RouteID, input.PublicHost, input.TargetURL, token.ID)
+	if err != nil {
+		return RegisterDesktopDeviceResult{}, err
+	}
+	device, err = updateDesktopDeviceTx(ctx, tx, device.DeviceID, token.ID, route.ID, route.PublicHost, route.TargetURL)
+	if err != nil {
+		return RegisterDesktopDeviceResult{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return RegisterDesktopDeviceResult{}, err
+	}
+	committed = true
+	return RegisterDesktopDeviceResult{
+		Device:     device,
+		Route:      route,
+		Token:      token,
+		AgentToken: rawToken,
+		Rotated:    input.RotateToken,
+	}, nil
+}
+
 func (db *DB) CreateAdminAPIKey(ctx context.Context, name, rawKey string) (AdminAPIKey, error) {
 	hash, err := auth.HashSecret(rawKey)
 	if err != nil {
@@ -496,6 +600,213 @@ func (db *DB) ListEvents(ctx context.Context, limit int) ([]Event, error) {
 	return events, rows.Err()
 }
 
+func createDesktopDeviceRegistration(ctx context.Context, tx *sql.Tx, input RegisterDesktopDeviceInput) (RegisterDesktopDeviceResult, error) {
+	if _, err := getRouteByHostTx(ctx, tx, input.PublicHost); err == nil {
+		return RegisterDesktopDeviceResult{}, ErrDesktopDeviceHostConflict
+	} else if !errors.Is(err, ErrNotFound) {
+		return RegisterDesktopDeviceResult{}, err
+	}
+	rawToken, err := auth.NewToken()
+	if err != nil {
+		return RegisterDesktopDeviceResult{}, err
+	}
+	token, err := insertTokenTx(ctx, tx, "desktop:"+input.DeviceID, rawToken)
+	if err != nil {
+		return RegisterDesktopDeviceResult{}, err
+	}
+	route, err := insertRouteTx(ctx, tx, input.PublicHost, input.TargetURL, true, token.ID)
+	if err != nil {
+		return RegisterDesktopDeviceResult{}, err
+	}
+	secretHash, err := auth.HashSecret(input.DeviceSecret)
+	if err != nil {
+		return RegisterDesktopDeviceResult{}, err
+	}
+	now := time.Now().UTC()
+	device := DesktopDevice{
+		DeviceID:         input.DeviceID,
+		DeviceSecretHash: secretHash,
+		TokenID:          token.ID,
+		RouteID:          route.ID,
+		PublicHost:       route.PublicHost,
+		TargetURL:        route.TargetURL,
+		CreatedAt:        now,
+		UpdatedAt:        now,
+	}
+	_, err = tx.ExecContext(ctx, `
+		INSERT INTO desktop_devices (device_id, device_secret_hash, token_id, route_id, public_host, target_url, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+	`, device.DeviceID, device.DeviceSecretHash, device.TokenID, device.RouteID, device.PublicHost, device.TargetURL, device.CreatedAt, device.UpdatedAt)
+	if err != nil {
+		return RegisterDesktopDeviceResult{}, err
+	}
+	return RegisterDesktopDeviceResult{
+		Device:     device,
+		Route:      route,
+		Token:      token,
+		AgentToken: rawToken,
+		Created:    true,
+	}, nil
+}
+
+func tokenForDesktopRegistration(ctx context.Context, tx *sql.Tx, oldTokenID, deviceID string, rotate bool) (TunnelToken, string, error) {
+	if !rotate {
+		token, err := getTokenByIDTx(ctx, tx, oldTokenID)
+		return token, "", err
+	}
+	if err := deactivateTokenTx(ctx, tx, oldTokenID); err != nil && !errors.Is(err, ErrNotFound) {
+		return TunnelToken{}, "", err
+	}
+	rawToken, err := auth.NewToken()
+	if err != nil {
+		return TunnelToken{}, "", err
+	}
+	token, err := insertTokenTx(ctx, tx, "desktop:"+deviceID, rawToken)
+	if err != nil {
+		return TunnelToken{}, "", err
+	}
+	return token, rawToken, nil
+}
+
+func insertTokenTx(ctx context.Context, tx *sql.Tx, name, rawToken string) (TunnelToken, error) {
+	hash, err := auth.HashSecret(rawToken)
+	if err != nil {
+		return TunnelToken{}, err
+	}
+	now := time.Now().UTC()
+	token := TunnelToken{
+		ID:          newID("token"),
+		Name:        strings.TrimSpace(name),
+		TokenHash:   hash,
+		TokenPrefix: tokenPrefix(rawToken),
+		Active:      true,
+		CreatedAt:   now,
+	}
+	_, err = tx.ExecContext(ctx, `
+		INSERT INTO tunnel_tokens (id, name, token_hash, token_prefix, active, created_at)
+		VALUES (?, ?, ?, ?, ?, ?)
+	`, token.ID, token.Name, token.TokenHash, token.TokenPrefix, token.Active, token.CreatedAt)
+	return token, err
+}
+
+func getTokenByIDTx(ctx context.Context, tx *sql.Tx, id string) (TunnelToken, error) {
+	row := tx.QueryRowContext(ctx, `
+		SELECT id, name, token_hash, token_prefix, active, created_at, last_used_at
+		FROM tunnel_tokens WHERE id = ?
+	`, id)
+	return scanToken(row)
+}
+
+func deactivateTokenTx(ctx context.Context, tx *sql.Tx, id string) error {
+	result, err := tx.ExecContext(ctx, `UPDATE tunnel_tokens SET active = 0 WHERE id = ?`, id)
+	if err != nil {
+		return err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func insertRouteTx(ctx context.Context, tx *sql.Tx, publicHost, targetURL string, active bool, tokenID string) (Route, error) {
+	now := time.Now().UTC()
+	route := Route{
+		ID:         newID("route"),
+		PublicHost: tunnel.NormalizeHost(publicHost),
+		TargetURL:  strings.TrimSpace(targetURL),
+		TokenID:    strings.TrimSpace(tokenID),
+		Active:     active,
+		CreatedAt:  now,
+		UpdatedAt:  now,
+	}
+	_, err := tx.ExecContext(ctx, `
+		INSERT INTO routes (id, public_host, target_url, token_id, active, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?)
+	`, route.ID, route.PublicHost, route.TargetURL, nullableTokenID(route.TokenID), route.Active, route.CreatedAt, route.UpdatedAt)
+	return route, err
+}
+
+func updateDesktopRouteTx(ctx context.Context, tx *sql.Tx, routeID, publicHost, targetURL, tokenID string) (Route, error) {
+	route, err := updateRouteByIDTx(ctx, tx, routeID, publicHost, targetURL, true, tokenID)
+	if !errors.Is(err, ErrNotFound) {
+		return route, err
+	}
+	if _, hostErr := getRouteByHostTx(ctx, tx, publicHost); hostErr == nil {
+		return Route{}, ErrDesktopDeviceHostConflict
+	} else if !errors.Is(hostErr, ErrNotFound) {
+		return Route{}, hostErr
+	}
+	return insertRouteTx(ctx, tx, publicHost, targetURL, true, tokenID)
+}
+
+func updateRouteByIDTx(ctx context.Context, tx *sql.Tx, id, publicHost, targetURL string, active bool, tokenID string) (Route, error) {
+	now := time.Now().UTC()
+	result, err := tx.ExecContext(ctx, `
+		UPDATE routes
+		SET public_host = ?, target_url = ?, token_id = ?, active = ?, updated_at = ?
+		WHERE id = ?
+	`, tunnel.NormalizeHost(publicHost), strings.TrimSpace(targetURL), nullableTokenID(tokenID), active, now, id)
+	if err != nil {
+		return Route{}, err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return Route{}, err
+	}
+	if affected == 0 {
+		return Route{}, ErrNotFound
+	}
+	return getRouteByIDTx(ctx, tx, id)
+}
+
+func getRouteByIDTx(ctx context.Context, tx *sql.Tx, id string) (Route, error) {
+	row := tx.QueryRowContext(ctx, `
+		SELECT id, public_host, target_url, token_id, active, created_at, updated_at
+		FROM routes WHERE id = ?
+	`, id)
+	return scanRoute(row)
+}
+
+func getRouteByHostTx(ctx context.Context, tx *sql.Tx, host string) (Route, error) {
+	row := tx.QueryRowContext(ctx, `
+		SELECT id, public_host, target_url, token_id, active, created_at, updated_at
+		FROM routes WHERE public_host = ?
+	`, tunnel.NormalizeHost(host))
+	return scanRoute(row)
+}
+
+func getDesktopDeviceTx(ctx context.Context, tx *sql.Tx, deviceID string) (DesktopDevice, error) {
+	row := tx.QueryRowContext(ctx, `
+		SELECT device_id, device_secret_hash, token_id, route_id, public_host, target_url, created_at, updated_at
+		FROM desktop_devices WHERE device_id = ?
+	`, strings.TrimSpace(deviceID))
+	return scanDesktopDevice(row)
+}
+
+func updateDesktopDeviceTx(ctx context.Context, tx *sql.Tx, deviceID, tokenID, routeID, publicHost, targetURL string) (DesktopDevice, error) {
+	now := time.Now().UTC()
+	result, err := tx.ExecContext(ctx, `
+		UPDATE desktop_devices
+		SET token_id = ?, route_id = ?, public_host = ?, target_url = ?, updated_at = ?
+		WHERE device_id = ?
+	`, tokenID, routeID, tunnel.NormalizeHost(publicHost), strings.TrimSpace(targetURL), now, deviceID)
+	if err != nil {
+		return DesktopDevice{}, err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return DesktopDevice{}, err
+	}
+	if affected == 0 {
+		return DesktopDevice{}, ErrNotFound
+	}
+	return getDesktopDeviceTx(ctx, tx, deviceID)
+}
+
 type rowScanner interface {
 	Scan(dest ...any) error
 }
@@ -514,6 +825,27 @@ func scanRoute(row rowScanner) (Route, error) {
 		route.TokenID = tokenID.String
 	}
 	return route, nil
+}
+
+func scanDesktopDevice(row rowScanner) (DesktopDevice, error) {
+	var device DesktopDevice
+	err := row.Scan(
+		&device.DeviceID,
+		&device.DeviceSecretHash,
+		&device.TokenID,
+		&device.RouteID,
+		&device.PublicHost,
+		&device.TargetURL,
+		&device.CreatedAt,
+		&device.UpdatedAt,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return DesktopDevice{}, ErrNotFound
+	}
+	if err != nil {
+		return DesktopDevice{}, err
+	}
+	return device, nil
 }
 
 func scanToken(row rowScanner) (TunnelToken, error) {
@@ -643,6 +975,18 @@ CREATE TABLE IF NOT EXISTS routes (
 	target_url TEXT NOT NULL,
 	token_id TEXT,
 	active BOOLEAN NOT NULL DEFAULT 1,
+	created_at TIMESTAMP NOT NULL,
+	updated_at TIMESTAMP NOT NULL,
+	FOREIGN KEY (token_id) REFERENCES tunnel_tokens(id)
+);
+
+CREATE TABLE IF NOT EXISTS desktop_devices (
+	device_id TEXT PRIMARY KEY,
+	device_secret_hash TEXT NOT NULL,
+	token_id TEXT NOT NULL,
+	route_id TEXT NOT NULL,
+	public_host TEXT NOT NULL UNIQUE,
+	target_url TEXT NOT NULL,
 	created_at TIMESTAMP NOT NULL,
 	updated_at TIMESTAMP NOT NULL,
 	FOREIGN KEY (token_id) REFERENCES tunnel_tokens(id)

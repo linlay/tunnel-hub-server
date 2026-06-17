@@ -9,15 +9,16 @@ import (
 )
 
 type RelayConfig struct {
-	Addr                   string
-	DatabasePath           string
-	AdminHost              string
-	WebsiteDist            string
-	PublicBaseDomain       string
-	CookieSecret           string
-	BootstrapAdminUsername string
-	BootstrapAdminPassword string
-	MaxRequestBodyBytes    int64
+	Addr                      string
+	DatabasePath              string
+	AdminHost                 string
+	WebsiteDist               string
+	PublicBaseDomain          string
+	DesktopRegistrationSecret string
+	CookieSecret              string
+	BootstrapAdminUsername    string
+	BootstrapAdminPassword    string
+	MaxRequestBodyBytes       int64
 }
 
 type AgentConfig struct {
@@ -31,15 +32,16 @@ func LoadRelayConfig() RelayConfig {
 	loadDotEnv()
 
 	return RelayConfig{
-		Addr:                   env("RELAY_ADDR", ":8080"),
-		DatabasePath:           env("RELAY_DB_PATH", "zenmind-tunnel.db"),
-		AdminHost:              env("ADMIN_HOST", ""),
-		WebsiteDist:            env("WEBSITE_DIST", ""),
-		PublicBaseDomain:       env("PUBLIC_BASE_DOMAIN", "tunnel-hub.zenmind.cc"),
-		CookieSecret:           env("COOKIE_SECRET", randomSecret()),
-		BootstrapAdminUsername: env("BOOTSTRAP_ADMIN_USERNAME", "admin"),
-		BootstrapAdminPassword: env("BOOTSTRAP_ADMIN_PASSWORD", "admin"),
-		MaxRequestBodyBytes:    envInt64("MAX_REQUEST_BODY_BYTES", 64<<20),
+		Addr:                      env("RELAY_ADDR", ":8080"),
+		DatabasePath:              env("RELAY_DB_PATH", "zenmind-tunnel.db"),
+		AdminHost:                 env("ADMIN_HOST", ""),
+		WebsiteDist:               env("WEBSITE_DIST", ""),
+		PublicBaseDomain:          env("PUBLIC_BASE_DOMAIN", "tunnel-hub.zenmind.cc"),
+		DesktopRegistrationSecret: env("DESKTOP_REGISTRATION_SECRET", ""),
+		CookieSecret:              env("COOKIE_SECRET", randomSecret()),
+		BootstrapAdminUsername:    env("BOOTSTRAP_ADMIN_USERNAME", "admin"),
+		BootstrapAdminPassword:    env("BOOTSTRAP_ADMIN_PASSWORD", "admin"),
+		MaxRequestBodyBytes:       envInt64("MAX_REQUEST_BODY_BYTES", 64<<20),
 	}
 }
 
