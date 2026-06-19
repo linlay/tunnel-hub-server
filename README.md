@@ -20,20 +20,26 @@ Copy `.env.example` to `.env` for local development, then replace any placeholde
 | `ADMIN_HOST` | empty | Optional legacy admin hostname for Relay-served static files. Leave empty in the split website/server deployment. |
 | `WEBSITE_DIST` | empty | Optional legacy built website directory. Leave empty in the split website/server deployment. |
 | `PUBLIC_BASE_DOMAIN` | `tunnel-hub.zenmind.cc` | Base domain used by `/api/admin/services/{name}`. |
+| `ADMIN_USERNAME` | `admin` | Bootstrap username for local management website login. |
+| `ADMIN_PASSWORD` | empty | Bootstrap password for local management website login. Leave empty to skip local admin creation. |
+| `ADMIN_SESSION_TTL` | `24h` | Local admin login cookie lifetime. |
+| `COOKIE_SECURE` | `false` | Whether local admin cookies are HTTPS-only. |
 | `SSO_JWT_ISSUER` | empty | Expected issuer for official-site SSO JWTs. Required. |
 | `SSO_JWT_PUBLIC_KEY_FILE` | empty | PEM public key file used to verify SSO JWTs. |
 | `SSO_JWT_PUBLIC_KEY_PEM` | empty | PEM public key value fallback; supports escaped `\n`. |
 | `SSO_JWT_AUDIENCE` | `zenmind-tunnel-hub-server` | Required JWT audience. |
 | `MAX_REQUEST_BODY_BYTES` | `67108864` | Maximum buffered HTTP request body. |
 
-Do not commit key material or production secrets. Keep the SSO JWT public key in the ignored project-local file `configs/zenmind-sso-jwt-public.pem`, then mount `./configs` read-only in production. `SSO_JWT_ISSUER` must exactly match the issuer configured by the official-site server.
+Do not commit key material or production secrets. Keep the SSO JWT public key in the ignored project-local file `configs/jwt-public.pem`, then mount `./configs` read-only in production. `SSO_JWT_ISSUER` must exactly match the issuer configured by the official-site server.
 
 Export the public key from the official-site JWT private key:
 
 ```bash
 mkdir -p configs
-openssl pkey -in /path/to/official-sso-private.pem -pubout -out configs/zenmind-sso-jwt-public.pem
+openssl pkey -in /path/to/official-sso-private.pem -pubout -out configs/jwt-public.pem
 ```
+
+The management website can log in with the local admin username/password and uses an HttpOnly `tunnel_hub_session` cookie. Admin API calls also accept an official-site SSO JWT with `role=admin` and `scope` containing `tunnel`.
 
 ## Agent Environment
 
@@ -67,16 +73,16 @@ This creates or updates `auditor.tunnel-hub.zenmind.cc` and binds it to the sele
 
 ## Desktop Device Registration API
 
-Desktop registration also uses an official-site SSO JWT with `scope` containing `tunnel`:
+Desktop registration must use an official-site SSO JWT with `scope` containing `tunnel`; local admin cookies are not accepted for Desktop registration:
 
 ```bash
 curl -X POST https://tunnel-hub.zenmind.cc/api/desktop/devices/register \
   -H "Authorization: Bearer $ZENMIND_OFFICIAL_JWT" \
   -H "Content-Type: application/json" \
-  -d '{"deviceId":"mac-mini","deviceSecret":"desktop-generated-persistent-secret","targetUrl":"http://127.0.0.1:7082","rotateToken":false}'
+  -d '{"deviceId":"mac-mini","targetUrl":"http://127.0.0.1:7082","rotateToken":false}'
 ```
 
-The first successful registration creates a tunnel token and an active route for `mac-mini.tunnel-hub.zenmind.cc`. Re-registering the same `deviceId` requires a JWT for the same `user_id` and the same `deviceSecret`, reuses the existing route and token, and updates `targetUrl`. Set `rotateToken` to `true` to invalidate the old tunnel token and receive a new `agentToken`.
+The first successful registration creates a tunnel token and an active route for `mac-mini.tunnel-hub.zenmind.cc`. Re-registering the same `deviceId` requires a JWT for the same `user_id`, reuses the existing route and token, and updates `targetUrl`. Set `rotateToken` to `true` to invalidate the old tunnel token and receive a new `agentToken`. Legacy `deviceSecret` request fields are ignored.
 
 Phones can then connect to the Desktop total WebSocket through `wss://mac-mini.tunnel-hub.zenmind.cc/ws`. The original Admin service publish API above remains unchanged for webapp/service tunnels.
 

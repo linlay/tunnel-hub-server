@@ -33,12 +33,12 @@ var (
 
 func TestRegisterRequiresOfficialJWT(t *testing.T) {
 	server, _ := newDesktopTestServer(t)
-	rec := performRegister(t, server, desktopRegisterBody("mac-mini", "device-secret", "http://127.0.0.1:7082", false), "")
+	rec := performRegister(t, server, desktopRegisterBody("mac-mini", "http://127.0.0.1:7082", false), "")
 	if rec.Code != http.StatusUnauthorized {
 		t.Fatalf("missing JWT status = %d, body = %s", rec.Code, rec.Body.String())
 	}
 
-	rec = performRegister(t, server, desktopRegisterBody("mac-mini", "device-secret", "http://127.0.0.1:7082", false), "register-secret")
+	rec = performRegister(t, server, desktopRegisterBody("mac-mini", "http://127.0.0.1:7082", false), "register-secret")
 	if rec.Code != http.StatusUnauthorized {
 		t.Fatalf("legacy secret status = %d, body = %s", rec.Code, rec.Body.String())
 	}
@@ -46,7 +46,7 @@ func TestRegisterRequiresOfficialJWT(t *testing.T) {
 
 func TestRegisterDesktopDeviceCreatesTokenAndRoute(t *testing.T) {
 	server, db := newDesktopTestServer(t)
-	rec := performRegister(t, server, desktopRegisterBody("mac-mini", "device-secret", "http://127.0.0.1:7082", false), defaultDesktopJWT)
+	rec := performRegister(t, server, desktopRegisterBody("mac-mini", "http://127.0.0.1:7082", false), defaultDesktopJWT)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
 	}
@@ -101,7 +101,7 @@ func TestRegisterDesktopDeviceAcceptsSSOJWT(t *testing.T) {
 		Expires:  time.Now().Add(time.Hour),
 	})
 
-	rec := performRegister(t, server, desktopRegisterBody("jwt-device", "device-secret", "http://127.0.0.1:7082", false), token)
+	rec := performRegister(t, server, desktopRegisterBody("jwt-device", "http://127.0.0.1:7082", false), token)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("JWT registration status = %d body = %s", rec.Code, rec.Body.String())
 	}
@@ -122,7 +122,7 @@ func TestRegisterDesktopDeviceAcceptsSSOJWT(t *testing.T) {
 		Scope:    "profile tunnel",
 		Expires:  time.Now().Add(time.Hour),
 	})
-	rec = performRegister(t, server, desktopRegisterBody("jwt-denied", "device-secret", "http://127.0.0.1:7082", false), wrongAudienceToken)
+	rec = performRegister(t, server, desktopRegisterBody("jwt-denied", "http://127.0.0.1:7082", false), wrongAudienceToken)
 	if rec.Code != http.StatusUnauthorized {
 		t.Fatalf("wrong audience status = %d body = %s", rec.Code, rec.Body.String())
 	}
@@ -136,7 +136,7 @@ func TestRegisterDesktopDeviceAcceptsSSOJWT(t *testing.T) {
 		Scope:    "profile market",
 		Expires:  time.Now().Add(time.Hour),
 	})
-	rec = performRegister(t, server, desktopRegisterBody("jwt-no-scope", "device-secret", "http://127.0.0.1:7082", false), noScopeToken)
+	rec = performRegister(t, server, desktopRegisterBody("jwt-no-scope", "http://127.0.0.1:7082", false), noScopeToken)
 	if rec.Code != http.StatusForbidden {
 		t.Fatalf("missing scope status = %d body = %s", rec.Code, rec.Body.String())
 	}
@@ -144,14 +144,9 @@ func TestRegisterDesktopDeviceAcceptsSSOJWT(t *testing.T) {
 
 func TestRegisterDesktopDeviceReusesExistingDevice(t *testing.T) {
 	server, db := newDesktopTestServer(t)
-	first := decodeRegisterResponse(t, performRegister(t, server, desktopRegisterBody("mac-mini", "device-secret", "http://127.0.0.1:7082", false), defaultDesktopJWT).Body)
+	first := decodeRegisterResponse(t, performRegister(t, server, desktopRegisterBody("mac-mini", "http://127.0.0.1:7082", false), defaultDesktopJWT).Body)
 
-	rec := performRegister(t, server, desktopRegisterBody("mac-mini", "wrong-secret", "http://127.0.0.1:7999", false), defaultDesktopJWT)
-	if rec.Code != http.StatusForbidden {
-		t.Fatalf("wrong secret status = %d, body = %s", rec.Code, rec.Body.String())
-	}
-
-	rec = performRegister(t, server, desktopRegisterBody("mac-mini", "device-secret", "http://127.0.0.1:7083", false), defaultDesktopJWT)
+	rec := performRegister(t, server, desktopRegisterBody("mac-mini", "http://127.0.0.1:7083", false), defaultDesktopJWT)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
 	}
@@ -171,9 +166,32 @@ func TestRegisterDesktopDeviceReusesExistingDevice(t *testing.T) {
 	}
 }
 
+func TestRegisterDesktopDeviceIgnoresLegacyDeviceSecret(t *testing.T) {
+	server, db := newDesktopTestServer(t)
+	firstBody := `{"deviceId":"mac-mini","deviceSecret":"old-secret","targetUrl":"http://127.0.0.1:7082","rotateToken":false}`
+	first := decodeRegisterResponse(t, performRegister(t, server, firstBody, defaultDesktopJWT).Body)
+
+	secondBody := `{"deviceId":"mac-mini","deviceSecret":"different-old-secret","targetUrl":"http://127.0.0.1:7083","rotateToken":false}`
+	rec := performRegister(t, server, secondBody, defaultDesktopJWT)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	second := decodeRegisterResponse(t, rec.Body)
+	if second.TokenID != first.TokenID || second.AgentToken != "" {
+		t.Fatalf("legacy deviceSecret affected registration: %+v", second)
+	}
+	route, err := db.GetRouteByHost(context.Background(), second.PublicHost)
+	if err != nil {
+		t.Fatalf("get route: %v", err)
+	}
+	if route.TargetURL != "http://127.0.0.1:7083" {
+		t.Fatalf("legacy deviceSecret prevented update: %+v", route)
+	}
+}
+
 func TestRegisterDesktopDeviceRejectsDifferentOwner(t *testing.T) {
 	server, db := newDesktopTestServer(t)
-	first := decodeRegisterResponse(t, performRegister(t, server, desktopRegisterBody("mac-mini", "device-secret", "http://127.0.0.1:7082", false), defaultDesktopJWT).Body)
+	first := decodeRegisterResponse(t, performRegister(t, server, desktopRegisterBody("mac-mini", "http://127.0.0.1:7082", false), defaultDesktopJWT).Body)
 	otherOwnerJWT := signTestSSOJWT(t, defaultDesktopPrivateKey, testSSOJWTClaims{
 		Issuer:   "https://official.example.test",
 		Audience: "zenmind-tunnel-hub-server",
@@ -184,7 +202,7 @@ func TestRegisterDesktopDeviceRejectsDifferentOwner(t *testing.T) {
 		Expires:  time.Now().Add(time.Hour),
 	})
 
-	rec := performRegister(t, server, desktopRegisterBody("mac-mini", "device-secret", "http://127.0.0.1:7083", false), otherOwnerJWT)
+	rec := performRegister(t, server, desktopRegisterBody("mac-mini", "http://127.0.0.1:7083", false), otherOwnerJWT)
 	if rec.Code != http.StatusForbidden {
 		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
 	}
@@ -199,9 +217,9 @@ func TestRegisterDesktopDeviceRejectsDifferentOwner(t *testing.T) {
 
 func TestRegisterDesktopDeviceRotatesToken(t *testing.T) {
 	server, db := newDesktopTestServer(t)
-	first := decodeRegisterResponse(t, performRegister(t, server, desktopRegisterBody("mac-mini", "device-secret", "http://127.0.0.1:7082", false), defaultDesktopJWT).Body)
+	first := decodeRegisterResponse(t, performRegister(t, server, desktopRegisterBody("mac-mini", "http://127.0.0.1:7082", false), defaultDesktopJWT).Body)
 
-	rec := performRegister(t, server, desktopRegisterBody("mac-mini", "device-secret", "http://127.0.0.1:7082", true), defaultDesktopJWT)
+	rec := performRegister(t, server, desktopRegisterBody("mac-mini", "http://127.0.0.1:7082", true), defaultDesktopJWT)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
 	}
@@ -272,7 +290,7 @@ func TestDesktopRegistrationTunnelWebSocketIntegration(t *testing.T) {
 	}))
 	defer server.Close()
 
-	registration := postRegisterHTTP(t, server.URL, desktopRegisterBody("mac-mini", "device-secret", desktopWS.URL, false))
+	registration := postRegisterHTTP(t, server.URL, desktopRegisterBody("mac-mini", desktopWS.URL, false))
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go func() {
@@ -452,12 +470,12 @@ func decodeRegisterResponse(t *testing.T, body io.Reader) registerResponse {
 	return response
 }
 
-func desktopRegisterBody(deviceID, deviceSecret, targetURL string, rotateToken bool) string {
+func desktopRegisterBody(deviceID, targetURL string, rotateToken bool) string {
 	rotate := "false"
 	if rotateToken {
 		rotate = "true"
 	}
-	return `{"deviceId":"` + deviceID + `","deviceSecret":"` + deviceSecret + `","targetUrl":"` + targetURL + `","rotateToken":` + rotate + `}`
+	return `{"deviceId":"` + deviceID + `","targetUrl":"` + targetURL + `","rotateToken":` + rotate + `}`
 }
 
 func waitForDesktopAgentToken(t *testing.T, manager *proxy.Manager, tokenID string) {

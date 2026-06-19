@@ -12,6 +12,10 @@ type RelayConfig struct {
 	AdminHost           string
 	WebsiteDist         string
 	PublicBaseDomain    string
+	AdminUsername       string
+	AdminPassword       string
+	AdminSessionTTL     time.Duration
+	CookieSecure        bool
 	SSOJWTIssuer        string
 	SSOJWTPublicKeyFile string
 	SSOJWTPublicKeyPEM  string
@@ -35,6 +39,10 @@ func LoadRelayConfig() RelayConfig {
 		AdminHost:           env("ADMIN_HOST", ""),
 		WebsiteDist:         env("WEBSITE_DIST", ""),
 		PublicBaseDomain:    env("PUBLIC_BASE_DOMAIN", "tunnel-hub.zenmind.cc"),
+		AdminUsername:       env("ADMIN_USERNAME", env("BOOTSTRAP_ADMIN_USERNAME", "admin")),
+		AdminPassword:       env("ADMIN_PASSWORD", os.Getenv("BOOTSTRAP_ADMIN_PASSWORD")),
+		AdminSessionTTL:     envDuration("ADMIN_SESSION_TTL", 24*time.Hour),
+		CookieSecure:        envBool("COOKIE_SECURE", false),
 		SSOJWTIssuer:        env("SSO_JWT_ISSUER", ""),
 		SSOJWTPublicKeyFile: env("SSO_JWT_PUBLIC_KEY_FILE", ""),
 		SSOJWTPublicKeyPEM:  env("SSO_JWT_PUBLIC_KEY_PEM", ""),
@@ -80,6 +88,18 @@ func envInt64(key string, fallback int64) int64 {
 	}
 	parsed, err := strconv.ParseInt(value, 10, 64)
 	if err != nil {
+		return fallback
+	}
+	return parsed
+}
+
+func envDuration(key string, fallback time.Duration) time.Duration {
+	value := os.Getenv(key)
+	if value == "" {
+		return fallback
+	}
+	parsed, err := time.ParseDuration(value)
+	if err != nil || parsed <= 0 {
 		return fallback
 	}
 	return parsed

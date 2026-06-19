@@ -31,6 +31,17 @@ func main() {
 	if err := db.Migrate(context.Background()); err != nil {
 		log.Fatalf("migrate db: %v", err)
 	}
+	if cfg.AdminPassword != "" {
+		user, created, err := db.EnsureAdminUser(context.Background(), cfg.AdminUsername, cfg.AdminPassword)
+		if err != nil {
+			log.Fatalf("bootstrap admin user: %v", err)
+		}
+		if created {
+			logger.Info("created bootstrap admin user", "username", user.Username)
+		}
+	} else if count, err := db.AdminUserCount(context.Background()); err == nil && count == 0 {
+		logger.Info("no local admin users configured; set ADMIN_USERNAME and ADMIN_PASSWORD to enable direct admin login")
+	}
 	manager := proxy.NewManager()
 	relay := proxy.NewRelay(db, manager, logger, cfg.MaxRequestBodyBytes)
 	adminServer, err := admin.NewServer(db, manager, cfg, logger)

@@ -85,6 +85,64 @@ func TestAdminSSOJWTBearerAuth(t *testing.T) {
 	}
 }
 
+func TestAdminLocalLoginCookieAuth(t *testing.T) {
+	server, db := newAdminTestServer(t)
+	if _, _, err := db.EnsureAdminUser(context.Background(), "admin", "secret"); err != nil {
+		t.Fatalf("ensure admin user: %v", err)
+	}
+
+	loginReq := httptest.NewRequest(http.MethodPost, "/api/admin/login", strings.NewReader(`{"username":"admin","password":"secret"}`))
+	loginReq.Header.Set("Content-Type", "application/json")
+	loginRec := httptest.NewRecorder()
+	server.ServeHTTP(loginRec, loginReq)
+	if loginRec.Code != http.StatusOK {
+		t.Fatalf("login status = %d body = %s", loginRec.Code, loginRec.Body.String())
+	}
+	cookies := loginRec.Result().Cookies()
+	if len(cookies) == 0 || cookies[0].Name != adminSessionCookieName || !cookies[0].HttpOnly {
+		t.Fatalf("session cookie not set correctly: %#v", cookies)
+	}
+	var loginResponse map[string]any
+	if err := json.NewDecoder(loginRec.Body).Decode(&loginResponse); err != nil {
+		t.Fatalf("decode login response: %v", err)
+	}
+	if loginResponse["username"] != "admin" || loginResponse["source"] != "local" || loginResponse["role"] != "admin" {
+		t.Fatalf("unexpected login response: %#v", loginResponse)
+	}
+
+	meReq := httptest.NewRequest(http.MethodGet, "/api/admin/me", nil)
+	meReq.AddCookie(cookies[0])
+	meRec := httptest.NewRecorder()
+	server.ServeHTTP(meRec, meReq)
+	if meRec.Code != http.StatusOK {
+		t.Fatalf("me status = %d body = %s", meRec.Code, meRec.Body.String())
+	}
+
+	routesReq := httptest.NewRequest(http.MethodGet, "/api/admin/routes", nil)
+	routesReq.AddCookie(cookies[0])
+	routesRec := httptest.NewRecorder()
+	server.ServeHTTP(routesRec, routesReq)
+	if routesRec.Code != http.StatusOK {
+		t.Fatalf("routes status = %d body = %s", routesRec.Code, routesRec.Body.String())
+	}
+
+	logoutReq := httptest.NewRequest(http.MethodPost, "/api/admin/logout", nil)
+	logoutReq.AddCookie(cookies[0])
+	logoutRec := httptest.NewRecorder()
+	server.ServeHTTP(logoutRec, logoutReq)
+	if logoutRec.Code != http.StatusOK {
+		t.Fatalf("logout status = %d body = %s", logoutRec.Code, logoutRec.Body.String())
+	}
+
+	routesReq = httptest.NewRequest(http.MethodGet, "/api/admin/routes", nil)
+	routesReq.AddCookie(cookies[0])
+	routesRec = httptest.NewRecorder()
+	server.ServeHTTP(routesRec, routesReq)
+	if routesRec.Code != http.StatusUnauthorized {
+		t.Fatalf("routes after logout status = %d body = %s", routesRec.Code, routesRec.Body.String())
+	}
+}
+
 func TestAdminJWTRejectsMissingOrInvalidClaims(t *testing.T) {
 	privateKey, publicKeyPEM := testSSOJWTKey(t)
 	server, _ := newAdminTestServerWithConfig(t, config.RelayConfig{

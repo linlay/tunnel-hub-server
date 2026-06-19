@@ -17,7 +17,6 @@ var (
 	ErrNotFound                   = errors.New("not found")
 	ErrDesktopDeviceHostConflict  = errors.New("desktop device host already exists")
 	ErrDesktopDeviceOwnerMismatch = errors.New("desktop device belongs to another user")
-	ErrInvalidDesktopDeviceSecret = errors.New("invalid desktop device secret")
 )
 
 type DB struct {
@@ -58,13 +57,12 @@ type DesktopDevice struct {
 }
 
 type RegisterDesktopDeviceInput struct {
-	DeviceID     string
-	OwnerUserID  string
-	OwnerEmail   string
-	DeviceSecret string
-	PublicHost   string
-	TargetURL    string
-	RotateToken  bool
+	DeviceID    string
+	OwnerUserID string
+	OwnerEmail  string
+	PublicHost  string
+	TargetURL   string
+	RotateToken bool
 }
 
 type RegisterDesktopDeviceResult struct {
@@ -111,6 +109,9 @@ func (db *DB) Close() error {
 
 func (db *DB) Migrate(ctx context.Context) error {
 	if _, err := db.sql.ExecContext(ctx, schema); err != nil {
+		return err
+	}
+	if err := db.ensureAdminUserColumns(ctx); err != nil {
 		return err
 	}
 	if err := db.ensureRouteTokenIDColumn(ctx); err != nil {
@@ -332,7 +333,6 @@ func (db *DB) RegisterDesktopDevice(ctx context.Context, input RegisterDesktopDe
 	input.DeviceID = strings.TrimSpace(input.DeviceID)
 	input.OwnerUserID = strings.TrimSpace(input.OwnerUserID)
 	input.OwnerEmail = strings.TrimSpace(input.OwnerEmail)
-	input.DeviceSecret = strings.TrimSpace(input.DeviceSecret)
 	input.PublicHost = tunnel.NormalizeHost(input.PublicHost)
 	input.TargetURL = strings.TrimSpace(input.TargetURL)
 	if input.DeviceID == "" {
@@ -340,9 +340,6 @@ func (db *DB) RegisterDesktopDevice(ctx context.Context, input RegisterDesktopDe
 	}
 	if input.OwnerUserID == "" {
 		return RegisterDesktopDeviceResult{}, errors.New("ownerUserId is required")
-	}
-	if input.DeviceSecret == "" {
-		return RegisterDesktopDeviceResult{}, errors.New("deviceSecret is required")
 	}
 	if input.PublicHost == "" {
 		return RegisterDesktopDeviceResult{}, errors.New("publicHost is required")
@@ -379,9 +376,6 @@ func (db *DB) RegisterDesktopDevice(ctx context.Context, input RegisterDesktopDe
 	}
 	if device.OwnerUserID != "" && device.OwnerUserID != input.OwnerUserID {
 		return RegisterDesktopDeviceResult{}, ErrDesktopDeviceOwnerMismatch
-	}
-	if device.DeviceSecretHash != "" && !auth.VerifySecret(input.DeviceSecret, device.DeviceSecretHash) {
-		return RegisterDesktopDeviceResult{}, ErrInvalidDesktopDeviceSecret
 	}
 	token, rawToken, err := tokenForDesktopRegistration(ctx, tx, device.TokenID, input.DeviceID, input.RotateToken)
 	if err != nil {
@@ -503,15 +497,11 @@ func createDesktopDeviceRegistration(ctx context.Context, tx *sql.Tx, input Regi
 		return RegisterDesktopDeviceResult{}, err
 	}
 	now := time.Now().UTC()
-	secretHash, err := auth.HashSecret(input.DeviceSecret)
-	if err != nil {
-		return RegisterDesktopDeviceResult{}, err
-	}
 	device := DesktopDevice{
 		DeviceID:         input.DeviceID,
 		OwnerUserID:      input.OwnerUserID,
 		OwnerEmail:       input.OwnerEmail,
-		DeviceSecretHash: secretHash,
+		DeviceSecretHash: "",
 		TokenID:          token.ID,
 		RouteID:          route.ID,
 		PublicHost:       route.PublicHost,
@@ -859,7 +849,20 @@ CREATE TABLE IF NOT EXISTS admin_users (
 	id INTEGER PRIMARY KEY AUTOINCREMENT,
 	username TEXT NOT NULL UNIQUE,
 	password_hash TEXT NOT NULL,
-	created_at TIMESTAMP NOT NULL
+	status TEXT NOT NULL DEFAULT 'active',
+	created_at TIMESTAMP NOT NULL,
+	updated_at TIMESTAMP NOT NULL,
+	last_login_at TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS admin_sessions (
+	id TEXT PRIMARY KEY,
+	user_id INTEGER NOT NULL,
+	session_hash TEXT NOT NULL UNIQUE,
+	expires_at TIMESTAMP NOT NULL,
+	created_at TIMESTAMP NOT NULL,
+	last_seen_at TIMESTAMP NOT NULL,
+	FOREIGN KEY(user_id) REFERENCES admin_users(id)
 );
 
 CREATE TABLE IF NOT EXISTS tunnel_tokens (
