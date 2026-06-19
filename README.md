@@ -16,7 +16,7 @@ Copy `.env.example` to `.env` for local development, then replace any placeholde
 | Name | Default | Purpose |
 | --- | --- | --- |
 | `RELAY_ADDR` | `:8080` | Relay listen address behind the TLS-terminating reverse proxy. |
-| `RELAY_DB_PATH` | `tunnel.db` | SQLite database path. |
+| `RELAY_DB_PATH` | `zenmind-tunnel.db` | SQLite database path. |
 | `ADMIN_HOST` | empty | Optional legacy admin hostname for Relay-served static files. Leave empty in the split website/server deployment. |
 | `WEBSITE_DIST` | empty | Optional legacy built website directory. Leave empty in the split website/server deployment. |
 | `PUBLIC_BASE_DOMAIN` | `tunnel-hub.zenmind.cc` | Base domain used by `/api/admin/services/{name}`. |

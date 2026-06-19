@@ -31,7 +31,7 @@ func LoadRelayConfig() RelayConfig {
 
 	return RelayConfig{
 		Addr:                env("RELAY_ADDR", ":8080"),
-		DatabasePath:        env("RELAY_DB_PATH", "tunnel.db"),
+		DatabasePath:        env("RELAY_DB_PATH", "zenmind-tunnel.db"),
 		AdminHost:           env("ADMIN_HOST", ""),
 		WebsiteDist:         env("WEBSITE_DIST", ""),
 		PublicBaseDomain:    env("PUBLIC_BASE_DOMAIN", "tunnel-hub.zenmind.cc"),

@@ -11,7 +11,7 @@ services:
       - .env
     environment:
       RELAY_ADDR: ":8080"
-      RELAY_DB_PATH: "/data/tunnel.db"
+      RELAY_DB_PATH: "/data/zenmind-tunnel.db"
       SSO_JWT_PUBLIC_KEY_FILE: "/configs/zenmind-sso-jwt-public.pem"
     ports:
       - "8080:8080"
