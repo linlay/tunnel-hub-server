@@ -2,6 +2,8 @@
 .env
 .env.local
 .local/
+configs/*.pem
+configs/*.key
 keys/*.pem
 keys/*.key
 *.db

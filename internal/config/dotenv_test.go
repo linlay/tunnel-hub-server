@@ -23,7 +23,7 @@ func TestLoadDotEnvFileParsesSupportedSyntax(t *testing.T) {
 # comment
 RELAY_ADDR=:9090
 export PUBLIC_BASE_DOMAIN="local.test"
-SSO_JWT_PUBLIC_KEY_FILE='.local/sso-jwt-public.pem'
+SSO_JWT_PUBLIC_KEY_FILE='configs/zenmind-sso-jwt-public.pem'
 EMPTY_VALUE=
 MAX_REQUEST_BODY_BYTES=1024 # inline comment
 INVALID LINE
@@ -43,7 +43,7 @@ INVALID LINE
 
 	assertEnv(t, "RELAY_ADDR", ":9090")
 	assertEnv(t, "PUBLIC_BASE_DOMAIN", "local.test")
-	assertEnv(t, "SSO_JWT_PUBLIC_KEY_FILE", ".local/sso-jwt-public.pem")
+	assertEnv(t, "SSO_JWT_PUBLIC_KEY_FILE", "configs/zenmind-sso-jwt-public.pem")
 	assertEnv(t, "EMPTY_VALUE", "")
 	assertEnv(t, "MAX_REQUEST_BODY_BYTES", "1024")
 }
