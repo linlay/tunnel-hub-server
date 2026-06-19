@@ -2,6 +2,8 @@
 .env
 .env.local
 .local/
+keys/*.pem
+keys/*.key
 *.db
 *.db-*
 node_modules/

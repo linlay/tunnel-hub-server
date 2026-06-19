@@ -2,7 +2,6 @@ package desktop
 
 import (
 	"context"
-	"crypto/hmac"
 	"encoding/json"
 	"errors"
 	"log/slog"
@@ -24,7 +23,7 @@ type Server struct {
 	ssoJWT *auth.SSOJWTVerifier
 }
 
-func NewServer(db *store.DB, cfg config.RelayConfig, logger *slog.Logger) *Server {
+func NewServer(db *store.DB, cfg config.RelayConfig, logger *slog.Logger) (*Server, error) {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -35,9 +34,9 @@ func NewServer(db *store.DB, cfg config.RelayConfig, logger *slog.Logger) *Serve
 		PublicKeyPEM:  cfg.SSOJWTPublicKeyPEM,
 	})
 	if err != nil {
-		logger.Error("configure SSO JWT verifier", "error", err)
+		return nil, err
 	}
-	return &Server{DB: db, Config: cfg, Logger: logger, ssoJWT: ssoJWT}
+	return &Server{DB: db, Config: cfg, Logger: logger, ssoJWT: ssoJWT}, nil
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -57,7 +56,8 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
-	if !s.authorizeRegistration(w, r) {
+	principal, ok := s.authorizeRegistration(w, r)
+	if !ok {
 		return
 	}
 	var payload registerPayload
@@ -74,14 +74,15 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 
 	publicHost := s.devicePublicHost(payload.DeviceID)
 	result, err := s.DB.RegisterDesktopDevice(r.Context(), store.RegisterDesktopDeviceInput{
-		DeviceID:     payload.DeviceID,
-		DeviceSecret: payload.DeviceSecret,
-		PublicHost:   publicHost,
-		TargetURL:    payload.TargetURL,
-		RotateToken:  payload.RotateToken,
+		DeviceID:    payload.DeviceID,
+		OwnerUserID: principal.UserID,
+		OwnerEmail:  principal.Email,
+		PublicHost:  publicHost,
+		TargetURL:   payload.TargetURL,
+		RotateToken: payload.RotateToken,
 	})
-	if errors.Is(err, store.ErrInvalidDesktopDeviceSecret) {
-		writeError(w, http.StatusForbidden, "invalid deviceSecret")
+	if errors.Is(err, store.ErrDesktopDeviceOwnerMismatch) {
+		writeError(w, http.StatusForbidden, "desktop device belongs to another user")
 		return
 	}
 	if errors.Is(err, store.ErrDesktopDeviceHostConflict) {
@@ -96,25 +97,30 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, s.registrationResponse(result))
 }
 
-func (s *Server) authorizeRegistration(w http.ResponseWriter, r *http.Request) bool {
-	if _, ok := s.ssoJWT.VerifyBearerHeader(r.Header.Get("Authorization")); ok {
-		return true
+func (s *Server) authorizeRegistration(w http.ResponseWriter, r *http.Request) (auth.SSOJWTPrincipal, bool) {
+	header := r.Header.Get("Authorization")
+	principal, err := s.ssoJWT.VerifyBearerHeader(header)
+	if err != nil {
+		if errors.Is(err, auth.ErrBearerTokenMissing) {
+			writeError(w, http.StatusUnauthorized, "official JWT required")
+			return auth.SSOJWTPrincipal{}, false
+		}
+		if errors.Is(err, auth.ErrSSOJWTNotConfigured) {
+			if strings.TrimSpace(header) == "" {
+				writeError(w, http.StatusUnauthorized, "official JWT required")
+				return auth.SSOJWTPrincipal{}, false
+			}
+			writeError(w, http.StatusServiceUnavailable, "official JWT verifier is not configured")
+			return auth.SSOJWTPrincipal{}, false
+		}
+		writeError(w, http.StatusUnauthorized, "invalid bearer token")
+		return auth.SSOJWTPrincipal{}, false
 	}
-	secret := strings.TrimSpace(s.Config.DesktopRegistrationSecret)
-	token := bearerToken(r.Header.Get("Authorization"))
-	if token != "" && secret == "" {
-		writeError(w, http.StatusUnauthorized, "invalid registration token")
-		return false
+	if !principal.HasScope("tunnel") {
+		writeError(w, http.StatusForbidden, "tunnel scope required")
+		return auth.SSOJWTPrincipal{}, false
 	}
-	if secret == "" {
-		writeError(w, http.StatusServiceUnavailable, "desktop registration is disabled")
-		return false
-	}
-	if token == "" || !hmac.Equal([]byte(token), []byte(secret)) {
-		writeError(w, http.StatusUnauthorized, "invalid registration token")
-		return false
-	}
-	return true
+	return principal, true
 }
 
 func (s *Server) addRegistrationEvent(result store.RegisterDesktopDeviceResult) {
@@ -166,18 +172,14 @@ func (s *Server) writeInternal(w http.ResponseWriter, message string, err error)
 }
 
 type registerPayload struct {
-	DeviceID     string `json:"deviceId"`
-	DeviceSecret string `json:"deviceSecret"`
-	TargetURL    string `json:"targetUrl"`
-	RotateToken  bool   `json:"rotateToken"`
+	DeviceID    string `json:"deviceId"`
+	TargetURL   string `json:"targetUrl"`
+	RotateToken bool   `json:"rotateToken"`
 }
 
 func (p registerPayload) Validate() error {
 	if err := validateDeviceID(p.DeviceID); err != nil {
 		return err
-	}
-	if strings.TrimSpace(p.DeviceSecret) == "" {
-		return errors.New("deviceSecret is required")
 	}
 	if strings.TrimSpace(p.TargetURL) == "" {
 		return errors.New("targetUrl is required")
@@ -247,14 +249,6 @@ func tunnelHost(host string) string {
 	host = strings.ToLower(strings.TrimSpace(host))
 	host = strings.TrimSuffix(host, ".")
 	return host
-}
-
-func bearerToken(header string) string {
-	const prefix = "Bearer "
-	if !strings.HasPrefix(header, prefix) {
-		return ""
-	}
-	return strings.TrimSpace(strings.TrimPrefix(header, prefix))
 }
 
 var reservedDeviceIDs = map[string]bool{

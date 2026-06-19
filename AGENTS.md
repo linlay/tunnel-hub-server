@@ -8,7 +8,7 @@
 
 - `cmd/relay`: Relay 入口，负责公网 HTTP/WebSocket、`/tunnel`、`/api/admin` 和可选前端静态托管。
 - `cmd/agent`: Agent 入口，负责连接 Relay 并转发到本地服务。
-- `internal/admin`: 管理 API、cookie session、路由和 token 操作。
+- `internal/admin`: JWT 保护的管理 API、公开 component 列表、路由和 token 操作。
 - `internal/proxy`: Relay/Agent 转发逻辑和 active agent 管理。
 - `internal/store`: SQLite schema、迁移和数据访问。
 - `internal/tunnel`: 隧道协议、WebSocket net.Conn 适配、header/path 处理。
@@ -59,7 +59,7 @@ docker compose up --build
 - `proxy.Manager` 按 `tokenId` 维护多个 active agent；同一 token 新连接会替换旧连接，不影响其他 token。路由必须绑定有效 active token 后才会参与公网转发，历史未绑定 route 只用于管理台补全。
 - HTTP 请求体在 Relay 侧完整缓冲，限制由 `MAX_REQUEST_BODY_BYTES` 控制；大文件/流式上传相关改动需要特别测试。
 - WebSocket 走自定义 frame 转发，帧大小限制在 `internal/tunnel/protocol.go` 中。
-- 管理 session 使用 `COOKIE_SECRET` 签名。生产部署文档和配置示例必须提醒用户设置稳定强 secret。
+- 管理/注册 API 只接受官网颁发的 SSO JWT；生产部署文档和配置示例必须提醒用户配置 `SSO_JWT_ISSUER` 和只读挂载的 public key。
 
 ## 推荐验证
 

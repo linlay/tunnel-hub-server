@@ -2,7 +2,9 @@ package store
 
 import (
 	"context"
+	"errors"
 	"testing"
+	"time"
 
 	"github.com/linlay/zenmind-tunnel-server/internal/auth"
 )
@@ -87,49 +89,100 @@ func TestTokenValidation(t *testing.T) {
 	}
 }
 
-func TestAdminAPIKeyCRUDAndLastUsed(t *testing.T) {
+func TestRegisterDesktopDeviceOwnership(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
 
-	raw, err := auth.NewAdminAPIKey()
+	first, err := db.RegisterDesktopDevice(ctx, RegisterDesktopDeviceInput{
+		DeviceID:    "mac-mini",
+		OwnerUserID: "42",
+		OwnerEmail:  "desktop.test",
+		PublicHost:  "mac-mini.tunnel-hub.zenmind.cc",
+		TargetURL:   "http://127.0.0.1:7082",
+	})
 	if err != nil {
-		t.Fatalf("new admin api key: %v", err)
+		t.Fatalf("register desktop device: %v", err)
 	}
-	key, err := db.CreateAdminAPIKey(ctx, "automation", raw)
-	if err != nil {
-		t.Fatalf("create admin api key: %v", err)
-	}
-	if key.KeyHash == raw {
-		t.Fatal("admin api key should be hashed")
-	}
-	if key.KeyPrefix != raw[:12] {
-		t.Fatalf("key prefix = %q", key.KeyPrefix)
+	if !first.Created || first.Device.OwnerUserID != "42" || first.AgentToken == "" {
+		t.Fatalf("unexpected first registration: %+v", first)
 	}
 
-	found, err := db.FindActiveAdminAPIKeyBySecret(ctx, raw)
+	second, err := db.RegisterDesktopDevice(ctx, RegisterDesktopDeviceInput{
+		DeviceID:    "mac-mini",
+		OwnerUserID: "42",
+		OwnerEmail:  "desktop.test",
+		PublicHost:  "mac-mini.tunnel-hub.zenmind.cc",
+		TargetURL:   "http://127.0.0.1:7083",
+	})
 	if err != nil {
-		t.Fatalf("find active admin api key: %v", err)
+		t.Fatalf("update desktop device: %v", err)
 	}
-	if found.ID != key.ID {
-		t.Fatalf("wrong admin api key: %s", found.ID)
+	if second.Created || second.Token.ID != first.Token.ID || second.AgentToken != "" || second.Device.TargetURL != "http://127.0.0.1:7083" {
+		t.Fatalf("unexpected second registration: %+v", second)
 	}
 
-	if err := db.TouchAdminAPIKey(ctx, key.ID); err != nil {
-		t.Fatalf("touch admin api key: %v", err)
+	_, err = db.RegisterDesktopDevice(ctx, RegisterDesktopDeviceInput{
+		DeviceID:    "mac-mini",
+		OwnerUserID: "43",
+		OwnerEmail:  "other.test",
+		PublicHost:  "mac-mini.tunnel-hub.zenmind.cc",
+		TargetURL:   "http://127.0.0.1:7999",
+	})
+	if !errors.Is(err, ErrDesktopDeviceOwnerMismatch) {
+		t.Fatalf("different owner should be rejected, got %v", err)
 	}
-	keys, err := db.ListAdminAPIKeys(ctx)
+	route, err := db.GetRouteByHost(ctx, "mac-mini.tunnel-hub.zenmind.cc")
 	if err != nil {
-		t.Fatalf("list admin api keys: %v", err)
+		t.Fatalf("get route: %v", err)
 	}
-	if len(keys) != 1 || keys[0].LastUsedAt == nil {
-		t.Fatalf("last used was not set: %+v", keys)
+	if route.TargetURL != "http://127.0.0.1:7083" {
+		t.Fatalf("different owner changed route: %+v", route)
+	}
+}
+
+func TestRegisterDesktopDeviceClaimsLegacyDevice(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+	token := createTestToken(t, db, "desktop:legacy")
+	route, err := db.CreateRoute(ctx, "legacy.tunnel-hub.zenmind.cc", "http://127.0.0.1:7082", true, token.ID)
+	if err != nil {
+		t.Fatalf("create route: %v", err)
+	}
+	now := time.Now().UTC()
+	secretHash, err := auth.HashSecret("legacy-secret")
+	if err != nil {
+		t.Fatalf("hash legacy secret: %v", err)
+	}
+	if _, err := db.sql.ExecContext(ctx, `
+		INSERT INTO desktop_devices (device_id, device_secret_hash, token_id, route_id, public_host, target_url, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+	`, "legacy", secretHash, token.ID, route.ID, route.PublicHost, route.TargetURL, now, now); err != nil {
+		t.Fatalf("insert legacy device: %v", err)
 	}
 
-	if err := db.DeactivateAdminAPIKey(ctx, key.ID); err != nil {
-		t.Fatalf("deactivate admin api key: %v", err)
+	result, err := db.RegisterDesktopDevice(ctx, RegisterDesktopDeviceInput{
+		DeviceID:    "legacy",
+		OwnerUserID: "42",
+		OwnerEmail:  "desktop.test",
+		PublicHost:  "legacy.tunnel-hub.zenmind.cc",
+		TargetURL:   "http://127.0.0.1:7083",
+	})
+	if err != nil {
+		t.Fatalf("claim legacy device: %v", err)
 	}
-	if _, err := db.FindActiveAdminAPIKeyBySecret(ctx, raw); err != ErrNotFound {
-		t.Fatalf("inactive admin api key should not validate, got %v", err)
+	if result.Device.OwnerUserID != "42" || result.Token.ID != token.ID || result.Device.TargetURL != "http://127.0.0.1:7083" {
+		t.Fatalf("unexpected legacy claim: %+v", result)
+	}
+
+	_, err = db.RegisterDesktopDevice(ctx, RegisterDesktopDeviceInput{
+		DeviceID:    "legacy",
+		OwnerUserID: "43",
+		OwnerEmail:  "other.test",
+		PublicHost:  "legacy.tunnel-hub.zenmind.cc",
+		TargetURL:   "http://127.0.0.1:7999",
+	})
+	if !errors.Is(err, ErrDesktopDeviceOwnerMismatch) {
+		t.Fatalf("claimed legacy device should reject different owner, got %v", err)
 	}
 }
 

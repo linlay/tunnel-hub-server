@@ -2,11 +2,15 @@ package admin
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"log/slog"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -16,8 +20,6 @@ import (
 	"github.com/linlay/zenmind-tunnel-server/internal/store"
 )
 
-const sessionCookie = "zenmind_admin"
-
 type Server struct {
 	DB      *store.DB
 	Manager *proxy.Manager
@@ -26,7 +28,9 @@ type Server struct {
 	ssoJWT  *auth.SSOJWTVerifier
 }
 
-func NewServer(db *store.DB, manager *proxy.Manager, cfg config.RelayConfig, logger *slog.Logger) *Server {
+const sessionCookie = "zenmind_admin"
+
+func NewServer(db *store.DB, manager *proxy.Manager, cfg config.RelayConfig, logger *slog.Logger) (*Server, error) {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -37,9 +41,9 @@ func NewServer(db *store.DB, manager *proxy.Manager, cfg config.RelayConfig, log
 		PublicKeyPEM:  cfg.SSOJWTPublicKeyPEM,
 	})
 	if err != nil {
-		logger.Error("configure SSO JWT verifier", "error", err)
+		return nil, err
 	}
-	return &Server{DB: db, Manager: manager, Config: cfg, Logger: logger, ssoJWT: ssoJWT}
+	return &Server{DB: db, Manager: manager, Config: cfg, Logger: logger, ssoJWT: ssoJWT}, nil
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -59,8 +63,6 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.requireAuth(w, r, s.handleMe)
 	case path == "/routes" || strings.HasPrefix(path, "/routes/"):
 		s.requireAuth(w, r, s.handleRoutes)
-	case path == "/api-keys" || strings.HasPrefix(path, "/api-keys/"):
-		s.requireAuth(w, r, s.handleAPIKeys)
 	case path == "/services" || strings.HasPrefix(path, "/services/"):
 		s.requireAuth(w, r, s.handleServices)
 	case path == "/tokens" || strings.HasPrefix(path, "/tokens/"):
@@ -78,52 +80,60 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
+	principal, _, _, _ := s.currentPrincipal(r)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"username": principalName(principal),
+		"userId":   principal.UserID,
+		"email":    principal.Email,
+		"role":     principal.Role,
+	})
+}
+
 func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
-	var payload struct {
-		Username string `json:"username"`
-		Password string `json:"password"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+	var payload loginPayload
+	if err := decodeJSON(r, &payload); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid json")
 		return
 	}
-	ok, err := s.DB.ValidateAdmin(r.Context(), payload.Username, payload.Password)
+	username := strings.TrimSpace(payload.Username)
+	ok, err := s.DB.ValidateAdmin(r.Context(), username, payload.Password)
 	if err != nil {
-		s.Logger.Error("validate admin", "error", err)
-		writeError(w, http.StatusInternalServerError, "login failed")
+		s.writeInternal(w, "validate admin login", err)
 		return
 	}
 	if !ok {
-		writeError(w, http.StatusUnauthorized, "invalid username or password")
+		writeError(w, http.StatusUnauthorized, "invalid credentials")
 		return
 	}
+	expires := time.Now().Add(24 * time.Hour)
 	http.SetCookie(w, &http.Cookie{
 		Name:     sessionCookie,
-		Value:    auth.SignSession(s.Config.CookieSecret, payload.Username, 24*time.Hour),
-		Path:     "/",
+		Value:    s.newSessionValue(username, expires),
+		Path:     "/api/admin",
+		Expires:  expires,
+		MaxAge:   int(time.Until(expires).Seconds()),
 		HttpOnly: true,
 		SameSite: http.SameSiteLaxMode,
-		Secure:   false,
-		MaxAge:   int((24 * time.Hour).Seconds()),
+		Secure:   r.TLS != nil,
 	})
-	writeJSON(w, http.StatusOK, map[string]any{"username": payload.Username})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"username": username,
+		"role":     "admin",
+	})
 }
 
 func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 	http.SetCookie(w, &http.Cookie{
 		Name:     sessionCookie,
 		Value:    "",
-		Path:     "/",
+		Path:     "/api/admin",
+		MaxAge:   -1,
 		HttpOnly: true,
 		SameSite: http.SameSiteLaxMode,
-		MaxAge:   -1,
+		Secure:   r.TLS != nil,
 	})
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
-}
-
-func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
-	principal, _ := s.currentPrincipal(r)
-	writeJSON(w, http.StatusOK, map[string]any{"username": principal})
 }
 
 func (s *Server) handleRoutes(w http.ResponseWriter, r *http.Request) {
@@ -257,62 +267,6 @@ func (s *Server) handleTokens(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		_ = s.DB.AddEvent(context.Background(), "token.deactivated", "Tunnel token deactivated", id)
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
-	default:
-		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
-	}
-}
-
-func (s *Server) handleAPIKeys(w http.ResponseWriter, r *http.Request) {
-	id := strings.TrimPrefix(strings.TrimPrefix(r.URL.Path, "/api/admin/api-keys"), "/")
-	switch r.Method {
-	case http.MethodGet:
-		keys, err := s.DB.ListAdminAPIKeys(r.Context())
-		if err != nil {
-			s.writeInternal(w, "list admin api keys", err)
-			return
-		}
-		writeJSON(w, http.StatusOK, keys)
-	case http.MethodPost:
-		var payload struct {
-			Name string `json:"name"`
-		}
-		if err := decodeJSON(r, &payload); err != nil {
-			writeError(w, http.StatusBadRequest, "invalid json")
-			return
-		}
-		payload.Name = strings.TrimSpace(payload.Name)
-		if payload.Name == "" {
-			writeError(w, http.StatusBadRequest, "name is required")
-			return
-		}
-		rawKey, err := auth.NewAdminAPIKey()
-		if err != nil {
-			s.writeInternal(w, "generate admin api key", err)
-			return
-		}
-		key, err := s.DB.CreateAdminAPIKey(r.Context(), payload.Name, rawKey)
-		if err != nil {
-			s.writeInternal(w, "create admin api key", err)
-			return
-		}
-		_ = s.DB.AddEvent(context.Background(), "admin_api_key.created", "Admin API key created", key.Name)
-		writeJSON(w, http.StatusCreated, map[string]any{"apiKey": key, "secret": rawKey})
-	case http.MethodDelete:
-		if id == "" {
-			writeError(w, http.StatusBadRequest, "api key id is required")
-			return
-		}
-		err := s.DB.DeactivateAdminAPIKey(r.Context(), id)
-		if errors.Is(err, store.ErrNotFound) {
-			writeError(w, http.StatusNotFound, "api key not found")
-			return
-		}
-		if err != nil {
-			s.writeInternal(w, "deactivate admin api key", err)
-			return
-		}
-		_ = s.DB.AddEvent(context.Background(), "admin_api_key.deactivated", "Admin API key deactivated", id)
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 	default:
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -465,39 +419,87 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, s.Manager.Metrics())
 }
 
+func (s *Server) ServeComponents(w http.ResponseWriter, r *http.Request) {
+	s.withCORS(w, r)
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	if r.URL.Path != "/api/components" {
+		writeError(w, http.StatusNotFound, "not found")
+		return
+	}
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	routes, err := s.DB.ListRoutes(r.Context())
+	if err != nil {
+		s.writeInternal(w, "list components", err)
+		return
+	}
+	components := make([]componentResponse, 0, len(routes))
+	for _, route := range routes {
+		components = append(components, componentResponse{
+			PublicHost: route.PublicHost,
+			PublicURL:  "https://" + route.PublicHost,
+			Active:     route.Active,
+			UpdatedAt:  route.UpdatedAt,
+		})
+	}
+	writeJSON(w, http.StatusOK, components)
+}
+
 func (s *Server) requireAuth(w http.ResponseWriter, r *http.Request, next http.HandlerFunc) {
-	if _, ok := s.currentPrincipal(r); !ok {
-		writeError(w, http.StatusUnauthorized, "authentication required")
+	if _, status, message, ok := s.currentPrincipal(r); !ok {
+		writeError(w, status, message)
 		return
 	}
 	next(w, r)
 }
 
-func (s *Server) currentPrincipal(r *http.Request) (string, bool) {
-	cookie, err := r.Cookie(sessionCookie)
-	if err == nil {
-		if username, ok := auth.VerifySession(s.Config.CookieSecret, cookie.Value); ok {
-			return username, true
-		}
+func (s *Server) currentPrincipal(r *http.Request) (auth.SSOJWTPrincipal, int, string, bool) {
+	if principal, ok := s.cookiePrincipal(r); ok {
+		return principal, 0, "", true
 	}
-	rawKey := bearerToken(r.Header.Get("Authorization"))
-	if rawKey == "" {
-		return "", false
-	}
-	if principal, ok := s.ssoJWT.VerifyBearerHeader(r.Header.Get("Authorization")); ok && principal.Role == "admin" {
-		return "sso:" + principal.UserID, true
-	}
-	key, err := s.DB.FindActiveAdminAPIKeyBySecret(r.Context(), rawKey)
+
+	header := r.Header.Get("Authorization")
+	principal, err := s.ssoJWT.VerifyBearerHeader(header)
 	if err != nil {
-		if !errors.Is(err, store.ErrNotFound) {
-			s.Logger.Error("validate admin api key", "error", err)
+		if errors.Is(err, auth.ErrBearerTokenMissing) {
+			return auth.SSOJWTPrincipal{}, http.StatusUnauthorized, "authentication required", false
 		}
-		return "", false
+		if errors.Is(err, auth.ErrSSOJWTNotConfigured) {
+			if strings.TrimSpace(header) == "" {
+				return auth.SSOJWTPrincipal{}, http.StatusUnauthorized, "authentication required", false
+			}
+			return auth.SSOJWTPrincipal{}, http.StatusServiceUnavailable, "official JWT verifier is not configured", false
+		}
+		return auth.SSOJWTPrincipal{}, http.StatusUnauthorized, "invalid bearer token", false
 	}
-	if err := s.DB.TouchAdminAPIKey(r.Context(), key.ID); err != nil {
-		s.Logger.Error("touch admin api key", "error", err)
+	if principal.Role != "admin" {
+		return auth.SSOJWTPrincipal{}, http.StatusForbidden, "admin role required", false
 	}
-	return "api-key:" + key.Name, true
+	if !principal.HasScope("tunnel") {
+		return auth.SSOJWTPrincipal{}, http.StatusForbidden, "tunnel scope required", false
+	}
+	return principal, 0, "", true
+}
+
+func (s *Server) cookiePrincipal(r *http.Request) (auth.SSOJWTPrincipal, bool) {
+	cookie, err := r.Cookie(sessionCookie)
+	if err != nil {
+		return auth.SSOJWTPrincipal{}, false
+	}
+	username, ok := s.verifySessionValue(cookie.Value)
+	if !ok {
+		return auth.SSOJWTPrincipal{}, false
+	}
+	return auth.SSOJWTPrincipal{
+		UserID: "local:" + username,
+		Role:   "admin",
+		Scope:  "tunnel",
+	}, true
 }
 
 func (s *Server) writeInternal(w http.ResponseWriter, message string, err error) {
@@ -555,6 +557,13 @@ type servicePublishResponse struct {
 	Route      store.Route `json:"route"`
 	PublicHost string      `json:"publicHost"`
 	PublicURL  string      `json:"publicUrl"`
+}
+
+type componentResponse struct {
+	PublicHost string    `json:"publicHost"`
+	PublicURL  string    `json:"publicUrl"`
+	Active     bool      `json:"active"`
+	UpdatedAt  time.Time `json:"updatedAt"`
 }
 
 type agentResponse struct {
@@ -644,12 +653,11 @@ func tunnelHost(host string) string {
 	return host
 }
 
-func bearerToken(header string) string {
-	const prefix = "Bearer "
-	if !strings.HasPrefix(header, prefix) {
-		return ""
+func principalName(principal auth.SSOJWTPrincipal) string {
+	if principal.Email != "" {
+		return principal.Email
 	}
-	return strings.TrimSpace(strings.TrimPrefix(header, prefix))
+	return "sso:" + principal.UserID
 }
 
 var reservedServiceNames = map[string]bool{

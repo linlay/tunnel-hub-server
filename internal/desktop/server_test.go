@@ -26,26 +26,27 @@ import (
 	"github.com/linlay/zenmind-tunnel-server/internal/store"
 )
 
-const testRegistrationSecret = "register-secret"
+var (
+	defaultDesktopJWT        string
+	defaultDesktopPrivateKey *rsa.PrivateKey
+)
 
-func TestRegisterRequiresRegistrationSecret(t *testing.T) {
+func TestRegisterRequiresOfficialJWT(t *testing.T) {
 	server, _ := newDesktopTestServer(t)
-	server.Config.DesktopRegistrationSecret = ""
 	rec := performRegister(t, server, desktopRegisterBody("mac-mini", "device-secret", "http://127.0.0.1:7082", false), "")
-	if rec.Code != http.StatusServiceUnavailable {
-		t.Fatalf("disabled status = %d, body = %s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("missing JWT status = %d, body = %s", rec.Code, rec.Body.String())
 	}
 
-	server.Config.DesktopRegistrationSecret = testRegistrationSecret
-	rec = performRegister(t, server, desktopRegisterBody("mac-mini", "device-secret", "http://127.0.0.1:7082", false), "wrong")
+	rec = performRegister(t, server, desktopRegisterBody("mac-mini", "device-secret", "http://127.0.0.1:7082", false), "register-secret")
 	if rec.Code != http.StatusUnauthorized {
-		t.Fatalf("wrong token status = %d, body = %s", rec.Code, rec.Body.String())
+		t.Fatalf("legacy secret status = %d, body = %s", rec.Code, rec.Body.String())
 	}
 }
 
 func TestRegisterDesktopDeviceCreatesTokenAndRoute(t *testing.T) {
 	server, db := newDesktopTestServer(t)
-	rec := performRegister(t, server, desktopRegisterBody("mac-mini", "device-secret", "http://127.0.0.1:7082", false), testRegistrationSecret)
+	rec := performRegister(t, server, desktopRegisterBody("mac-mini", "device-secret", "http://127.0.0.1:7082", false), defaultDesktopJWT)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
 	}
@@ -96,6 +97,7 @@ func TestRegisterDesktopDeviceAcceptsSSOJWT(t *testing.T) {
 		UserID:   "42",
 		Email:    "desktop@example.test",
 		Role:     "user",
+		Scope:    "profile tunnel",
 		Expires:  time.Now().Add(time.Hour),
 	})
 
@@ -117,19 +119,34 @@ func TestRegisterDesktopDeviceAcceptsSSOJWT(t *testing.T) {
 		UserID:   "42",
 		Email:    "desktop@example.test",
 		Role:     "user",
+		Scope:    "profile tunnel",
 		Expires:  time.Now().Add(time.Hour),
 	})
 	rec = performRegister(t, server, desktopRegisterBody("jwt-denied", "device-secret", "http://127.0.0.1:7082", false), wrongAudienceToken)
 	if rec.Code != http.StatusUnauthorized {
 		t.Fatalf("wrong audience status = %d body = %s", rec.Code, rec.Body.String())
 	}
+
+	noScopeToken := signTestSSOJWT(t, privateKey, testSSOJWTClaims{
+		Issuer:   "https://official.example.test",
+		Audience: "zenmind-tunnel-hub-server",
+		UserID:   "42",
+		Email:    "desktop@example.test",
+		Role:     "user",
+		Scope:    "profile market",
+		Expires:  time.Now().Add(time.Hour),
+	})
+	rec = performRegister(t, server, desktopRegisterBody("jwt-no-scope", "device-secret", "http://127.0.0.1:7082", false), noScopeToken)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("missing scope status = %d body = %s", rec.Code, rec.Body.String())
+	}
 }
 
 func TestRegisterDesktopDeviceReusesExistingDevice(t *testing.T) {
 	server, db := newDesktopTestServer(t)
-	first := decodeRegisterResponse(t, performRegister(t, server, desktopRegisterBody("mac-mini", "device-secret", "http://127.0.0.1:7082", false), testRegistrationSecret).Body)
+	first := decodeRegisterResponse(t, performRegister(t, server, desktopRegisterBody("mac-mini", "device-secret", "http://127.0.0.1:7082", false), defaultDesktopJWT).Body)
 
-	rec := performRegister(t, server, desktopRegisterBody("mac-mini", "device-secret", "http://127.0.0.1:7083", false), testRegistrationSecret)
+	rec := performRegister(t, server, desktopRegisterBody("mac-mini", "ignored-legacy-secret", "http://127.0.0.1:7083", false), defaultDesktopJWT)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
 	}
@@ -149,11 +166,20 @@ func TestRegisterDesktopDeviceReusesExistingDevice(t *testing.T) {
 	}
 }
 
-func TestRegisterDesktopDeviceRejectsWrongDeviceSecret(t *testing.T) {
+func TestRegisterDesktopDeviceRejectsDifferentOwner(t *testing.T) {
 	server, db := newDesktopTestServer(t)
-	first := decodeRegisterResponse(t, performRegister(t, server, desktopRegisterBody("mac-mini", "device-secret", "http://127.0.0.1:7082", false), testRegistrationSecret).Body)
+	first := decodeRegisterResponse(t, performRegister(t, server, desktopRegisterBody("mac-mini", "device-secret", "http://127.0.0.1:7082", false), defaultDesktopJWT).Body)
+	otherOwnerJWT := signTestSSOJWT(t, defaultDesktopPrivateKey, testSSOJWTClaims{
+		Issuer:   "https://official.example.test",
+		Audience: "zenmind-tunnel-hub-server",
+		UserID:   "43",
+		Email:    "other@example.test",
+		Role:     "user",
+		Scope:    "profile tunnel",
+		Expires:  time.Now().Add(time.Hour),
+	})
 
-	rec := performRegister(t, server, desktopRegisterBody("mac-mini", "wrong-secret", "http://127.0.0.1:7083", false), testRegistrationSecret)
+	rec := performRegister(t, server, desktopRegisterBody("mac-mini", "device-secret", "http://127.0.0.1:7083", false), otherOwnerJWT)
 	if rec.Code != http.StatusForbidden {
 		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
 	}
@@ -162,15 +188,15 @@ func TestRegisterDesktopDeviceRejectsWrongDeviceSecret(t *testing.T) {
 		t.Fatalf("get route: %v", err)
 	}
 	if route.TargetURL != "http://127.0.0.1:7082" || route.TokenID != first.TokenID {
-		t.Fatalf("wrong secret changed route: %+v", route)
+		t.Fatalf("different owner changed route: %+v", route)
 	}
 }
 
 func TestRegisterDesktopDeviceRotatesToken(t *testing.T) {
 	server, db := newDesktopTestServer(t)
-	first := decodeRegisterResponse(t, performRegister(t, server, desktopRegisterBody("mac-mini", "device-secret", "http://127.0.0.1:7082", false), testRegistrationSecret).Body)
+	first := decodeRegisterResponse(t, performRegister(t, server, desktopRegisterBody("mac-mini", "device-secret", "http://127.0.0.1:7082", false), defaultDesktopJWT).Body)
 
-	rec := performRegister(t, server, desktopRegisterBody("mac-mini", "device-secret", "http://127.0.0.1:7082", true), testRegistrationSecret)
+	rec := performRegister(t, server, desktopRegisterBody("mac-mini", "device-secret", "http://127.0.0.1:7082", true), defaultDesktopJWT)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
 	}
@@ -223,9 +249,12 @@ func TestDesktopRegistrationTunnelWebSocketIntegration(t *testing.T) {
 
 	db := openDesktopTestDB(t)
 	manager := proxy.NewManager()
-	cfg := desktopTestConfig()
+	cfg := desktopTestConfig(t)
 	relay := proxy.NewRelay(db, manager, nil, 64<<20)
-	desktopServer := NewServer(db, cfg, nil)
+	desktopServer, err := NewServer(db, cfg, nil)
+	if err != nil {
+		t.Fatalf("new desktop server: %v", err)
+	}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.URL.Path == "/tunnel":
@@ -277,13 +306,17 @@ func TestDesktopRegistrationTunnelWebSocketIntegration(t *testing.T) {
 
 func newDesktopTestServer(t *testing.T) (*Server, *store.DB) {
 	t.Helper()
-	return newDesktopTestServerWithConfig(t, desktopTestConfig())
+	return newDesktopTestServerWithConfig(t, desktopTestConfig(t))
 }
 
 func newDesktopTestServerWithConfig(t *testing.T, cfg config.RelayConfig) (*Server, *store.DB) {
 	t.Helper()
 	db := openDesktopTestDB(t)
-	return NewServer(db, cfg, nil), db
+	server, err := NewServer(db, cfg, nil)
+	if err != nil {
+		t.Fatalf("new desktop server: %v", err)
+	}
+	return server, db
 }
 
 func openDesktopTestDB(t *testing.T) *store.DB {
@@ -299,10 +332,24 @@ func openDesktopTestDB(t *testing.T) *store.DB {
 	return db
 }
 
-func desktopTestConfig() config.RelayConfig {
+func desktopTestConfig(t *testing.T) config.RelayConfig {
+	t.Helper()
+	privateKey, publicKeyPEM := testSSOJWTKey(t)
+	defaultDesktopPrivateKey = privateKey
+	defaultDesktopJWT = signTestSSOJWT(t, privateKey, testSSOJWTClaims{
+		Issuer:   "https://official.example.test",
+		Audience: "zenmind-tunnel-hub-server",
+		UserID:   "42",
+		Email:    "desktop@example.test",
+		Role:     "user",
+		Scope:    "profile tunnel",
+		Expires:  time.Now().Add(time.Hour),
+	})
 	return config.RelayConfig{
-		PublicBaseDomain:          "tunnel-hub.zenmind.cc",
-		DesktopRegistrationSecret: testRegistrationSecret,
+		PublicBaseDomain:   "tunnel-hub.zenmind.cc",
+		SSOJWTIssuer:       "https://official.example.test",
+		SSOJWTPublicKeyPEM: publicKeyPEM,
+		SSOJWTAudience:     "zenmind-tunnel-hub-server",
 	}
 }
 
@@ -324,6 +371,7 @@ type testSSOJWTClaims struct {
 	UserID   string
 	Email    string
 	Role     string
+	Scope    string
 	Expires  time.Time
 }
 
@@ -357,6 +405,7 @@ func signTestSSOJWT(t *testing.T, privateKey *rsa.PrivateKey, claims testSSOJWTC
 		"user_id": claims.UserID,
 		"email":   claims.Email,
 		"role":    claims.Role,
+		"scope":   claims.Scope,
 	})
 	headerPart := base64.RawURLEncoding.EncodeToString(headerJSON)
 	payloadPart := base64.RawURLEncoding.EncodeToString(claimsJSON)
@@ -376,7 +425,7 @@ func postRegisterHTTP(t *testing.T, baseURL, body string) registerResponse {
 		t.Fatalf("new request: %v", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+testRegistrationSecret)
+	req.Header.Set("Authorization", "Bearer "+defaultDesktopJWT)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("post register: %v", err)

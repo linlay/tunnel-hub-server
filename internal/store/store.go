@@ -15,8 +15,8 @@ import (
 
 var (
 	ErrNotFound                   = errors.New("not found")
-	ErrInvalidDesktopDeviceSecret = errors.New("invalid desktop device secret")
 	ErrDesktopDeviceHostConflict  = errors.New("desktop device host already exists")
+	ErrDesktopDeviceOwnerMismatch = errors.New("desktop device belongs to another user")
 )
 
 type DB struct {
@@ -43,18 +43,10 @@ type TunnelToken struct {
 	LastUsedAt  *time.Time `json:"lastUsedAt,omitempty"`
 }
 
-type AdminAPIKey struct {
-	ID         string     `json:"id"`
-	Name       string     `json:"name"`
-	KeyHash    string     `json:"-"`
-	KeyPrefix  string     `json:"keyPrefix"`
-	Active     bool       `json:"active"`
-	CreatedAt  time.Time  `json:"createdAt"`
-	LastUsedAt *time.Time `json:"lastUsedAt,omitempty"`
-}
-
 type DesktopDevice struct {
 	DeviceID         string    `json:"deviceId"`
+	OwnerUserID      string    `json:"ownerUserId,omitempty"`
+	OwnerEmail       string    `json:"ownerEmail,omitempty"`
 	DeviceSecretHash string    `json:"-"`
 	TokenID          string    `json:"tokenId"`
 	RouteID          string    `json:"routeId"`
@@ -65,11 +57,12 @@ type DesktopDevice struct {
 }
 
 type RegisterDesktopDeviceInput struct {
-	DeviceID     string
-	DeviceSecret string
-	PublicHost   string
-	TargetURL    string
-	RotateToken  bool
+	DeviceID    string
+	OwnerUserID string
+	OwnerEmail  string
+	PublicHost  string
+	TargetURL   string
+	RotateToken bool
 }
 
 type RegisterDesktopDeviceResult struct {
@@ -118,40 +111,10 @@ func (db *DB) Migrate(ctx context.Context) error {
 	if _, err := db.sql.ExecContext(ctx, schema); err != nil {
 		return err
 	}
-	return db.ensureRouteTokenIDColumn(ctx)
-}
-
-func (db *DB) BootstrapAdmin(ctx context.Context, username, password string) error {
-	var count int
-	if err := db.sql.QueryRowContext(ctx, `SELECT COUNT(*) FROM admin_users`).Scan(&count); err != nil {
+	if err := db.ensureRouteTokenIDColumn(ctx); err != nil {
 		return err
 	}
-	if count > 0 {
-		return nil
-	}
-	hash, err := auth.HashSecret(password)
-	if err != nil {
-		return err
-	}
-	_, err = db.sql.ExecContext(ctx, `
-		INSERT INTO admin_users (username, password_hash, created_at)
-		VALUES (?, ?, ?)
-	`, username, hash, time.Now().UTC())
-	return err
-}
-
-func (db *DB) ValidateAdmin(ctx context.Context, username, password string) (bool, error) {
-	var hash string
-	err := db.sql.QueryRowContext(ctx, `
-		SELECT password_hash FROM admin_users WHERE username = ?
-	`, username).Scan(&hash)
-	if errors.Is(err, sql.ErrNoRows) {
-		return false, nil
-	}
-	if err != nil {
-		return false, err
-	}
-	return auth.VerifySecret(password, hash), nil
+	return db.ensureDesktopDeviceOwnerColumns(ctx)
 }
 
 func (db *DB) CreateRoute(ctx context.Context, publicHost, targetURL string, active bool, tokenID string) (Route, error) {
@@ -365,13 +328,15 @@ func (db *DB) DeactivateToken(ctx context.Context, id string) error {
 
 func (db *DB) RegisterDesktopDevice(ctx context.Context, input RegisterDesktopDeviceInput) (RegisterDesktopDeviceResult, error) {
 	input.DeviceID = strings.TrimSpace(input.DeviceID)
+	input.OwnerUserID = strings.TrimSpace(input.OwnerUserID)
+	input.OwnerEmail = strings.TrimSpace(input.OwnerEmail)
 	input.PublicHost = tunnel.NormalizeHost(input.PublicHost)
 	input.TargetURL = strings.TrimSpace(input.TargetURL)
 	if input.DeviceID == "" {
 		return RegisterDesktopDeviceResult{}, errors.New("deviceId is required")
 	}
-	if strings.TrimSpace(input.DeviceSecret) == "" {
-		return RegisterDesktopDeviceResult{}, errors.New("deviceSecret is required")
+	if input.OwnerUserID == "" {
+		return RegisterDesktopDeviceResult{}, errors.New("ownerUserId is required")
 	}
 	if input.PublicHost == "" {
 		return RegisterDesktopDeviceResult{}, errors.New("publicHost is required")
@@ -406,10 +371,9 @@ func (db *DB) RegisterDesktopDevice(ctx context.Context, input RegisterDesktopDe
 	if err != nil {
 		return RegisterDesktopDeviceResult{}, err
 	}
-	if !auth.VerifySecret(input.DeviceSecret, device.DeviceSecretHash) {
-		return RegisterDesktopDeviceResult{}, ErrInvalidDesktopDeviceSecret
+	if device.OwnerUserID != "" && device.OwnerUserID != input.OwnerUserID {
+		return RegisterDesktopDeviceResult{}, ErrDesktopDeviceOwnerMismatch
 	}
-
 	token, rawToken, err := tokenForDesktopRegistration(ctx, tx, device.TokenID, input.DeviceID, input.RotateToken)
 	if err != nil {
 		return RegisterDesktopDeviceResult{}, err
@@ -418,7 +382,7 @@ func (db *DB) RegisterDesktopDevice(ctx context.Context, input RegisterDesktopDe
 	if err != nil {
 		return RegisterDesktopDeviceResult{}, err
 	}
-	device, err = updateDesktopDeviceTx(ctx, tx, device.DeviceID, token.ID, route.ID, route.PublicHost, route.TargetURL)
+	device, err = updateDesktopDeviceTx(ctx, tx, device.DeviceID, input.OwnerUserID, input.OwnerEmail, token.ID, route.ID, route.PublicHost, route.TargetURL)
 	if err != nil {
 		return RegisterDesktopDeviceResult{}, err
 	}
@@ -433,95 +397,6 @@ func (db *DB) RegisterDesktopDevice(ctx context.Context, input RegisterDesktopDe
 		AgentToken: rawToken,
 		Rotated:    input.RotateToken,
 	}, nil
-}
-
-func (db *DB) CreateAdminAPIKey(ctx context.Context, name, rawKey string) (AdminAPIKey, error) {
-	hash, err := auth.HashSecret(rawKey)
-	if err != nil {
-		return AdminAPIKey{}, err
-	}
-	now := time.Now().UTC()
-	key := AdminAPIKey{
-		ID:        newID("apikey"),
-		Name:      strings.TrimSpace(name),
-		KeyHash:   hash,
-		KeyPrefix: tokenPrefix(rawKey),
-		Active:    true,
-		CreatedAt: now,
-	}
-	_, err = db.sql.ExecContext(ctx, `
-		INSERT INTO admin_api_keys (id, name, key_hash, key_prefix, active, created_at)
-		VALUES (?, ?, ?, ?, ?, ?)
-	`, key.ID, key.Name, key.KeyHash, key.KeyPrefix, key.Active, key.CreatedAt)
-	return key, err
-}
-
-func (db *DB) FindActiveAdminAPIKeyBySecret(ctx context.Context, rawKey string) (AdminAPIKey, error) {
-	rows, err := db.sql.QueryContext(ctx, `
-		SELECT id, name, key_hash, key_prefix, active, created_at, last_used_at
-		FROM admin_api_keys WHERE active = 1
-	`)
-	if err != nil {
-		return AdminAPIKey{}, err
-	}
-	defer rows.Close()
-	for rows.Next() {
-		key, err := scanAdminAPIKey(rows)
-		if err != nil {
-			return AdminAPIKey{}, err
-		}
-		if auth.VerifySecret(rawKey, key.KeyHash) {
-			return key, nil
-		}
-	}
-	if err := rows.Err(); err != nil {
-		return AdminAPIKey{}, err
-	}
-	return AdminAPIKey{}, ErrNotFound
-}
-
-func (db *DB) TouchAdminAPIKey(ctx context.Context, id string) error {
-	_, err := db.sql.ExecContext(ctx, `
-		UPDATE admin_api_keys SET last_used_at = ? WHERE id = ?
-	`, time.Now().UTC(), id)
-	return err
-}
-
-func (db *DB) ListAdminAPIKeys(ctx context.Context) ([]AdminAPIKey, error) {
-	rows, err := db.sql.QueryContext(ctx, `
-		SELECT id, name, key_hash, key_prefix, active, created_at, last_used_at
-		FROM admin_api_keys ORDER BY created_at DESC
-	`)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	keys := make([]AdminAPIKey, 0)
-	for rows.Next() {
-		key, err := scanAdminAPIKey(rows)
-		if err != nil {
-			return nil, err
-		}
-		keys = append(keys, key)
-	}
-	return keys, rows.Err()
-}
-
-func (db *DB) DeactivateAdminAPIKey(ctx context.Context, id string) error {
-	result, err := db.sql.ExecContext(ctx, `
-		UPDATE admin_api_keys SET active = 0 WHERE id = ?
-	`, id)
-	if err != nil {
-		return err
-	}
-	affected, err := result.RowsAffected()
-	if err != nil {
-		return err
-	}
-	if affected == 0 {
-		return ErrNotFound
-	}
-	return nil
 }
 
 func (db *DB) CreateAgentSession(ctx context.Context, tokenID, remoteAddr string) (AgentSession, error) {
@@ -618,14 +493,12 @@ func createDesktopDeviceRegistration(ctx context.Context, tx *sql.Tx, input Regi
 	if err != nil {
 		return RegisterDesktopDeviceResult{}, err
 	}
-	secretHash, err := auth.HashSecret(input.DeviceSecret)
-	if err != nil {
-		return RegisterDesktopDeviceResult{}, err
-	}
 	now := time.Now().UTC()
 	device := DesktopDevice{
 		DeviceID:         input.DeviceID,
-		DeviceSecretHash: secretHash,
+		OwnerUserID:      input.OwnerUserID,
+		OwnerEmail:       input.OwnerEmail,
+		DeviceSecretHash: "",
 		TokenID:          token.ID,
 		RouteID:          route.ID,
 		PublicHost:       route.PublicHost,
@@ -634,9 +507,9 @@ func createDesktopDeviceRegistration(ctx context.Context, tx *sql.Tx, input Regi
 		UpdatedAt:        now,
 	}
 	_, err = tx.ExecContext(ctx, `
-		INSERT INTO desktop_devices (device_id, device_secret_hash, token_id, route_id, public_host, target_url, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-	`, device.DeviceID, device.DeviceSecretHash, device.TokenID, device.RouteID, device.PublicHost, device.TargetURL, device.CreatedAt, device.UpdatedAt)
+		INSERT INTO desktop_devices (device_id, owner_user_id, owner_email, device_secret_hash, token_id, route_id, public_host, target_url, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, device.DeviceID, device.OwnerUserID, device.OwnerEmail, device.DeviceSecretHash, device.TokenID, device.RouteID, device.PublicHost, device.TargetURL, device.CreatedAt, device.UpdatedAt)
 	if err != nil {
 		return RegisterDesktopDeviceResult{}, err
 	}
@@ -781,19 +654,19 @@ func getRouteByHostTx(ctx context.Context, tx *sql.Tx, host string) (Route, erro
 
 func getDesktopDeviceTx(ctx context.Context, tx *sql.Tx, deviceID string) (DesktopDevice, error) {
 	row := tx.QueryRowContext(ctx, `
-		SELECT device_id, device_secret_hash, token_id, route_id, public_host, target_url, created_at, updated_at
+		SELECT device_id, owner_user_id, owner_email, device_secret_hash, token_id, route_id, public_host, target_url, created_at, updated_at
 		FROM desktop_devices WHERE device_id = ?
 	`, strings.TrimSpace(deviceID))
 	return scanDesktopDevice(row)
 }
 
-func updateDesktopDeviceTx(ctx context.Context, tx *sql.Tx, deviceID, tokenID, routeID, publicHost, targetURL string) (DesktopDevice, error) {
+func updateDesktopDeviceTx(ctx context.Context, tx *sql.Tx, deviceID, ownerUserID, ownerEmail, tokenID, routeID, publicHost, targetURL string) (DesktopDevice, error) {
 	now := time.Now().UTC()
 	result, err := tx.ExecContext(ctx, `
 		UPDATE desktop_devices
-		SET token_id = ?, route_id = ?, public_host = ?, target_url = ?, updated_at = ?
+		SET owner_user_id = ?, owner_email = ?, token_id = ?, route_id = ?, public_host = ?, target_url = ?, updated_at = ?
 		WHERE device_id = ?
-	`, tokenID, routeID, tunnel.NormalizeHost(publicHost), strings.TrimSpace(targetURL), now, deviceID)
+	`, strings.TrimSpace(ownerUserID), strings.TrimSpace(ownerEmail), tokenID, routeID, tunnel.NormalizeHost(publicHost), strings.TrimSpace(targetURL), now, deviceID)
 	if err != nil {
 		return DesktopDevice{}, err
 	}
@@ -829,8 +702,12 @@ func scanRoute(row rowScanner) (Route, error) {
 
 func scanDesktopDevice(row rowScanner) (DesktopDevice, error) {
 	var device DesktopDevice
+	var ownerUserID sql.NullString
+	var ownerEmail sql.NullString
 	err := row.Scan(
 		&device.DeviceID,
+		&ownerUserID,
+		&ownerEmail,
 		&device.DeviceSecretHash,
 		&device.TokenID,
 		&device.RouteID,
@@ -844,6 +721,12 @@ func scanDesktopDevice(row rowScanner) (DesktopDevice, error) {
 	}
 	if err != nil {
 		return DesktopDevice{}, err
+	}
+	if ownerUserID.Valid {
+		device.OwnerUserID = ownerUserID.String
+	}
+	if ownerEmail.Valid {
+		device.OwnerEmail = ownerEmail.String
 	}
 	return device, nil
 }
@@ -862,22 +745,6 @@ func scanToken(row rowScanner) (TunnelToken, error) {
 		token.LastUsedAt = &lastUsed.Time
 	}
 	return token, nil
-}
-
-func scanAdminAPIKey(row rowScanner) (AdminAPIKey, error) {
-	var key AdminAPIKey
-	var lastUsed sql.NullTime
-	err := row.Scan(&key.ID, &key.Name, &key.KeyHash, &key.KeyPrefix, &key.Active, &key.CreatedAt, &lastUsed)
-	if errors.Is(err, sql.ErrNoRows) {
-		return AdminAPIKey{}, ErrNotFound
-	}
-	if err != nil {
-		return AdminAPIKey{}, err
-	}
-	if lastUsed.Valid {
-		key.LastUsedAt = &lastUsed.Time
-	}
-	return key, nil
 }
 
 func scanAgentSession(row rowScanner) (AgentSession, error) {
@@ -941,6 +808,39 @@ func (db *DB) ensureRouteTokenIDColumn(ctx context.Context) error {
 	return err
 }
 
+func (db *DB) ensureDesktopDeviceOwnerColumns(ctx context.Context) error {
+	if err := db.ensureColumn(ctx, "desktop_devices", "owner_user_id", "TEXT"); err != nil {
+		return err
+	}
+	return db.ensureColumn(ctx, "desktop_devices", "owner_email", "TEXT")
+}
+
+func (db *DB) ensureColumn(ctx context.Context, table, column, definition string) error {
+	rows, err := db.sql.QueryContext(ctx, fmt.Sprintf(`PRAGMA table_info(%s)`, table))
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid int
+		var name, columnType string
+		var notNull int
+		var defaultValue any
+		var pk int
+		if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &pk); err != nil {
+			return err
+		}
+		if name == column {
+			return nil
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	_, err = db.sql.ExecContext(ctx, fmt.Sprintf(`ALTER TABLE %s ADD COLUMN %s %s`, table, column, definition))
+	return err
+}
+
 const schema = `
 CREATE TABLE IF NOT EXISTS admin_users (
 	id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -982,6 +882,8 @@ CREATE TABLE IF NOT EXISTS routes (
 
 CREATE TABLE IF NOT EXISTS desktop_devices (
 	device_id TEXT PRIMARY KEY,
+	owner_user_id TEXT,
+	owner_email TEXT,
 	device_secret_hash TEXT NOT NULL,
 	token_id TEXT NOT NULL,
 	route_id TEXT NOT NULL,

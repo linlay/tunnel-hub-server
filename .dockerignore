@@ -3,6 +3,8 @@
 .env
 .env.local
 .local
+keys/*.pem
+keys/*.key
 *.db
 *.db-*
 dist

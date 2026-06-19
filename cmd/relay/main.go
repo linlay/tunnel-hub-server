@@ -31,20 +31,24 @@ func main() {
 	if err := db.Migrate(context.Background()); err != nil {
 		log.Fatalf("migrate db: %v", err)
 	}
-	if err := db.BootstrapAdmin(context.Background(), cfg.BootstrapAdminUsername, cfg.BootstrapAdminPassword); err != nil {
-		log.Fatalf("bootstrap admin: %v", err)
-	}
-
 	manager := proxy.NewManager()
 	relay := proxy.NewRelay(db, manager, logger, cfg.MaxRequestBodyBytes)
-	adminServer := admin.NewServer(db, manager, cfg, logger)
-	desktopServer := desktopapi.NewServer(db, cfg, logger)
+	adminServer, err := admin.NewServer(db, manager, cfg, logger)
+	if err != nil {
+		log.Fatalf("configure admin server: %v", err)
+	}
+	desktopServer, err := desktopapi.NewServer(db, cfg, logger)
+	if err != nil {
+		log.Fatalf("configure desktop server: %v", err)
+	}
 	static := staticHandler(cfg.WebsiteDist)
 
 	root := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.URL.Path == "/tunnel":
 			relay.HandleTunnel(w, r)
+		case r.URL.Path == "/api/components":
+			adminServer.ServeComponents(w, r)
 		case strings.HasPrefix(r.URL.Path, "/api/desktop"):
 			desktopServer.ServeHTTP(w, r)
 		case strings.HasPrefix(r.URL.Path, "/api/admin"):

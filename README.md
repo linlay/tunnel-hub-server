@@ -20,17 +20,20 @@ Copy `.env.example` to `.env` for local development, then replace any placeholde
 | `ADMIN_HOST` | empty | Optional legacy admin hostname for Relay-served static files. Leave empty in the split website/server deployment. |
 | `WEBSITE_DIST` | empty | Optional legacy built website directory. Leave empty in the split website/server deployment. |
 | `PUBLIC_BASE_DOMAIN` | `tunnel-hub.zenmind.cc` | Base domain used by `/api/admin/services/{name}`. |
-| `DESKTOP_REGISTRATION_SECRET` | empty | Optional bearer secret that enables `/api/desktop/devices/register` for Desktop self-registration. Leave empty to disable Desktop registration. |
-| `SSO_JWT_ISSUER` | empty | Expected issuer for official-site SSO JWTs. Leave empty to disable JWT auth. |
+| `SSO_JWT_ISSUER` | empty | Expected issuer for official-site SSO JWTs. Required. |
 | `SSO_JWT_PUBLIC_KEY_FILE` | empty | PEM public key file used to verify SSO JWTs. |
 | `SSO_JWT_PUBLIC_KEY_PEM` | empty | PEM public key value fallback; supports escaped `\n`. |
 | `SSO_JWT_AUDIENCE` | `zenmind-tunnel-hub-server` | Required JWT audience. |
-| `COOKIE_SECRET` | random dev value | HMAC secret for admin sessions. |
-| `BOOTSTRAP_ADMIN_USERNAME` | `admin` | First admin username. |
-| `BOOTSTRAP_ADMIN_PASSWORD` | `admin` | First admin password. |
 | `MAX_REQUEST_BODY_BYTES` | `67108864` | Maximum buffered HTTP request body. |
 
-Do not commit real production secrets. `COOKIE_SECRET` must be a long, stable random value in production so admin sessions remain valid across restarts.
+Do not commit key material or production secrets. Keep the official-site public key in the ignored local file `.local/sso-jwt-public.pem`, then mount that file read-only in production. `SSO_JWT_ISSUER` must exactly match the issuer configured by the official-site server.
+
+Export the public key from the official-site JWT private key:
+
+```bash
+mkdir -p .local
+openssl pkey -in /path/to/official-sso-private.pem -pubout -out .local/sso-jwt-public.pem
+```
 
 ## Agent Environment
 
@@ -51,11 +54,11 @@ AGENT_TOKEN=<token> AGENT_RELAY_URL=ws://127.0.0.1:8080/tunnel go run ./cmd/agen
 
 ## Managed Service Publish API
 
-Create an Admin API Key from the console or `/api/admin/api-keys`, or use an official-site SSO JWT with `role=admin`, then publish a local service:
+Use an official-site SSO JWT with `role=admin` and `scope` containing `tunnel`, then publish a local service:
 
 ```bash
 curl -X PUT https://tunnel-hub.zenmind.cc/api/admin/services/auditor \
-  -H "Authorization: Bearer $TUNNEL_HUB_ADMIN_KEY" \
+  -H "Authorization: Bearer $ZENMIND_OFFICIAL_JWT" \
   -H "Content-Type: application/json" \
   -d '{"targetUrl":"http://127.0.0.1:3000","tokenId":"token_...","active":true}'
 ```
@@ -64,18 +67,22 @@ This creates or updates `auditor.tunnel-hub.zenmind.cc` and binds it to the sele
 
 ## Desktop Device Registration API
 
-Set `DESKTOP_REGISTRATION_SECRET` on the Relay, or configure official-site SSO JWT verification, then Desktop can register its own tunnel without using an Admin API Key:
+Desktop registration also uses an official-site SSO JWT with `scope` containing `tunnel`:
 
 ```bash
 curl -X POST https://tunnel-hub.zenmind.cc/api/desktop/devices/register \
-  -H "Authorization: Bearer $DESKTOP_REGISTRATION_SECRET" \
+  -H "Authorization: Bearer $ZENMIND_OFFICIAL_JWT" \
   -H "Content-Type: application/json" \
-  -d "{\"deviceId\":\"mac-mini\",\"deviceSecret\":\"desktop-generated-persistent-secret\",\"targetUrl\":\"http://127.0.0.1:7082\",\"rotateToken\":false}"
+  -d '{"deviceId":"mac-mini","deviceSecret":"desktop-generated-persistent-secret","targetUrl":"http://127.0.0.1:7082","rotateToken":false}'
 ```
 
-The first successful registration creates a tunnel token and an active route for `mac-mini.tunnel-hub.zenmind.cc`. Re-registering the same `deviceId` requires the same `deviceSecret`, reuses the existing route and token, and updates `targetUrl`. Set `rotateToken` to `true` to invalidate the old tunnel token and receive a new `agentToken`.
+The first successful registration creates a tunnel token and an active route for `mac-mini.tunnel-hub.zenmind.cc`. Re-registering the same `deviceId` requires a JWT for the same `user_id` and the same `deviceSecret`, reuses the existing route and token, and updates `targetUrl`. Set `rotateToken` to `true` to invalidate the old tunnel token and receive a new `agentToken`. Legacy `deviceSecret` request fields are ignored.
 
 Phones can then connect to the Desktop total WebSocket through `wss://mac-mini.tunnel-hub.zenmind.cc/ws`. The original Admin service publish API above remains unchanged for webapp/service tunnels.
+
+## Public Component List API
+
+`GET /api/components` is public and does not require a JWT. It returns safe component fields such as `publicHost`, `publicUrl`, `active`, and `updatedAt`; it does not expose internal route IDs, `targetUrl`, `tokenId`, or secrets.
 
 ## Split Production Deployment
 

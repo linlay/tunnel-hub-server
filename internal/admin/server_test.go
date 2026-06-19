@@ -25,39 +25,25 @@ import (
 	"github.com/linlay/zenmind-tunnel-server/internal/store"
 )
 
-func TestAdminAPIKeyBearerAuth(t *testing.T) {
-	server, db := newAdminTestServer(t)
-	rawKey, err := auth.NewAdminAPIKey()
-	if err != nil {
-		t.Fatalf("new api key: %v", err)
-	}
-	key, err := db.CreateAdminAPIKey(context.Background(), "automation", rawKey)
-	if err != nil {
-		t.Fatalf("create api key: %v", err)
-	}
+var defaultAdminJWT string
+
+func TestLegacyAdminAPIKeyBearerAuthRejected(t *testing.T) {
+	server, _ := newAdminTestServer(t)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/admin/routes", nil)
-	req.Header.Set("Authorization", "Bearer "+rawKey)
+	req.Header.Set("Authorization", "Bearer za_legacy-admin-api-key")
 	rec := httptest.NewRecorder()
 
 	server.ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusOK {
+	if rec.Code != http.StatusUnauthorized {
 		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
-	}
-	keys, err := db.ListAdminAPIKeys(context.Background())
-	if err != nil {
-		t.Fatalf("list api keys: %v", err)
-	}
-	if len(keys) != 1 || keys[0].ID != key.ID || keys[0].LastUsedAt == nil {
-		t.Fatalf("api key was not touched after bearer auth: %+v", keys)
 	}
 }
 
 func TestAdminSSOJWTBearerAuth(t *testing.T) {
 	privateKey, publicKeyPEM := testSSOJWTKey(t)
 	server, _ := newAdminTestServerWithConfig(t, config.RelayConfig{
-		CookieSecret:       "test-cookie-secret",
 		PublicBaseDomain:   "tunnel-hub.zenmind.cc",
 		SSOJWTIssuer:       "https://official.example.test",
 		SSOJWTPublicKeyPEM: publicKeyPEM,
@@ -70,6 +56,7 @@ func TestAdminSSOJWTBearerAuth(t *testing.T) {
 		UserID:   "1",
 		Email:    "admin@example.test",
 		Role:     "admin",
+		Scope:    "profile tunnel",
 		Expires:  time.Now().Add(time.Hour),
 	})
 	req := httptest.NewRequest(http.MethodGet, "/api/admin/routes", nil)
@@ -86,6 +73,7 @@ func TestAdminSSOJWTBearerAuth(t *testing.T) {
 		UserID:   "1",
 		Email:    "admin@example.test",
 		Role:     "admin",
+		Scope:    "profile tunnel",
 		Expires:  time.Now().Add(time.Hour),
 	})
 	req = httptest.NewRequest(http.MethodGet, "/api/admin/routes", nil)
@@ -97,31 +85,59 @@ func TestAdminSSOJWTBearerAuth(t *testing.T) {
 	}
 }
 
-func TestCreateAdminAPIKeyEndpoint(t *testing.T) {
+func TestAdminJWTRejectsMissingOrInvalidClaims(t *testing.T) {
+	privateKey, publicKeyPEM := testSSOJWTKey(t)
+	server, _ := newAdminTestServerWithConfig(t, config.RelayConfig{
+		PublicBaseDomain:   "tunnel-hub.zenmind.cc",
+		SSOJWTIssuer:       "https://official.example.test",
+		SSOJWTPublicKeyPEM: publicKeyPEM,
+		SSOJWTAudience:     "zenmind-tunnel-hub-server",
+	})
+	validClaims := testSSOJWTClaims{
+		Issuer:   "https://official.example.test",
+		Audience: "zenmind-tunnel-hub-server",
+		UserID:   "1",
+		Email:    "admin@example.test",
+		Role:     "admin",
+		Scope:    "profile tunnel",
+		Expires:  time.Now().Add(time.Hour),
+	}
+	cases := []struct {
+		name       string
+		token      string
+		wantStatus int
+	}{
+		{name: "missing", wantStatus: http.StatusUnauthorized},
+		{name: "user role", token: signTestSSOJWT(t, privateKey, withClaims(validClaims, func(claims *testSSOJWTClaims) { claims.Role = "user" })), wantStatus: http.StatusForbidden},
+		{name: "missing tunnel scope", token: signTestSSOJWT(t, privateKey, withClaims(validClaims, func(claims *testSSOJWTClaims) { claims.Scope = "profile market" })), wantStatus: http.StatusForbidden},
+		{name: "wrong issuer", token: signTestSSOJWT(t, privateKey, withClaims(validClaims, func(claims *testSSOJWTClaims) { claims.Issuer = "https://other.example.test" })), wantStatus: http.StatusUnauthorized},
+		{name: "expired", token: signTestSSOJWT(t, privateKey, withClaims(validClaims, func(claims *testSSOJWTClaims) { claims.Expires = time.Now().Add(-time.Minute) })), wantStatus: http.StatusUnauthorized},
+		{name: "non RS256", token: signTestSSOJWTWithAlg(t, privateKey, validClaims, "HS256"), wantStatus: http.StatusUnauthorized},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, "/api/admin/routes", nil)
+			if tc.token != "" {
+				req.Header.Set("Authorization", "Bearer "+tc.token)
+			}
+			rec := httptest.NewRecorder()
+			server.ServeHTTP(rec, req)
+			if rec.Code != tc.wantStatus {
+				t.Fatalf("status = %d, want %d, body = %s", rec.Code, tc.wantStatus, rec.Body.String())
+			}
+		})
+	}
+}
+
+func TestAdminAPIKeyEndpointRemoved(t *testing.T) {
 	server, _ := newAdminTestServer(t)
 	req := authedAdminRequest(http.MethodPost, "/api/admin/api-keys", `{"name":"deploy-bot"}`)
 	rec := httptest.NewRecorder()
 
 	server.ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusCreated {
+	if rec.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
-	}
-	var response struct {
-		Secret string            `json:"secret"`
-		APIKey store.AdminAPIKey `json:"apiKey"`
-	}
-	if err := json.NewDecoder(rec.Body).Decode(&response); err != nil {
-		t.Fatalf("decode response: %v", err)
-	}
-	if !strings.HasPrefix(response.Secret, "za_") {
-		t.Fatalf("secret prefix = %q", response.Secret)
-	}
-	if response.APIKey.Name != "deploy-bot" || response.APIKey.KeyPrefix == "" {
-		t.Fatalf("unexpected api key response: %+v", response.APIKey)
-	}
-	if response.APIKey.KeyHash != "" {
-		t.Fatal("api key hash should not be exposed in json")
 	}
 }
 
@@ -293,11 +309,52 @@ func TestAgentsEndpointCombinesTokenConnectionAndRoutes(t *testing.T) {
 	}
 }
 
+func TestComponentsEndpointIsPublicAndRedactsSensitiveFields(t *testing.T) {
+	server, db := newAdminTestServer(t)
+	token := createAdminTestToken(t, db, "mac-mini")
+	if _, err := db.CreateRoute(context.Background(), "app.example.com", "http://127.0.0.1:3000", true, token.ID); err != nil {
+		t.Fatalf("create route: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodGet, "/api/components", nil)
+	rec := httptest.NewRecorder()
+
+	server.ServeComponents(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	for _, forbidden := range []string{"targetUrl", "tokenId", "secret", "route_"} {
+		if strings.Contains(body, forbidden) {
+			t.Fatalf("component response leaked %q: %s", forbidden, body)
+		}
+	}
+	var components []componentResponse
+	if err := json.Unmarshal([]byte(body), &components); err != nil {
+		t.Fatalf("decode components: %v", err)
+	}
+	if len(components) != 1 || components[0].PublicHost != "app.example.com" || components[0].PublicURL != "https://app.example.com" {
+		t.Fatalf("unexpected components: %+v", components)
+	}
+}
+
 func newAdminTestServer(t *testing.T) (*Server, *store.DB) {
 	t.Helper()
+	privateKey, publicKeyPEM := testSSOJWTKey(t)
+	defaultAdminJWT = signTestSSOJWT(t, privateKey, testSSOJWTClaims{
+		Issuer:   "https://official.example.test",
+		Audience: "zenmind-tunnel-hub-server",
+		UserID:   "1",
+		Email:    "admin@example.test",
+		Role:     "admin",
+		Scope:    "profile tunnel",
+		Expires:  time.Now().Add(time.Hour),
+	})
 	return newAdminTestServerWithConfig(t, config.RelayConfig{
-		CookieSecret:     "test-cookie-secret",
-		PublicBaseDomain: "tunnel-hub.zenmind.cc",
+		PublicBaseDomain:   "tunnel-hub.zenmind.cc",
+		SSOJWTIssuer:       "https://official.example.test",
+		SSOJWTPublicKeyPEM: publicKeyPEM,
+		SSOJWTAudience:     "zenmind-tunnel-hub-server",
 	})
 }
 
@@ -311,7 +368,11 @@ func newAdminTestServerWithConfig(t *testing.T, cfg config.RelayConfig) (*Server
 	if err := db.Migrate(context.Background()); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
-	return NewServer(db, proxy.NewManager(), cfg, nil), db
+	server, err := NewServer(db, proxy.NewManager(), cfg, nil)
+	if err != nil {
+		t.Fatalf("new admin server: %v", err)
+	}
+	return server, db
 }
 
 func authedAdminRequest(method, path, body string) *http.Request {
@@ -323,10 +384,7 @@ func authedAdminRequest(method, path, body string) *http.Request {
 	}
 	req := httptest.NewRequest(method, path, reader)
 	req.Header.Set("Content-Type", "application/json")
-	req.AddCookie(&http.Cookie{
-		Name:  sessionCookie,
-		Value: auth.SignSession("test-cookie-secret", "admin", time.Hour),
-	})
+	req.Header.Set("Authorization", "Bearer "+defaultAdminJWT)
 	return req
 }
 
@@ -358,6 +416,7 @@ type testSSOJWTClaims struct {
 	UserID   string
 	Email    string
 	Role     string
+	Scope    string
 	Expires  time.Time
 }
 
@@ -379,8 +438,12 @@ func testSSOJWTKey(t *testing.T) (*rsa.PrivateKey, string) {
 }
 
 func signTestSSOJWT(t *testing.T, privateKey *rsa.PrivateKey, claims testSSOJWTClaims) string {
+	return signTestSSOJWTWithAlg(t, privateKey, claims, "RS256")
+}
+
+func signTestSSOJWTWithAlg(t *testing.T, privateKey *rsa.PrivateKey, claims testSSOJWTClaims, alg string) string {
 	t.Helper()
-	headerJSON, _ := json.Marshal(map[string]any{"alg": "RS256", "typ": "JWT", "kid": "test-key"})
+	headerJSON, _ := json.Marshal(map[string]any{"alg": alg, "typ": "JWT", "kid": "test-key"})
 	claimsJSON, _ := json.Marshal(map[string]any{
 		"iss":     claims.Issuer,
 		"sub":     "user:" + claims.UserID,
@@ -391,6 +454,7 @@ func signTestSSOJWT(t *testing.T, privateKey *rsa.PrivateKey, claims testSSOJWTC
 		"user_id": claims.UserID,
 		"email":   claims.Email,
 		"role":    claims.Role,
+		"scope":   claims.Scope,
 	})
 	headerPart := base64.RawURLEncoding.EncodeToString(headerJSON)
 	payloadPart := base64.RawURLEncoding.EncodeToString(claimsJSON)
@@ -401,6 +465,11 @@ func signTestSSOJWT(t *testing.T, privateKey *rsa.PrivateKey, claims testSSOJWTC
 		t.Fatalf("sign JWT: %v", err)
 	}
 	return signedValue + "." + base64.RawURLEncoding.EncodeToString(signature)
+}
+
+func withClaims(claims testSSOJWTClaims, mutate func(*testSSOJWTClaims)) testSSOJWTClaims {
+	mutate(&claims)
+	return claims
 }
 
 func newAdminTestSession(t *testing.T) (*yamux.Session, *yamux.Session) {
