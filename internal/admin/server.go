@@ -576,6 +576,11 @@ type agentResponse struct {
 	RouteCount  int               `json:"routeCount"`
 }
 
+type loginPayload struct {
+	Username string `json:"username"`
+	Password string `json:"password"`
+}
+
 func (s *Server) servicePublicHost(name string) string {
 	baseDomain := strings.TrimPrefix(tunnelHost(s.Config.PublicBaseDomain), ".")
 	if baseDomain == "" {
@@ -657,7 +662,50 @@ func principalName(principal auth.SSOJWTPrincipal) string {
 	if principal.Email != "" {
 		return principal.Email
 	}
+	if strings.HasPrefix(principal.UserID, "local:") {
+		return strings.TrimPrefix(principal.UserID, "local:")
+	}
 	return "sso:" + principal.UserID
+}
+
+func (s *Server) newSessionValue(username string, expires time.Time) string {
+	payload := username + "|" + strconv.FormatInt(expires.Unix(), 10)
+	signature := s.signSessionPayload(payload)
+	return base64.RawURLEncoding.EncodeToString([]byte(payload)) + "." + base64.RawURLEncoding.EncodeToString(signature)
+}
+
+func (s *Server) verifySessionValue(value string) (string, bool) {
+	parts := strings.Split(value, ".")
+	if len(parts) != 2 {
+		return "", false
+	}
+	payloadBytes, err := base64.RawURLEncoding.DecodeString(parts[0])
+	if err != nil {
+		return "", false
+	}
+	signature, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return "", false
+	}
+	payload := string(payloadBytes)
+	if !hmac.Equal(signature, s.signSessionPayload(payload)) {
+		return "", false
+	}
+	fields := strings.Split(payload, "|")
+	if len(fields) != 2 || strings.TrimSpace(fields[0]) == "" {
+		return "", false
+	}
+	expiresUnix, err := strconv.ParseInt(fields[1], 10, 64)
+	if err != nil || time.Now().Unix() >= expiresUnix {
+		return "", false
+	}
+	return fields[0], true
+}
+
+func (s *Server) signSessionPayload(payload string) []byte {
+	mac := hmac.New(sha256.New, []byte(s.Config.CookieSecret))
+	_, _ = mac.Write([]byte(payload))
+	return mac.Sum(nil)
 }
 
 var reservedServiceNames = map[string]bool{

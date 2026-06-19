@@ -12,12 +12,12 @@ services:
     environment:
       RELAY_ADDR: ":8080"
       RELAY_DB_PATH: "/data/zenmind-tunnel.db"
-      SSO_JWT_PUBLIC_KEY_FILE: "/run/secrets/zenmind-sso-jwt-public.pem"
+      SSO_JWT_PUBLIC_KEY_FILE: "/run/zenmind-tunnel-hub/keys/official-sso-public.pem"
     ports:
       - "8080:8080"
     volumes:
       - relay-data:/data
-      - ./.local/sso-jwt-public.pem:/run/secrets/zenmind-sso-jwt-public.pem:ro
+      - ./keys:/run/zenmind-tunnel-hub/keys:ro
 
 volumes:
   relay-data:

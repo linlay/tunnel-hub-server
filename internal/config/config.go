@@ -1,22 +1,27 @@
 package config
 
 import (
+	"crypto/rand"
+	"encoding/base64"
 	"os"
 	"strconv"
 	"time"
 )
 
 type RelayConfig struct {
-	Addr                string
-	DatabasePath        string
-	AdminHost           string
-	WebsiteDist         string
-	PublicBaseDomain    string
-	SSOJWTIssuer        string
-	SSOJWTPublicKeyFile string
-	SSOJWTPublicKeyPEM  string
-	SSOJWTAudience      string
-	MaxRequestBodyBytes int64
+	Addr                   string
+	DatabasePath           string
+	AdminHost              string
+	WebsiteDist            string
+	PublicBaseDomain       string
+	SSOJWTIssuer           string
+	SSOJWTPublicKeyFile    string
+	SSOJWTPublicKeyPEM     string
+	SSOJWTAudience         string
+	CookieSecret           string
+	BootstrapAdminUsername string
+	BootstrapAdminPassword string
+	MaxRequestBodyBytes    int64
 }
 
 type AgentConfig struct {
@@ -30,16 +35,19 @@ func LoadRelayConfig() RelayConfig {
 	loadDotEnv()
 
 	return RelayConfig{
-		Addr:                env("RELAY_ADDR", ":8080"),
-		DatabasePath:        env("RELAY_DB_PATH", "zenmind-tunnel.db"),
-		AdminHost:           env("ADMIN_HOST", ""),
-		WebsiteDist:         env("WEBSITE_DIST", ""),
-		PublicBaseDomain:    env("PUBLIC_BASE_DOMAIN", "tunnel-hub.zenmind.cc"),
-		SSOJWTIssuer:        env("SSO_JWT_ISSUER", ""),
-		SSOJWTPublicKeyFile: env("SSO_JWT_PUBLIC_KEY_FILE", ""),
-		SSOJWTPublicKeyPEM:  env("SSO_JWT_PUBLIC_KEY_PEM", ""),
-		SSOJWTAudience:      env("SSO_JWT_AUDIENCE", "zenmind-tunnel-hub-server"),
-		MaxRequestBodyBytes: envInt64("MAX_REQUEST_BODY_BYTES", 64<<20),
+		Addr:                   env("RELAY_ADDR", ":8080"),
+		DatabasePath:           env("RELAY_DB_PATH", "zenmind-tunnel.db"),
+		AdminHost:              env("ADMIN_HOST", ""),
+		WebsiteDist:            env("WEBSITE_DIST", ""),
+		PublicBaseDomain:       env("PUBLIC_BASE_DOMAIN", "tunnel-hub.zenmind.cc"),
+		SSOJWTIssuer:           env("SSO_JWT_ISSUER", ""),
+		SSOJWTPublicKeyFile:    env("SSO_JWT_PUBLIC_KEY_FILE", ""),
+		SSOJWTPublicKeyPEM:     env("SSO_JWT_PUBLIC_KEY_PEM", ""),
+		SSOJWTAudience:         env("SSO_JWT_AUDIENCE", "zenmind-tunnel-hub-server"),
+		CookieSecret:           env("COOKIE_SECRET", randomSecret()),
+		BootstrapAdminUsername: env("BOOTSTRAP_ADMIN_USERNAME", "admin"),
+		BootstrapAdminPassword: env("BOOTSTRAP_ADMIN_PASSWORD", "admin"),
+		MaxRequestBodyBytes:    envInt64("MAX_REQUEST_BODY_BYTES", 64<<20),
 	}
 }
 
@@ -83,4 +91,12 @@ func envInt64(key string, fallback int64) int64 {
 		return fallback
 	}
 	return parsed
+}
+
+func randomSecret() string {
+	var raw [32]byte
+	if _, err := rand.Read(raw[:]); err != nil {
+		return "development-cookie-secret"
+	}
+	return base64.RawURLEncoding.EncodeToString(raw[:])
 }

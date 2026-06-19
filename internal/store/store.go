@@ -117,6 +117,48 @@ func (db *DB) Migrate(ctx context.Context) error {
 	return db.ensureDesktopDeviceOwnerColumns(ctx)
 }
 
+func (db *DB) BootstrapAdmin(ctx context.Context, username, password string) error {
+	username = strings.TrimSpace(username)
+	if username == "" {
+		return errors.New("bootstrap admin username is required")
+	}
+	if password == "" {
+		return errors.New("bootstrap admin password is required")
+	}
+	var count int
+	if err := db.sql.QueryRowContext(ctx, `SELECT COUNT(1) FROM admin_users WHERE username = ?`, username).Scan(&count); err != nil {
+		return err
+	}
+	if count > 0 {
+		return nil
+	}
+	hash, err := auth.HashSecret(password)
+	if err != nil {
+		return err
+	}
+	_, err = db.sql.ExecContext(ctx, `
+		INSERT INTO admin_users (username, password_hash, created_at)
+		VALUES (?, ?, ?)
+	`, username, hash, time.Now().UTC())
+	return err
+}
+
+func (db *DB) ValidateAdmin(ctx context.Context, username, password string) (bool, error) {
+	username = strings.TrimSpace(username)
+	if username == "" || password == "" {
+		return false, nil
+	}
+	var hash string
+	err := db.sql.QueryRowContext(ctx, `SELECT password_hash FROM admin_users WHERE username = ?`, username).Scan(&hash)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return auth.VerifySecret(password, hash), nil
+}
+
 func (db *DB) CreateRoute(ctx context.Context, publicHost, targetURL string, active bool, tokenID string) (Route, error) {
 	now := time.Now().UTC()
 	route := Route{
