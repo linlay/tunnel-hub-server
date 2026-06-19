@@ -24,18 +24,15 @@ Copy `.env.example` to `.env` for local development, then replace any placeholde
 | `SSO_JWT_PUBLIC_KEY_FILE` | empty | PEM public key file used to verify SSO JWTs. |
 | `SSO_JWT_PUBLIC_KEY_PEM` | empty | PEM public key value fallback; supports escaped `\n`. |
 | `SSO_JWT_AUDIENCE` | `zenmind-tunnel-hub-server` | Required JWT audience. |
-| `COOKIE_SECRET` | random per process | Signing secret for the local admin login cookie. Set a stable production value. |
-| `BOOTSTRAP_ADMIN_USERNAME` | `admin` | Local admin username to create on startup if it does not exist. |
-| `BOOTSTRAP_ADMIN_PASSWORD` | `admin` | Local admin password used only when bootstrapping a missing user. |
 | `MAX_REQUEST_BODY_BYTES` | `67108864` | Maximum buffered HTTP request body. |
 
-Do not commit key material or production secrets. Keep the official-site public key in the ignored local file `keys/official-sso-public.pem`, then mount `./keys` read-only in production. `SSO_JWT_ISSUER` must exactly match the issuer configured by the official-site server.
+Do not commit key material or production secrets. Keep the official-site public key in the ignored local file `.local/sso-jwt-public.pem`, then mount that file read-only in production. `SSO_JWT_ISSUER` must exactly match the issuer configured by the official-site server.
 
 Export the public key from the official-site JWT private key:
 
 ```bash
-mkdir -p keys
-openssl pkey -in /path/to/official-sso-private.pem -pubout -out keys/official-sso-public.pem
+mkdir -p .local
+openssl pkey -in /path/to/official-sso-private.pem -pubout -out .local/sso-jwt-public.pem
 ```
 
 ## Agent Environment
@@ -76,10 +73,10 @@ Desktop registration also uses an official-site SSO JWT with `scope` containing 
 curl -X POST https://tunnel-hub.zenmind.cc/api/desktop/devices/register \
   -H "Authorization: Bearer $ZENMIND_OFFICIAL_JWT" \
   -H "Content-Type: application/json" \
-  -d '{"deviceId":"mac-mini","targetUrl":"http://127.0.0.1:7082","rotateToken":false}'
+  -d '{"deviceId":"mac-mini","deviceSecret":"desktop-generated-persistent-secret","targetUrl":"http://127.0.0.1:7082","rotateToken":false}'
 ```
 
-The first successful registration creates a tunnel token and an active route for `mac-mini.tunnel-hub.zenmind.cc`. Re-registering the same `deviceId` requires a JWT for the same `user_id`, reuses the existing route and token, and updates `targetUrl`. Set `rotateToken` to `true` to invalidate the old tunnel token and receive a new `agentToken`. Legacy `deviceSecret` request fields are ignored.
+The first successful registration creates a tunnel token and an active route for `mac-mini.tunnel-hub.zenmind.cc`. Re-registering the same `deviceId` requires a JWT for the same `user_id` and the same `deviceSecret`, reuses the existing route and token, and updates `targetUrl`. Set `rotateToken` to `true` to invalidate the old tunnel token and receive a new `agentToken`. Legacy `deviceSecret` request fields are ignored.
 
 Phones can then connect to the Desktop total WebSocket through `wss://mac-mini.tunnel-hub.zenmind.cc/ws`. The original Admin service publish API above remains unchanged for webapp/service tunnels.
 

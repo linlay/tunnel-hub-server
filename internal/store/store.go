@@ -17,6 +17,7 @@ var (
 	ErrNotFound                   = errors.New("not found")
 	ErrDesktopDeviceHostConflict  = errors.New("desktop device host already exists")
 	ErrDesktopDeviceOwnerMismatch = errors.New("desktop device belongs to another user")
+	ErrInvalidDesktopDeviceSecret = errors.New("invalid desktop device secret")
 )
 
 type DB struct {
@@ -57,12 +58,13 @@ type DesktopDevice struct {
 }
 
 type RegisterDesktopDeviceInput struct {
-	DeviceID    string
-	OwnerUserID string
-	OwnerEmail  string
-	PublicHost  string
-	TargetURL   string
-	RotateToken bool
+	DeviceID     string
+	OwnerUserID  string
+	OwnerEmail   string
+	DeviceSecret string
+	PublicHost   string
+	TargetURL    string
+	RotateToken  bool
 }
 
 type RegisterDesktopDeviceResult struct {
@@ -115,48 +117,6 @@ func (db *DB) Migrate(ctx context.Context) error {
 		return err
 	}
 	return db.ensureDesktopDeviceOwnerColumns(ctx)
-}
-
-func (db *DB) BootstrapAdmin(ctx context.Context, username, password string) error {
-	username = strings.TrimSpace(username)
-	if username == "" {
-		return errors.New("bootstrap admin username is required")
-	}
-	if password == "" {
-		return errors.New("bootstrap admin password is required")
-	}
-	var count int
-	if err := db.sql.QueryRowContext(ctx, `SELECT COUNT(1) FROM admin_users WHERE username = ?`, username).Scan(&count); err != nil {
-		return err
-	}
-	if count > 0 {
-		return nil
-	}
-	hash, err := auth.HashSecret(password)
-	if err != nil {
-		return err
-	}
-	_, err = db.sql.ExecContext(ctx, `
-		INSERT INTO admin_users (username, password_hash, created_at)
-		VALUES (?, ?, ?)
-	`, username, hash, time.Now().UTC())
-	return err
-}
-
-func (db *DB) ValidateAdmin(ctx context.Context, username, password string) (bool, error) {
-	username = strings.TrimSpace(username)
-	if username == "" || password == "" {
-		return false, nil
-	}
-	var hash string
-	err := db.sql.QueryRowContext(ctx, `SELECT password_hash FROM admin_users WHERE username = ?`, username).Scan(&hash)
-	if errors.Is(err, sql.ErrNoRows) {
-		return false, nil
-	}
-	if err != nil {
-		return false, err
-	}
-	return auth.VerifySecret(password, hash), nil
 }
 
 func (db *DB) CreateRoute(ctx context.Context, publicHost, targetURL string, active bool, tokenID string) (Route, error) {
@@ -372,6 +332,7 @@ func (db *DB) RegisterDesktopDevice(ctx context.Context, input RegisterDesktopDe
 	input.DeviceID = strings.TrimSpace(input.DeviceID)
 	input.OwnerUserID = strings.TrimSpace(input.OwnerUserID)
 	input.OwnerEmail = strings.TrimSpace(input.OwnerEmail)
+	input.DeviceSecret = strings.TrimSpace(input.DeviceSecret)
 	input.PublicHost = tunnel.NormalizeHost(input.PublicHost)
 	input.TargetURL = strings.TrimSpace(input.TargetURL)
 	if input.DeviceID == "" {
@@ -379,6 +340,9 @@ func (db *DB) RegisterDesktopDevice(ctx context.Context, input RegisterDesktopDe
 	}
 	if input.OwnerUserID == "" {
 		return RegisterDesktopDeviceResult{}, errors.New("ownerUserId is required")
+	}
+	if input.DeviceSecret == "" {
+		return RegisterDesktopDeviceResult{}, errors.New("deviceSecret is required")
 	}
 	if input.PublicHost == "" {
 		return RegisterDesktopDeviceResult{}, errors.New("publicHost is required")
@@ -415,6 +379,9 @@ func (db *DB) RegisterDesktopDevice(ctx context.Context, input RegisterDesktopDe
 	}
 	if device.OwnerUserID != "" && device.OwnerUserID != input.OwnerUserID {
 		return RegisterDesktopDeviceResult{}, ErrDesktopDeviceOwnerMismatch
+	}
+	if device.DeviceSecretHash != "" && !auth.VerifySecret(input.DeviceSecret, device.DeviceSecretHash) {
+		return RegisterDesktopDeviceResult{}, ErrInvalidDesktopDeviceSecret
 	}
 	token, rawToken, err := tokenForDesktopRegistration(ctx, tx, device.TokenID, input.DeviceID, input.RotateToken)
 	if err != nil {
@@ -536,11 +503,15 @@ func createDesktopDeviceRegistration(ctx context.Context, tx *sql.Tx, input Regi
 		return RegisterDesktopDeviceResult{}, err
 	}
 	now := time.Now().UTC()
+	secretHash, err := auth.HashSecret(input.DeviceSecret)
+	if err != nil {
+		return RegisterDesktopDeviceResult{}, err
+	}
 	device := DesktopDevice{
 		DeviceID:         input.DeviceID,
 		OwnerUserID:      input.OwnerUserID,
 		OwnerEmail:       input.OwnerEmail,
-		DeviceSecretHash: "",
+		DeviceSecretHash: secretHash,
 		TokenID:          token.ID,
 		RouteID:          route.ID,
 		PublicHost:       route.PublicHost,

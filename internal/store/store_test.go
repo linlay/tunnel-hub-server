@@ -94,11 +94,12 @@ func TestRegisterDesktopDeviceOwnership(t *testing.T) {
 	ctx := context.Background()
 
 	first, err := db.RegisterDesktopDevice(ctx, RegisterDesktopDeviceInput{
-		DeviceID:    "mac-mini",
-		OwnerUserID: "42",
-		OwnerEmail:  "desktop.test",
-		PublicHost:  "mac-mini.tunnel-hub.zenmind.cc",
-		TargetURL:   "http://127.0.0.1:7082",
+		DeviceID:     "mac-mini",
+		OwnerUserID:  "42",
+		OwnerEmail:   "desktop.test",
+		DeviceSecret: "device-secret",
+		PublicHost:   "mac-mini.tunnel-hub.zenmind.cc",
+		TargetURL:    "http://127.0.0.1:7082",
 	})
 	if err != nil {
 		t.Fatalf("register desktop device: %v", err)
@@ -108,11 +109,12 @@ func TestRegisterDesktopDeviceOwnership(t *testing.T) {
 	}
 
 	second, err := db.RegisterDesktopDevice(ctx, RegisterDesktopDeviceInput{
-		DeviceID:    "mac-mini",
-		OwnerUserID: "42",
-		OwnerEmail:  "desktop.test",
-		PublicHost:  "mac-mini.tunnel-hub.zenmind.cc",
-		TargetURL:   "http://127.0.0.1:7083",
+		DeviceID:     "mac-mini",
+		OwnerUserID:  "42",
+		OwnerEmail:   "desktop.test",
+		DeviceSecret: "device-secret",
+		PublicHost:   "mac-mini.tunnel-hub.zenmind.cc",
+		TargetURL:    "http://127.0.0.1:7083",
 	})
 	if err != nil {
 		t.Fatalf("update desktop device: %v", err)
@@ -122,11 +124,12 @@ func TestRegisterDesktopDeviceOwnership(t *testing.T) {
 	}
 
 	_, err = db.RegisterDesktopDevice(ctx, RegisterDesktopDeviceInput{
-		DeviceID:    "mac-mini",
-		OwnerUserID: "43",
-		OwnerEmail:  "other.test",
-		PublicHost:  "mac-mini.tunnel-hub.zenmind.cc",
-		TargetURL:   "http://127.0.0.1:7999",
+		DeviceID:     "mac-mini",
+		OwnerUserID:  "43",
+		OwnerEmail:   "other.test",
+		DeviceSecret: "device-secret",
+		PublicHost:   "mac-mini.tunnel-hub.zenmind.cc",
+		TargetURL:    "http://127.0.0.1:7999",
 	})
 	if !errors.Is(err, ErrDesktopDeviceOwnerMismatch) {
 		t.Fatalf("different owner should be rejected, got %v", err)
@@ -137,6 +140,18 @@ func TestRegisterDesktopDeviceOwnership(t *testing.T) {
 	}
 	if route.TargetURL != "http://127.0.0.1:7083" {
 		t.Fatalf("different owner changed route: %+v", route)
+	}
+
+	_, err = db.RegisterDesktopDevice(ctx, RegisterDesktopDeviceInput{
+		DeviceID:     "mac-mini",
+		OwnerUserID:  "42",
+		OwnerEmail:   "desktop.test",
+		DeviceSecret: "wrong-secret",
+		PublicHost:   "mac-mini.tunnel-hub.zenmind.cc",
+		TargetURL:    "http://127.0.0.1:7999",
+	})
+	if !errors.Is(err, ErrInvalidDesktopDeviceSecret) {
+		t.Fatalf("wrong device secret should be rejected, got %v", err)
 	}
 }
 
@@ -161,11 +176,12 @@ func TestRegisterDesktopDeviceClaimsLegacyDevice(t *testing.T) {
 	}
 
 	result, err := db.RegisterDesktopDevice(ctx, RegisterDesktopDeviceInput{
-		DeviceID:    "legacy",
-		OwnerUserID: "42",
-		OwnerEmail:  "desktop.test",
-		PublicHost:  "legacy.tunnel-hub.zenmind.cc",
-		TargetURL:   "http://127.0.0.1:7083",
+		DeviceID:     "legacy",
+		OwnerUserID:  "42",
+		OwnerEmail:   "desktop.test",
+		DeviceSecret: "legacy-secret",
+		PublicHost:   "legacy.tunnel-hub.zenmind.cc",
+		TargetURL:    "http://127.0.0.1:7083",
 	})
 	if err != nil {
 		t.Fatalf("claim legacy device: %v", err)
@@ -175,11 +191,12 @@ func TestRegisterDesktopDeviceClaimsLegacyDevice(t *testing.T) {
 	}
 
 	_, err = db.RegisterDesktopDevice(ctx, RegisterDesktopDeviceInput{
-		DeviceID:    "legacy",
-		OwnerUserID: "43",
-		OwnerEmail:  "other.test",
-		PublicHost:  "legacy.tunnel-hub.zenmind.cc",
-		TargetURL:   "http://127.0.0.1:7999",
+		DeviceID:     "legacy",
+		OwnerUserID:  "43",
+		OwnerEmail:   "other.test",
+		DeviceSecret: "legacy-secret",
+		PublicHost:   "legacy.tunnel-hub.zenmind.cc",
+		TargetURL:    "http://127.0.0.1:7999",
 	})
 	if !errors.Is(err, ErrDesktopDeviceOwnerMismatch) {
 		t.Fatalf("claimed legacy device should reject different owner, got %v", err)

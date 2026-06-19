@@ -146,7 +146,12 @@ func TestRegisterDesktopDeviceReusesExistingDevice(t *testing.T) {
 	server, db := newDesktopTestServer(t)
 	first := decodeRegisterResponse(t, performRegister(t, server, desktopRegisterBody("mac-mini", "device-secret", "http://127.0.0.1:7082", false), defaultDesktopJWT).Body)
 
-	rec := performRegister(t, server, desktopRegisterBody("mac-mini", "ignored-legacy-secret", "http://127.0.0.1:7083", false), defaultDesktopJWT)
+	rec := performRegister(t, server, desktopRegisterBody("mac-mini", "wrong-secret", "http://127.0.0.1:7999", false), defaultDesktopJWT)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("wrong secret status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+
+	rec = performRegister(t, server, desktopRegisterBody("mac-mini", "device-secret", "http://127.0.0.1:7083", false), defaultDesktopJWT)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
 	}

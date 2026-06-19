@@ -74,15 +74,20 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 
 	publicHost := s.devicePublicHost(payload.DeviceID)
 	result, err := s.DB.RegisterDesktopDevice(r.Context(), store.RegisterDesktopDeviceInput{
-		DeviceID:    payload.DeviceID,
-		OwnerUserID: principal.UserID,
-		OwnerEmail:  principal.Email,
-		PublicHost:  publicHost,
-		TargetURL:   payload.TargetURL,
-		RotateToken: payload.RotateToken,
+		DeviceID:     payload.DeviceID,
+		OwnerUserID:  principal.UserID,
+		OwnerEmail:   principal.Email,
+		DeviceSecret: payload.DeviceSecret,
+		PublicHost:   publicHost,
+		TargetURL:    payload.TargetURL,
+		RotateToken:  payload.RotateToken,
 	})
 	if errors.Is(err, store.ErrDesktopDeviceOwnerMismatch) {
 		writeError(w, http.StatusForbidden, "desktop device belongs to another user")
+		return
+	}
+	if errors.Is(err, store.ErrInvalidDesktopDeviceSecret) {
+		writeError(w, http.StatusForbidden, "invalid device secret")
 		return
 	}
 	if errors.Is(err, store.ErrDesktopDeviceHostConflict) {
@@ -172,14 +177,18 @@ func (s *Server) writeInternal(w http.ResponseWriter, message string, err error)
 }
 
 type registerPayload struct {
-	DeviceID    string `json:"deviceId"`
-	TargetURL   string `json:"targetUrl"`
-	RotateToken bool   `json:"rotateToken"`
+	DeviceID     string `json:"deviceId"`
+	DeviceSecret string `json:"deviceSecret"`
+	TargetURL    string `json:"targetUrl"`
+	RotateToken  bool   `json:"rotateToken"`
 }
 
 func (p registerPayload) Validate() error {
 	if err := validateDeviceID(p.DeviceID); err != nil {
 		return err
+	}
+	if strings.TrimSpace(p.DeviceSecret) == "" {
+		return errors.New("deviceSecret is required")
 	}
 	if strings.TrimSpace(p.TargetURL) == "" {
 		return errors.New("targetUrl is required")

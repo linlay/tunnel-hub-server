@@ -2,15 +2,11 @@ package admin
 
 import (
 	"context"
-	"crypto/hmac"
-	"crypto/sha256"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"log/slog"
 	"net/http"
 	"net/url"
-	"strconv"
 	"strings"
 	"time"
 
@@ -27,8 +23,6 @@ type Server struct {
 	Logger  *slog.Logger
 	ssoJWT  *auth.SSOJWTVerifier
 }
-
-const sessionCookie = "zenmind_admin"
 
 func NewServer(db *store.DB, manager *proxy.Manager, cfg config.RelayConfig, logger *slog.Logger) (*Server, error) {
 	if logger == nil {
@@ -55,10 +49,6 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	path := strings.TrimPrefix(r.URL.Path, "/api/admin")
 	switch {
-	case path == "/login" && r.Method == http.MethodPost:
-		s.handleLogin(w, r)
-	case path == "/logout" && r.Method == http.MethodPost:
-		s.handleLogout(w, r)
 	case path == "/me" && r.Method == http.MethodGet:
 		s.requireAuth(w, r, s.handleMe)
 	case path == "/routes" || strings.HasPrefix(path, "/routes/"):
@@ -88,52 +78,6 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 		"email":    principal.Email,
 		"role":     principal.Role,
 	})
-}
-
-func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
-	var payload loginPayload
-	if err := decodeJSON(r, &payload); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid json")
-		return
-	}
-	username := strings.TrimSpace(payload.Username)
-	ok, err := s.DB.ValidateAdmin(r.Context(), username, payload.Password)
-	if err != nil {
-		s.writeInternal(w, "validate admin login", err)
-		return
-	}
-	if !ok {
-		writeError(w, http.StatusUnauthorized, "invalid credentials")
-		return
-	}
-	expires := time.Now().Add(24 * time.Hour)
-	http.SetCookie(w, &http.Cookie{
-		Name:     sessionCookie,
-		Value:    s.newSessionValue(username, expires),
-		Path:     "/api/admin",
-		Expires:  expires,
-		MaxAge:   int(time.Until(expires).Seconds()),
-		HttpOnly: true,
-		SameSite: http.SameSiteLaxMode,
-		Secure:   r.TLS != nil,
-	})
-	writeJSON(w, http.StatusOK, map[string]any{
-		"username": username,
-		"role":     "admin",
-	})
-}
-
-func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
-	http.SetCookie(w, &http.Cookie{
-		Name:     sessionCookie,
-		Value:    "",
-		Path:     "/api/admin",
-		MaxAge:   -1,
-		HttpOnly: true,
-		SameSite: http.SameSiteLaxMode,
-		Secure:   r.TLS != nil,
-	})
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
 func (s *Server) handleRoutes(w http.ResponseWriter, r *http.Request) {
@@ -459,10 +403,6 @@ func (s *Server) requireAuth(w http.ResponseWriter, r *http.Request, next http.H
 }
 
 func (s *Server) currentPrincipal(r *http.Request) (auth.SSOJWTPrincipal, int, string, bool) {
-	if principal, ok := s.cookiePrincipal(r); ok {
-		return principal, 0, "", true
-	}
-
 	header := r.Header.Get("Authorization")
 	principal, err := s.ssoJWT.VerifyBearerHeader(header)
 	if err != nil {
@@ -484,22 +424,6 @@ func (s *Server) currentPrincipal(r *http.Request) (auth.SSOJWTPrincipal, int, s
 		return auth.SSOJWTPrincipal{}, http.StatusForbidden, "tunnel scope required", false
 	}
 	return principal, 0, "", true
-}
-
-func (s *Server) cookiePrincipal(r *http.Request) (auth.SSOJWTPrincipal, bool) {
-	cookie, err := r.Cookie(sessionCookie)
-	if err != nil {
-		return auth.SSOJWTPrincipal{}, false
-	}
-	username, ok := s.verifySessionValue(cookie.Value)
-	if !ok {
-		return auth.SSOJWTPrincipal{}, false
-	}
-	return auth.SSOJWTPrincipal{
-		UserID: "local:" + username,
-		Role:   "admin",
-		Scope:  "tunnel",
-	}, true
 }
 
 func (s *Server) writeInternal(w http.ResponseWriter, message string, err error) {
@@ -574,11 +498,6 @@ type agentResponse struct {
 	ConnectedAt *time.Time        `json:"connectedAt,omitempty"`
 	Routes      []store.Route     `json:"routes"`
 	RouteCount  int               `json:"routeCount"`
-}
-
-type loginPayload struct {
-	Username string `json:"username"`
-	Password string `json:"password"`
 }
 
 func (s *Server) servicePublicHost(name string) string {
@@ -662,50 +581,7 @@ func principalName(principal auth.SSOJWTPrincipal) string {
 	if principal.Email != "" {
 		return principal.Email
 	}
-	if strings.HasPrefix(principal.UserID, "local:") {
-		return strings.TrimPrefix(principal.UserID, "local:")
-	}
 	return "sso:" + principal.UserID
-}
-
-func (s *Server) newSessionValue(username string, expires time.Time) string {
-	payload := username + "|" + strconv.FormatInt(expires.Unix(), 10)
-	signature := s.signSessionPayload(payload)
-	return base64.RawURLEncoding.EncodeToString([]byte(payload)) + "." + base64.RawURLEncoding.EncodeToString(signature)
-}
-
-func (s *Server) verifySessionValue(value string) (string, bool) {
-	parts := strings.Split(value, ".")
-	if len(parts) != 2 {
-		return "", false
-	}
-	payloadBytes, err := base64.RawURLEncoding.DecodeString(parts[0])
-	if err != nil {
-		return "", false
-	}
-	signature, err := base64.RawURLEncoding.DecodeString(parts[1])
-	if err != nil {
-		return "", false
-	}
-	payload := string(payloadBytes)
-	if !hmac.Equal(signature, s.signSessionPayload(payload)) {
-		return "", false
-	}
-	fields := strings.Split(payload, "|")
-	if len(fields) != 2 || strings.TrimSpace(fields[0]) == "" {
-		return "", false
-	}
-	expiresUnix, err := strconv.ParseInt(fields[1], 10, 64)
-	if err != nil || time.Now().Unix() >= expiresUnix {
-		return "", false
-	}
-	return fields[0], true
-}
-
-func (s *Server) signSessionPayload(payload string) []byte {
-	mac := hmac.New(sha256.New, []byte(s.Config.CookieSecret))
-	_, _ = mac.Write([]byte(payload))
-	return mac.Sum(nil)
 }
 
 var reservedServiceNames = map[string]bool{

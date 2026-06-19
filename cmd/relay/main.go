@@ -31,9 +31,6 @@ func main() {
 	if err := db.Migrate(context.Background()); err != nil {
 		log.Fatalf("migrate db: %v", err)
 	}
-	if err := db.BootstrapAdmin(context.Background(), cfg.BootstrapAdminUsername, cfg.BootstrapAdminPassword); err != nil {
-		log.Fatalf("bootstrap admin: %v", err)
-	}
 	manager := proxy.NewManager()
 	relay := proxy.NewRelay(db, manager, logger, cfg.MaxRequestBodyBytes)
 	adminServer, err := admin.NewServer(db, manager, cfg, logger)
