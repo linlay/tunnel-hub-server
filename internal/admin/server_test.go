@@ -10,6 +10,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -140,6 +141,68 @@ func TestAdminLocalLoginCookieAuth(t *testing.T) {
 	server.ServeHTTP(routesRec, routesReq)
 	if routesRec.Code != http.StatusUnauthorized {
 		t.Fatalf("routes after logout status = %d body = %s", routesRec.Code, routesRec.Body.String())
+	}
+}
+
+func TestAdminUsersManagement(t *testing.T) {
+	server, db := newAdminTestServer(t)
+	root, _, err := db.EnsureAdminUser(context.Background(), "admin", "secret")
+	if err != nil {
+		t.Fatalf("ensure root admin: %v", err)
+	}
+
+	createReq := authedAdminRequest(http.MethodPost, "/api/admin/users", `{"username":"operator","password":"secret-2","status":"active"}`)
+	createRec := httptest.NewRecorder()
+	server.ServeHTTP(createRec, createReq)
+	if createRec.Code != http.StatusCreated {
+		t.Fatalf("create status = %d body = %s", createRec.Code, createRec.Body.String())
+	}
+	var created store.AdminUser
+	if err := json.NewDecoder(createRec.Body).Decode(&created); err != nil {
+		t.Fatalf("decode created admin: %v", err)
+	}
+	if created.Username != "operator" || created.Status != "active" {
+		t.Fatalf("unexpected created admin: %+v", created)
+	}
+
+	listReq := authedAdminRequest(http.MethodGet, "/api/admin/users", "")
+	listRec := httptest.NewRecorder()
+	server.ServeHTTP(listRec, listReq)
+	if listRec.Code != http.StatusOK {
+		t.Fatalf("list status = %d body = %s", listRec.Code, listRec.Body.String())
+	}
+	var listResponse struct {
+		Items []store.AdminUser `json:"items"`
+	}
+	if err := json.NewDecoder(listRec.Body).Decode(&listResponse); err != nil {
+		t.Fatalf("decode list: %v", err)
+	}
+	if len(listResponse.Items) != 2 {
+		t.Fatalf("admin user count = %d, want 2", len(listResponse.Items))
+	}
+
+	patchReq := authedAdminRequest(http.MethodPatch, "/api/admin/users/"+created.ID, `{"username":"ops","password":"new-secret","status":"disabled"}`)
+	patchRec := httptest.NewRecorder()
+	server.ServeHTTP(patchRec, patchReq)
+	if patchRec.Code != http.StatusOK {
+		t.Fatalf("patch status = %d body = %s", patchRec.Code, patchRec.Body.String())
+	}
+	var patched store.AdminUser
+	if err := json.NewDecoder(patchRec.Body).Decode(&patched); err != nil {
+		t.Fatalf("decode patched admin: %v", err)
+	}
+	if patched.Username != "ops" || patched.Status != "disabled" {
+		t.Fatalf("unexpected patched admin: %+v", patched)
+	}
+	if _, err := db.VerifyAdminLogin(context.Background(), "ops", "new-secret"); !errors.Is(err, store.ErrUserInactive) {
+		t.Fatalf("disabled admin should not log in, got %v", err)
+	}
+
+	deleteRootReq := authedAdminRequest(http.MethodDelete, "/api/admin/users/"+root.ID, "")
+	deleteRootRec := httptest.NewRecorder()
+	server.ServeHTTP(deleteRootRec, deleteRootReq)
+	if deleteRootRec.Code != http.StatusBadRequest {
+		t.Fatalf("last active delete status = %d body = %s", deleteRootRec.Code, deleteRootRec.Body.String())
 	}
 }
 

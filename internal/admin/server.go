@@ -63,6 +63,8 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.requireAuth(w, r, s.handleServices)
 	case path == "/tokens" || strings.HasPrefix(path, "/tokens/"):
 		s.requireAuth(w, r, s.handleTokens)
+	case path == "/users" || strings.HasPrefix(path, "/users/"):
+		s.requireAuth(w, r, s.handleUsers)
 	case path == "/agents" && r.Method == http.MethodGet:
 		s.requireAuth(w, r, s.handleAgents)
 	case path == "/sessions" && r.Method == http.MethodGet:
@@ -245,6 +247,83 @@ func (s *Server) handleTokens(w http.ResponseWriter, r *http.Request) {
 		}
 		_ = s.DB.AddEvent(context.Background(), "token.deactivated", "Tunnel token deactivated", id)
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+	default:
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+	}
+}
+
+func (s *Server) handleUsers(w http.ResponseWriter, r *http.Request) {
+	id := strings.TrimPrefix(strings.TrimPrefix(r.URL.Path, "/api/admin/users"), "/")
+	switch r.Method {
+	case http.MethodGet:
+		if id != "" {
+			writeError(w, http.StatusNotFound, "not found")
+			return
+		}
+		users, err := s.DB.ListAdminUsers(r.Context())
+		if err != nil {
+			s.writeInternal(w, "list admin users", err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"items": users})
+	case http.MethodPost:
+		if id != "" {
+			writeError(w, http.StatusNotFound, "not found")
+			return
+		}
+		var payload createAdminUserPayload
+		if err := decodeJSON(r, &payload); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid json")
+			return
+		}
+		user, err := s.DB.CreateAdminUserWithStatus(r.Context(), payload.Username, payload.Password, payload.Status)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		_ = s.DB.AddEvent(context.Background(), "admin_user.created", "Admin user created", user.Username)
+		writeJSON(w, http.StatusCreated, user)
+	case http.MethodPatch:
+		if id == "" {
+			writeError(w, http.StatusBadRequest, "admin user id is required")
+			return
+		}
+		var payload patchAdminUserPayload
+		if err := decodeJSON(r, &payload); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid json")
+			return
+		}
+		user, err := s.DB.UpdateAdminUser(r.Context(), id, store.AdminUserPatch{
+			Username: payload.Username,
+			Password: payload.Password,
+			Status:   payload.Status,
+		})
+		if errors.Is(err, store.ErrUserNotFound) {
+			writeError(w, http.StatusNotFound, "admin user not found")
+			return
+		}
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		_ = s.DB.AddEvent(context.Background(), "admin_user.updated", "Admin user updated", user.Username)
+		writeJSON(w, http.StatusOK, user)
+	case http.MethodDelete:
+		if id == "" {
+			writeError(w, http.StatusBadRequest, "admin user id is required")
+			return
+		}
+		user, err := s.DB.DisableAdminUser(r.Context(), id)
+		if errors.Is(err, store.ErrUserNotFound) {
+			writeError(w, http.StatusNotFound, "admin user not found")
+			return
+		}
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		_ = s.DB.AddEvent(context.Background(), "admin_user.disabled", "Admin user disabled", user.Username)
+		writeJSON(w, http.StatusOK, user)
 	default:
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 	}
@@ -585,6 +664,18 @@ type agentResponse struct {
 type loginPayload struct {
 	Username string `json:"username"`
 	Password string `json:"password"`
+}
+
+type createAdminUserPayload struct {
+	Username string `json:"username"`
+	Password string `json:"password"`
+	Status   string `json:"status"`
+}
+
+type patchAdminUserPayload struct {
+	Username *string `json:"username"`
+	Password *string `json:"password"`
+	Status   *string `json:"status"`
 }
 
 func (s *Server) servicePublicHost(name string) string {

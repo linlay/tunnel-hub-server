@@ -21,6 +21,7 @@ var (
 	ErrInvalidPassword = errors.New("invalid password")
 	ErrSessionNotFound = errors.New("admin session not found")
 	ErrSessionExpired  = errors.New("admin session expired")
+	ErrLastActiveUser  = errors.New("cannot disable the last active admin user")
 )
 
 type AdminUser struct {
@@ -46,6 +47,12 @@ type AdminSession struct {
 	LastSeenAt time.Time
 }
 
+type AdminUserPatch struct {
+	Username *string
+	Password *string
+	Status   *string
+}
+
 func (db *DB) EnsureAdminUser(ctx context.Context, username, password string) (AdminUser, bool, error) {
 	username = normalizeUsername(username)
 	if username == "" {
@@ -69,12 +76,24 @@ func (db *DB) AdminUserCount(ctx context.Context) (int64, error) {
 }
 
 func (db *DB) CreateAdminUser(ctx context.Context, username, password string) (AdminUser, error) {
+	return db.createAdminUser(ctx, username, password, "active")
+}
+
+func (db *DB) CreateAdminUserWithStatus(ctx context.Context, username, password, status string) (AdminUser, error) {
+	return db.createAdminUser(ctx, username, password, status)
+}
+
+func (db *DB) createAdminUser(ctx context.Context, username, password, status string) (AdminUser, error) {
 	username = normalizeUsername(username)
 	if username == "" {
 		return AdminUser{}, errors.New("username is required")
 	}
 	if strings.TrimSpace(password) == "" {
 		return AdminUser{}, errors.New("password is required")
+	}
+	status, err := normalizeAdminUserStatus(status)
+	if err != nil {
+		return AdminUser{}, err
 	}
 	hash, err := auth.HashSecret(password)
 	if err != nil {
@@ -83,8 +102,8 @@ func (db *DB) CreateAdminUser(ctx context.Context, username, password string) (A
 	now := time.Now().UTC()
 	result, err := db.sql.ExecContext(ctx, `
 		INSERT INTO admin_users (username, password_hash, status, created_at, updated_at)
-		VALUES (?, ?, 'active', ?, ?)
-	`, username, hash, now, now)
+		VALUES (?, ?, ?, ?, ?)
+	`, username, hash, status, now, now)
 	if err != nil {
 		return AdminUser{}, err
 	}
@@ -95,10 +114,107 @@ func (db *DB) CreateAdminUser(ctx context.Context, username, password string) (A
 	return AdminUser{
 		ID:        strconv.FormatInt(id, 10),
 		Username:  username,
-		Status:    "active",
+		Status:    status,
 		CreatedAt: now,
 		UpdatedAt: now,
 	}, nil
+}
+
+func (db *DB) ListAdminUsers(ctx context.Context) ([]AdminUser, error) {
+	rows, err := db.sql.QueryContext(ctx, `
+		SELECT CAST(id AS TEXT), username, status, created_at, updated_at, last_login_at
+		FROM admin_users
+		ORDER BY username ASC
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	users := make([]AdminUser, 0)
+	for rows.Next() {
+		user, err := scanAdminUser(rows)
+		if err != nil {
+			return nil, err
+		}
+		users = append(users, user)
+	}
+	return users, rows.Err()
+}
+
+func (db *DB) GetAdminUser(ctx context.Context, id string) (AdminUserWithPassword, error) {
+	row := db.sql.QueryRowContext(ctx, `
+		SELECT CAST(id AS TEXT), username, password_hash, status, created_at, updated_at, last_login_at
+		FROM admin_users
+		WHERE id = ?
+	`, strings.TrimSpace(id))
+	return scanAdminUserWithPassword(row)
+}
+
+func (db *DB) UpdateAdminUser(ctx context.Context, id string, patch AdminUserPatch) (AdminUser, error) {
+	user, err := db.GetAdminUser(ctx, id)
+	if err != nil {
+		return AdminUser{}, err
+	}
+
+	username := user.Username
+	if patch.Username != nil {
+		username = normalizeUsername(*patch.Username)
+		if username == "" {
+			return AdminUser{}, errors.New("username is required")
+		}
+	}
+
+	status := user.Status
+	if patch.Status != nil {
+		status, err = normalizeAdminUserStatus(*patch.Status)
+		if err != nil {
+			return AdminUser{}, err
+		}
+		if user.Status == "active" && status == "disabled" {
+			if err := db.ensureNotLastActiveAdmin(ctx, id); err != nil {
+				return AdminUser{}, err
+			}
+		}
+	}
+
+	passwordHash := user.PasswordHash
+	if patch.Password != nil {
+		if strings.TrimSpace(*patch.Password) == "" {
+			return AdminUser{}, errors.New("password cannot be empty")
+		}
+		passwordHash, err = auth.HashSecret(*patch.Password)
+		if err != nil {
+			return AdminUser{}, err
+		}
+	}
+
+	now := time.Now().UTC()
+	result, err := db.sql.ExecContext(ctx, `
+		UPDATE admin_users
+		SET username = ?, password_hash = ?, status = ?, updated_at = ?
+		WHERE id = ?
+	`, username, passwordHash, status, now, strings.TrimSpace(id))
+	if err != nil {
+		return AdminUser{}, err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return AdminUser{}, err
+	}
+	if affected == 0 {
+		return AdminUser{}, ErrUserNotFound
+	}
+	updated, err := db.GetAdminUser(ctx, id)
+	if err != nil {
+		return AdminUser{}, err
+	}
+	return updated.AdminUser, nil
+}
+
+func (db *DB) DisableAdminUser(ctx context.Context, id string) (AdminUser, error) {
+	status := "disabled"
+	return db.UpdateAdminUser(ctx, id, AdminUserPatch{Status: &status})
 }
 
 func (db *DB) GetAdminUserByUsername(ctx context.Context, username string) (AdminUserWithPassword, error) {
@@ -216,6 +332,21 @@ func (db *DB) ensureAdminUserColumns(ctx context.Context) error {
 	return err
 }
 
+func (db *DB) ensureNotLastActiveAdmin(ctx context.Context, id string) error {
+	var count int64
+	if err := db.sql.QueryRowContext(ctx, `
+		SELECT COUNT(*)
+		FROM admin_users
+		WHERE status = 'active' AND CAST(id AS TEXT) <> ?
+	`, strings.TrimSpace(id)).Scan(&count); err != nil {
+		return err
+	}
+	if count == 0 {
+		return ErrLastActiveUser
+	}
+	return nil
+}
+
 func scanAdminUser(scanner rowScanner) (AdminUser, error) {
 	var user AdminUser
 	var lastLoginAt sql.NullTime
@@ -267,6 +398,17 @@ func scanAdminSessionUser(scanner rowScanner) (AdminUser, time.Time, error) {
 
 func normalizeUsername(value string) string {
 	return strings.ToLower(strings.TrimSpace(value))
+}
+
+func normalizeAdminUserStatus(value string) (string, error) {
+	status := strings.ToLower(strings.TrimSpace(value))
+	if status == "" {
+		status = "active"
+	}
+	if status != "active" && status != "disabled" {
+		return "", errors.New("status must be active or disabled")
+	}
+	return status, nil
 }
 
 func newRandomSessionToken() (string, error) {
