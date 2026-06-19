@@ -2,7 +2,14 @@ package desktop
 
 import (
 	"context"
+	"crypto"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/sha256"
+	"crypto/x509"
+	"encoding/base64"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"io"
 	"net"
@@ -24,7 +31,7 @@ const testRegistrationSecret = "register-secret"
 func TestRegisterRequiresRegistrationSecret(t *testing.T) {
 	server, _ := newDesktopTestServer(t)
 	server.Config.DesktopRegistrationSecret = ""
-	rec := performRegister(t, server, desktopRegisterBody("mac-mini", "device-secret", "http://127.0.0.1:7082", false), testRegistrationSecret)
+	rec := performRegister(t, server, desktopRegisterBody("mac-mini", "device-secret", "http://127.0.0.1:7082", false), "")
 	if rec.Code != http.StatusServiceUnavailable {
 		t.Fatalf("disabled status = %d, body = %s", rec.Code, rec.Body.String())
 	}
@@ -72,6 +79,49 @@ func TestRegisterDesktopDeviceCreatesTokenAndRoute(t *testing.T) {
 	}
 	if token.ID != response.TokenID {
 		t.Fatalf("token id = %q, want %q", token.ID, response.TokenID)
+	}
+}
+
+func TestRegisterDesktopDeviceAcceptsSSOJWT(t *testing.T) {
+	privateKey, publicKeyPEM := testSSOJWTKey(t)
+	server, db := newDesktopTestServerWithConfig(t, config.RelayConfig{
+		PublicBaseDomain:   "tunnel-hub.zenmind.cc",
+		SSOJWTIssuer:       "https://official.example.test",
+		SSOJWTPublicKeyPEM: publicKeyPEM,
+		SSOJWTAudience:     "zenmind-tunnel-hub-server",
+	})
+	token := signTestSSOJWT(t, privateKey, testSSOJWTClaims{
+		Issuer:   "https://official.example.test",
+		Audience: "zenmind-tunnel-hub-server",
+		UserID:   "42",
+		Email:    "desktop@example.test",
+		Role:     "user",
+		Expires:  time.Now().Add(time.Hour),
+	})
+
+	rec := performRegister(t, server, desktopRegisterBody("jwt-device", "device-secret", "http://127.0.0.1:7082", false), token)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("JWT registration status = %d body = %s", rec.Code, rec.Body.String())
+	}
+	response := decodeRegisterResponse(t, rec.Body)
+	if response.PublicHost != "jwt-device.tunnel-hub.zenmind.cc" || response.AgentToken == "" {
+		t.Fatalf("unexpected JWT registration response: %+v", response)
+	}
+	if _, err := db.GetRouteByHost(context.Background(), response.PublicHost); err != nil {
+		t.Fatalf("get JWT registered route: %v", err)
+	}
+
+	wrongAudienceToken := signTestSSOJWT(t, privateKey, testSSOJWTClaims{
+		Issuer:   "https://official.example.test",
+		Audience: "zenmind-market-server",
+		UserID:   "42",
+		Email:    "desktop@example.test",
+		Role:     "user",
+		Expires:  time.Now().Add(time.Hour),
+	})
+	rec = performRegister(t, server, desktopRegisterBody("jwt-denied", "device-secret", "http://127.0.0.1:7082", false), wrongAudienceToken)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("wrong audience status = %d body = %s", rec.Code, rec.Body.String())
 	}
 }
 
@@ -227,8 +277,13 @@ func TestDesktopRegistrationTunnelWebSocketIntegration(t *testing.T) {
 
 func newDesktopTestServer(t *testing.T) (*Server, *store.DB) {
 	t.Helper()
+	return newDesktopTestServerWithConfig(t, desktopTestConfig())
+}
+
+func newDesktopTestServerWithConfig(t *testing.T, cfg config.RelayConfig) (*Server, *store.DB) {
+	t.Helper()
 	db := openDesktopTestDB(t)
-	return NewServer(db, desktopTestConfig(), nil), db
+	return NewServer(db, cfg, nil), db
 }
 
 func openDesktopTestDB(t *testing.T) *store.DB {
@@ -261,6 +316,57 @@ func performRegister(t *testing.T, server *Server, body string, token string) *h
 	rec := httptest.NewRecorder()
 	server.ServeHTTP(rec, req)
 	return rec
+}
+
+type testSSOJWTClaims struct {
+	Issuer   string
+	Audience string
+	UserID   string
+	Email    string
+	Role     string
+	Expires  time.Time
+}
+
+func testSSOJWTKey(t *testing.T) (*rsa.PrivateKey, string) {
+	t.Helper()
+	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("generate RSA key: %v", err)
+	}
+	publicKeyDER, err := x509.MarshalPKIXPublicKey(&privateKey.PublicKey)
+	if err != nil {
+		t.Fatalf("marshal public key: %v", err)
+	}
+	publicKeyPEM := pem.EncodeToMemory(&pem.Block{
+		Type:  "PUBLIC KEY",
+		Bytes: publicKeyDER,
+	})
+	return privateKey, string(publicKeyPEM)
+}
+
+func signTestSSOJWT(t *testing.T, privateKey *rsa.PrivateKey, claims testSSOJWTClaims) string {
+	t.Helper()
+	headerJSON, _ := json.Marshal(map[string]any{"alg": "RS256", "typ": "JWT", "kid": "test-key"})
+	claimsJSON, _ := json.Marshal(map[string]any{
+		"iss":     claims.Issuer,
+		"sub":     "user:" + claims.UserID,
+		"aud":     claims.Audience,
+		"iat":     time.Now().Unix(),
+		"exp":     claims.Expires.Unix(),
+		"jti":     "test-jti",
+		"user_id": claims.UserID,
+		"email":   claims.Email,
+		"role":    claims.Role,
+	})
+	headerPart := base64.RawURLEncoding.EncodeToString(headerJSON)
+	payloadPart := base64.RawURLEncoding.EncodeToString(claimsJSON)
+	signedValue := headerPart + "." + payloadPart
+	digest := sha256.Sum256([]byte(signedValue))
+	signature, err := rsa.SignPKCS1v15(rand.Reader, privateKey, crypto.SHA256, digest[:])
+	if err != nil {
+		t.Fatalf("sign JWT: %v", err)
+	}
+	return signedValue + "." + base64.RawURLEncoding.EncodeToString(signature)
 }
 
 func postRegisterHTTP(t *testing.T, baseURL, body string) registerResponse {

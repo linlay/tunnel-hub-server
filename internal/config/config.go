@@ -15,6 +15,10 @@ type RelayConfig struct {
 	WebsiteDist               string
 	PublicBaseDomain          string
 	DesktopRegistrationSecret string
+	SSOJWTIssuer              string
+	SSOJWTPublicKeyFile       string
+	SSOJWTPublicKeyPEM        string
+	SSOJWTAudience            string
 	CookieSecret              string
 	BootstrapAdminUsername    string
 	BootstrapAdminPassword    string
@@ -38,6 +42,10 @@ func LoadRelayConfig() RelayConfig {
 		WebsiteDist:               env("WEBSITE_DIST", ""),
 		PublicBaseDomain:          env("PUBLIC_BASE_DOMAIN", "tunnel-hub.zenmind.cc"),
 		DesktopRegistrationSecret: env("DESKTOP_REGISTRATION_SECRET", ""),
+		SSOJWTIssuer:              env("SSO_JWT_ISSUER", ""),
+		SSOJWTPublicKeyFile:       env("SSO_JWT_PUBLIC_KEY_FILE", ""),
+		SSOJWTPublicKeyPEM:        env("SSO_JWT_PUBLIC_KEY_PEM", ""),
+		SSOJWTAudience:            env("SSO_JWT_AUDIENCE", "zenmind-tunnel-hub-server"),
 		CookieSecret:              env("COOKIE_SECRET", randomSecret()),
 		BootstrapAdminUsername:    env("BOOTSTRAP_ADMIN_USERNAME", "admin"),
 		BootstrapAdminPassword:    env("BOOTSTRAP_ADMIN_PASSWORD", "admin"),

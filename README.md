@@ -21,6 +21,10 @@ Copy `.env.example` to `.env` for local development, then replace any placeholde
 | `WEBSITE_DIST` | empty | Optional legacy built website directory. Leave empty in the split website/server deployment. |
 | `PUBLIC_BASE_DOMAIN` | `tunnel-hub.zenmind.cc` | Base domain used by `/api/admin/services/{name}`. |
 | `DESKTOP_REGISTRATION_SECRET` | empty | Optional bearer secret that enables `/api/desktop/devices/register` for Desktop self-registration. Leave empty to disable Desktop registration. |
+| `SSO_JWT_ISSUER` | empty | Expected issuer for official-site SSO JWTs. Leave empty to disable JWT auth. |
+| `SSO_JWT_PUBLIC_KEY_FILE` | empty | PEM public key file used to verify SSO JWTs. |
+| `SSO_JWT_PUBLIC_KEY_PEM` | empty | PEM public key value fallback; supports escaped `\n`. |
+| `SSO_JWT_AUDIENCE` | `zenmind-tunnel-hub-server` | Required JWT audience. |
 | `COOKIE_SECRET` | random dev value | HMAC secret for admin sessions. |
 | `BOOTSTRAP_ADMIN_USERNAME` | `admin` | First admin username. |
 | `BOOTSTRAP_ADMIN_PASSWORD` | `admin` | First admin password. |
@@ -47,7 +51,7 @@ AGENT_TOKEN=<token> AGENT_RELAY_URL=ws://127.0.0.1:8080/tunnel go run ./cmd/agen
 
 ## Managed Service Publish API
 
-Create an Admin API Key from the console or `/api/admin/api-keys`, then publish a local service:
+Create an Admin API Key from the console or `/api/admin/api-keys`, or use an official-site SSO JWT with `role=admin`, then publish a local service:
 
 ```bash
 curl -X PUT https://tunnel-hub.zenmind.cc/api/admin/services/auditor \
@@ -60,7 +64,7 @@ This creates or updates `auditor.tunnel-hub.zenmind.cc` and binds it to the sele
 
 ## Desktop Device Registration API
 
-Set `DESKTOP_REGISTRATION_SECRET` on the Relay, then Desktop can register its own tunnel without using an Admin API Key:
+Set `DESKTOP_REGISTRATION_SECRET` on the Relay, or configure official-site SSO JWT verification, then Desktop can register its own tunnel without using an Admin API Key:
 
 ```bash
 curl -X POST https://tunnel-hub.zenmind.cc/api/desktop/devices/register \

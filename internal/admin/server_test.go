@@ -2,7 +2,14 @@ package admin
 
 import (
 	"context"
+	"crypto"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/sha256"
+	"crypto/x509"
+	"encoding/base64"
 	"encoding/json"
+	"encoding/pem"
 	"fmt"
 	"net"
 	"net/http"
@@ -44,6 +51,49 @@ func TestAdminAPIKeyBearerAuth(t *testing.T) {
 	}
 	if len(keys) != 1 || keys[0].ID != key.ID || keys[0].LastUsedAt == nil {
 		t.Fatalf("api key was not touched after bearer auth: %+v", keys)
+	}
+}
+
+func TestAdminSSOJWTBearerAuth(t *testing.T) {
+	privateKey, publicKeyPEM := testSSOJWTKey(t)
+	server, _ := newAdminTestServerWithConfig(t, config.RelayConfig{
+		CookieSecret:       "test-cookie-secret",
+		PublicBaseDomain:   "tunnel-hub.zenmind.cc",
+		SSOJWTIssuer:       "https://official.example.test",
+		SSOJWTPublicKeyPEM: publicKeyPEM,
+		SSOJWTAudience:     "zenmind-tunnel-hub-server",
+	})
+
+	adminToken := signTestSSOJWT(t, privateKey, testSSOJWTClaims{
+		Issuer:   "https://official.example.test",
+		Audience: "zenmind-tunnel-hub-server",
+		UserID:   "1",
+		Email:    "admin@example.test",
+		Role:     "admin",
+		Expires:  time.Now().Add(time.Hour),
+	})
+	req := httptest.NewRequest(http.MethodGet, "/api/admin/routes", nil)
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	rec := httptest.NewRecorder()
+	server.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("admin JWT status = %d body = %s", rec.Code, rec.Body.String())
+	}
+
+	wrongAudienceToken := signTestSSOJWT(t, privateKey, testSSOJWTClaims{
+		Issuer:   "https://official.example.test",
+		Audience: "zenmind-market-server",
+		UserID:   "1",
+		Email:    "admin@example.test",
+		Role:     "admin",
+		Expires:  time.Now().Add(time.Hour),
+	})
+	req = httptest.NewRequest(http.MethodGet, "/api/admin/routes", nil)
+	req.Header.Set("Authorization", "Bearer "+wrongAudienceToken)
+	rec = httptest.NewRecorder()
+	server.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("wrong audience status = %d body = %s", rec.Code, rec.Body.String())
 	}
 }
 
@@ -245,6 +295,14 @@ func TestAgentsEndpointCombinesTokenConnectionAndRoutes(t *testing.T) {
 
 func newAdminTestServer(t *testing.T) (*Server, *store.DB) {
 	t.Helper()
+	return newAdminTestServerWithConfig(t, config.RelayConfig{
+		CookieSecret:     "test-cookie-secret",
+		PublicBaseDomain: "tunnel-hub.zenmind.cc",
+	})
+}
+
+func newAdminTestServerWithConfig(t *testing.T, cfg config.RelayConfig) (*Server, *store.DB) {
+	t.Helper()
 	db, err := store.Open(":memory:")
 	if err != nil {
 		t.Fatalf("open db: %v", err)
@@ -252,10 +310,6 @@ func newAdminTestServer(t *testing.T) (*Server, *store.DB) {
 	t.Cleanup(func() { _ = db.Close() })
 	if err := db.Migrate(context.Background()); err != nil {
 		t.Fatalf("migrate: %v", err)
-	}
-	cfg := config.RelayConfig{
-		CookieSecret:     "test-cookie-secret",
-		PublicBaseDomain: "tunnel-hub.zenmind.cc",
 	}
 	return NewServer(db, proxy.NewManager(), cfg, nil), db
 }
@@ -296,6 +350,57 @@ func createAdminTestToken(t *testing.T, db *store.DB, name string) store.TunnelT
 		t.Fatalf("create token: %v", err)
 	}
 	return token
+}
+
+type testSSOJWTClaims struct {
+	Issuer   string
+	Audience string
+	UserID   string
+	Email    string
+	Role     string
+	Expires  time.Time
+}
+
+func testSSOJWTKey(t *testing.T) (*rsa.PrivateKey, string) {
+	t.Helper()
+	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("generate RSA key: %v", err)
+	}
+	publicKeyDER, err := x509.MarshalPKIXPublicKey(&privateKey.PublicKey)
+	if err != nil {
+		t.Fatalf("marshal public key: %v", err)
+	}
+	publicKeyPEM := pem.EncodeToMemory(&pem.Block{
+		Type:  "PUBLIC KEY",
+		Bytes: publicKeyDER,
+	})
+	return privateKey, string(publicKeyPEM)
+}
+
+func signTestSSOJWT(t *testing.T, privateKey *rsa.PrivateKey, claims testSSOJWTClaims) string {
+	t.Helper()
+	headerJSON, _ := json.Marshal(map[string]any{"alg": "RS256", "typ": "JWT", "kid": "test-key"})
+	claimsJSON, _ := json.Marshal(map[string]any{
+		"iss":     claims.Issuer,
+		"sub":     "user:" + claims.UserID,
+		"aud":     claims.Audience,
+		"iat":     time.Now().Unix(),
+		"exp":     claims.Expires.Unix(),
+		"jti":     "test-jti",
+		"user_id": claims.UserID,
+		"email":   claims.Email,
+		"role":    claims.Role,
+	})
+	headerPart := base64.RawURLEncoding.EncodeToString(headerJSON)
+	payloadPart := base64.RawURLEncoding.EncodeToString(claimsJSON)
+	signedValue := headerPart + "." + payloadPart
+	digest := sha256.Sum256([]byte(signedValue))
+	signature, err := rsa.SignPKCS1v15(rand.Reader, privateKey, crypto.SHA256, digest[:])
+	if err != nil {
+		t.Fatalf("sign JWT: %v", err)
+	}
+	return signedValue + "." + base64.RawURLEncoding.EncodeToString(signature)
 }
 
 func newAdminTestSession(t *testing.T) (*yamux.Session, *yamux.Session) {

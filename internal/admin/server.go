@@ -23,13 +23,23 @@ type Server struct {
 	Manager *proxy.Manager
 	Config  config.RelayConfig
 	Logger  *slog.Logger
+	ssoJWT  *auth.SSOJWTVerifier
 }
 
 func NewServer(db *store.DB, manager *proxy.Manager, cfg config.RelayConfig, logger *slog.Logger) *Server {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &Server{DB: db, Manager: manager, Config: cfg, Logger: logger}
+	ssoJWT, err := auth.NewSSOJWTVerifier(auth.SSOJWTConfig{
+		Issuer:        cfg.SSOJWTIssuer,
+		Audience:      cfg.SSOJWTAudience,
+		PublicKeyFile: cfg.SSOJWTPublicKeyFile,
+		PublicKeyPEM:  cfg.SSOJWTPublicKeyPEM,
+	})
+	if err != nil {
+		logger.Error("configure SSO JWT verifier", "error", err)
+	}
+	return &Server{DB: db, Manager: manager, Config: cfg, Logger: logger, ssoJWT: ssoJWT}
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -473,6 +483,9 @@ func (s *Server) currentPrincipal(r *http.Request) (string, bool) {
 	rawKey := bearerToken(r.Header.Get("Authorization"))
 	if rawKey == "" {
 		return "", false
+	}
+	if principal, ok := s.ssoJWT.VerifyBearerHeader(r.Header.Get("Authorization")); ok && principal.Role == "admin" {
+		return "sso:" + principal.UserID, true
 	}
 	key, err := s.DB.FindActiveAdminAPIKeyBySecret(r.Context(), rawKey)
 	if err != nil {

@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"strings"
 
+	"github.com/linlay/zenmind-tunnel-server/internal/auth"
 	"github.com/linlay/zenmind-tunnel-server/internal/config"
 	"github.com/linlay/zenmind-tunnel-server/internal/store"
 )
@@ -20,13 +21,23 @@ type Server struct {
 	DB     *store.DB
 	Config config.RelayConfig
 	Logger *slog.Logger
+	ssoJWT *auth.SSOJWTVerifier
 }
 
 func NewServer(db *store.DB, cfg config.RelayConfig, logger *slog.Logger) *Server {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &Server{DB: db, Config: cfg, Logger: logger}
+	ssoJWT, err := auth.NewSSOJWTVerifier(auth.SSOJWTConfig{
+		Issuer:        cfg.SSOJWTIssuer,
+		Audience:      cfg.SSOJWTAudience,
+		PublicKeyFile: cfg.SSOJWTPublicKeyFile,
+		PublicKeyPEM:  cfg.SSOJWTPublicKeyPEM,
+	})
+	if err != nil {
+		logger.Error("configure SSO JWT verifier", "error", err)
+	}
+	return &Server{DB: db, Config: cfg, Logger: logger, ssoJWT: ssoJWT}
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -86,12 +97,19 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) authorizeRegistration(w http.ResponseWriter, r *http.Request) bool {
+	if _, ok := s.ssoJWT.VerifyBearerHeader(r.Header.Get("Authorization")); ok {
+		return true
+	}
 	secret := strings.TrimSpace(s.Config.DesktopRegistrationSecret)
+	token := bearerToken(r.Header.Get("Authorization"))
+	if token != "" && secret == "" {
+		writeError(w, http.StatusUnauthorized, "invalid registration token")
+		return false
+	}
 	if secret == "" {
 		writeError(w, http.StatusServiceUnavailable, "desktop registration is disabled")
 		return false
 	}
-	token := bearerToken(r.Header.Get("Authorization"))
 	if token == "" || !hmac.Equal([]byte(token), []byte(secret)) {
 		writeError(w, http.StatusUnauthorized, "invalid registration token")
 		return false
