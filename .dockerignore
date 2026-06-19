@@ -3,10 +3,10 @@
 .env
 .env.local
 .local
+data/*
+!data/.gitkeep
 configs/*.pem
 configs/*.key
-keys/*.pem
-keys/*.key
 *.db
 *.db-*
 dist
