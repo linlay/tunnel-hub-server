@@ -7,20 +7,21 @@ import (
 )
 
 type RelayConfig struct {
-	Addr                string
-	DatabasePath        string
-	AdminHost           string
-	WebsiteDist         string
-	PublicBaseDomain    string
-	AdminUsername       string
-	AdminPassword       string
-	AdminSessionTTL     time.Duration
-	CookieSecure        bool
-	SSOJWTIssuer        string
-	SSOJWTPublicKeyFile string
-	SSOJWTPublicKeyPEM  string
-	SSOJWTAudience      string
-	MaxRequestBodyBytes int64
+	Addr                    string
+	DatabasePath            string
+	AdminHost               string
+	WebsiteDist             string
+	PublicBaseDomain        string
+	DesktopPublicBaseDomain string
+	AdminUsername           string
+	AdminPassword           string
+	AdminSessionTTL         time.Duration
+	CookieSecure            bool
+	SSOJWTIssuer            string
+	SSOJWTPublicKeyFile     string
+	SSOJWTPublicKeyPEM      string
+	SSOJWTAudience          string
+	MaxRequestBodyBytes     int64
 }
 
 type AgentConfig struct {
@@ -34,20 +35,21 @@ func LoadRelayConfig() RelayConfig {
 	loadDotEnv()
 
 	return RelayConfig{
-		Addr:                env("RELAY_ADDR", ":8080"),
-		DatabasePath:        env("RELAY_DB_PATH", "tunnel.db"),
-		AdminHost:           env("ADMIN_HOST", ""),
-		WebsiteDist:         env("WEBSITE_DIST", ""),
-		PublicBaseDomain:    env("PUBLIC_BASE_DOMAIN", "tunnel-hub.zenmind.cc"),
-		AdminUsername:       env("ADMIN_USERNAME", env("BOOTSTRAP_ADMIN_USERNAME", "admin")),
-		AdminPassword:       env("ADMIN_PASSWORD", os.Getenv("BOOTSTRAP_ADMIN_PASSWORD")),
-		AdminSessionTTL:     envDuration("ADMIN_SESSION_TTL", 24*time.Hour),
-		CookieSecure:        envBool("COOKIE_SECURE", false),
-		SSOJWTIssuer:        env("SSO_JWT_ISSUER", ""),
-		SSOJWTPublicKeyFile: env("SSO_JWT_PUBLIC_KEY_FILE", ""),
-		SSOJWTPublicKeyPEM:  env("SSO_JWT_PUBLIC_KEY_PEM", ""),
-		SSOJWTAudience:      env("SSO_JWT_AUDIENCE", "zenmind-tunnel-hub-server"),
-		MaxRequestBodyBytes: envInt64("MAX_REQUEST_BODY_BYTES", 64<<20),
+		Addr:                    env("RELAY_ADDR", ":8080"),
+		DatabasePath:            env("RELAY_DB_PATH", "tunnel.db"),
+		AdminHost:               env("ADMIN_HOST", ""),
+		WebsiteDist:             env("WEBSITE_DIST", ""),
+		PublicBaseDomain:        env("PUBLIC_BASE_DOMAIN", "tunnel-hub.zenmind.cc"),
+		DesktopPublicBaseDomain: env("DESKTOP_PUBLIC_BASE_DOMAIN", "m.zenmind.cc"),
+		AdminUsername:           env("ADMIN_USERNAME", env("BOOTSTRAP_ADMIN_USERNAME", "admin")),
+		AdminPassword:           env("ADMIN_PASSWORD", os.Getenv("BOOTSTRAP_ADMIN_PASSWORD")),
+		AdminSessionTTL:         envDuration("ADMIN_SESSION_TTL", 24*time.Hour),
+		CookieSecure:            envBool("COOKIE_SECURE", false),
+		SSOJWTIssuer:            env("SSO_JWT_ISSUER", ""),
+		SSOJWTPublicKeyFile:     env("SSO_JWT_PUBLIC_KEY_FILE", ""),
+		SSOJWTPublicKeyPEM:      env("SSO_JWT_PUBLIC_KEY_PEM", ""),
+		SSOJWTAudience:          env("SSO_JWT_AUDIENCE", "zenmind-tunnel-hub-server"),
+		MaxRequestBodyBytes:     envInt64("MAX_REQUEST_BODY_BYTES", 64<<20),
 	}
 }
 

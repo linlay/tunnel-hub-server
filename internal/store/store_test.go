@@ -2,7 +2,6 @@ package store
 
 import (
 	"context"
-	"errors"
 	"testing"
 	"time"
 
@@ -121,15 +120,18 @@ func TestRegisterDesktopDeviceOwnership(t *testing.T) {
 		t.Fatalf("unexpected second registration: %+v", second)
 	}
 
-	_, err = db.RegisterDesktopDevice(ctx, RegisterDesktopDeviceInput{
+	other, err := db.RegisterDesktopDevice(ctx, RegisterDesktopDeviceInput{
 		DeviceID:    "mac-mini",
 		OwnerUserID: "43",
 		OwnerEmail:  "other.test",
-		PublicHost:  "mac-mini.tunnel-hub.zenmind.cc",
+		PublicHost:  "random.m.zenmind.cc",
 		TargetURL:   "http://127.0.0.1:7999",
 	})
-	if !errors.Is(err, ErrDesktopDeviceOwnerMismatch) {
-		t.Fatalf("different owner should be rejected, got %v", err)
+	if err != nil {
+		t.Fatalf("different owner with same display device id should register independently: %v", err)
+	}
+	if !other.Created || other.Device.DeviceID != "mac-mini" || other.Device.OwnerUserID != "43" {
+		t.Fatalf("unexpected different owner registration: %+v", other)
 	}
 	route, err := db.GetRouteByHost(ctx, "mac-mini.tunnel-hub.zenmind.cc")
 	if err != nil {
@@ -188,15 +190,18 @@ func TestRegisterDesktopDeviceClaimsLegacyDevice(t *testing.T) {
 		t.Fatalf("unexpected legacy claim: %+v", result)
 	}
 
-	_, err = db.RegisterDesktopDevice(ctx, RegisterDesktopDeviceInput{
+	other, err := db.RegisterDesktopDevice(ctx, RegisterDesktopDeviceInput{
 		DeviceID:    "legacy",
 		OwnerUserID: "43",
 		OwnerEmail:  "other.test",
-		PublicHost:  "legacy.tunnel-hub.zenmind.cc",
+		PublicHost:  "other-legacy.m.zenmind.cc",
 		TargetURL:   "http://127.0.0.1:7999",
 	})
-	if !errors.Is(err, ErrDesktopDeviceOwnerMismatch) {
-		t.Fatalf("claimed legacy device should reject different owner, got %v", err)
+	if err != nil {
+		t.Fatalf("different owner should register independent legacy display id: %v", err)
+	}
+	if !other.Created || other.Device.OwnerUserID != "43" || other.Device.TargetURL != "http://127.0.0.1:7999" {
+		t.Fatalf("unexpected different owner legacy registration: %+v", other)
 	}
 }
 

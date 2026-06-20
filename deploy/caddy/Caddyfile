@@ -20,8 +20,8 @@ tunnel-hub.zenmind.cc {
 	}
 }
 
-# Public wildcard routes require DNS for *.tunnel-hub.zenmind.cc.
+# Public wildcard routes require DNS for *.m.zenmind.cc.
 # Public ACME wildcard certificates usually require a DNS challenge provider.
-*.tunnel-hub.zenmind.cc {
+*.m.zenmind.cc {
 	reverse_proxy relay:8080
 }

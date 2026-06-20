@@ -2,6 +2,8 @@ package desktop
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/base32"
 	"encoding/json"
 	"errors"
 	"log/slog"
@@ -15,6 +17,7 @@ import (
 )
 
 const registerPath = "/api/desktop/devices/register"
+const publicHostRetryLimit = 8
 
 type Server struct {
 	DB     *store.DB
@@ -66,27 +69,20 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	payload.DeviceID = strings.TrimSpace(payload.DeviceID)
+	payload.DeviceName = strings.TrimSpace(payload.DeviceName)
 	payload.TargetURL = strings.TrimSpace(payload.TargetURL)
 	if err := payload.Validate(); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
-	publicHost := s.devicePublicHost(payload.DeviceID)
-	result, err := s.DB.RegisterDesktopDevice(r.Context(), store.RegisterDesktopDeviceInput{
-		DeviceID:    payload.DeviceID,
-		OwnerUserID: principal.UserID,
-		OwnerEmail:  principal.Email,
-		PublicHost:  publicHost,
-		TargetURL:   payload.TargetURL,
-		RotateToken: payload.RotateToken,
-	})
+	result, err := s.registerDesktopDevice(r, principal, payload)
 	if errors.Is(err, store.ErrDesktopDeviceOwnerMismatch) {
 		writeError(w, http.StatusForbidden, "desktop device belongs to another user")
 		return
 	}
 	if errors.Is(err, store.ErrDesktopDeviceHostConflict) {
-		writeError(w, http.StatusConflict, "device host already exists")
+		writeError(w, http.StatusConflict, "desktop public host already exists")
 		return
 	}
 	if err != nil {
@@ -95,6 +91,35 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 	}
 	s.addRegistrationEvent(result)
 	writeJSON(w, http.StatusOK, s.registrationResponse(result))
+}
+
+func (s *Server) registerDesktopDevice(r *http.Request, principal auth.SSOJWTPrincipal, payload registerPayload) (store.RegisterDesktopDeviceResult, error) {
+	var lastErr error
+	for attempt := 0; attempt < publicHostRetryLimit; attempt++ {
+		publicHost, err := s.randomDesktopPublicHost()
+		if err != nil {
+			return store.RegisterDesktopDeviceResult{}, err
+		}
+		result, err := s.DB.RegisterDesktopDevice(r.Context(), store.RegisterDesktopDeviceInput{
+			DeviceID:         payload.DeviceID,
+			DeviceName:       payload.DeviceName,
+			OwnerUserID:      principal.UserID,
+			OwnerEmail:       principal.Email,
+			OwnerName:        principal.Name,
+			PublicHost:       publicHost,
+			TargetURL:        payload.TargetURL,
+			RotateToken:      payload.RotateToken,
+			RotatePublicHost: payload.RotatePublicHost,
+		})
+		if !errors.Is(err, store.ErrDesktopDeviceHostConflict) {
+			return result, err
+		}
+		lastErr = err
+	}
+	if lastErr != nil {
+		return store.RegisterDesktopDeviceResult{}, lastErr
+	}
+	return store.RegisterDesktopDeviceResult{}, errors.New("desktop public host allocation failed")
 }
 
 func (s *Server) authorizeRegistration(w http.ResponseWriter, r *http.Request) (auth.SSOJWTPrincipal, bool) {
@@ -154,8 +179,12 @@ func (s *Server) registrationResponse(result store.RegisterDesktopDeviceResult) 
 	}
 }
 
-func (s *Server) devicePublicHost(deviceID string) string {
-	return deviceID + "." + s.baseDomain()
+func (s *Server) randomDesktopPublicHost() (string, error) {
+	label, err := randomDesktopPublicLabel()
+	if err != nil {
+		return "", err
+	}
+	return label + "." + s.desktopPublicBaseDomain(), nil
 }
 
 func (s *Server) baseDomain() string {
@@ -166,15 +195,34 @@ func (s *Server) baseDomain() string {
 	return baseDomain
 }
 
+func (s *Server) desktopPublicBaseDomain() string {
+	baseDomain := strings.TrimPrefix(tunnelHost(s.Config.DesktopPublicBaseDomain), ".")
+	if baseDomain == "" {
+		baseDomain = "m.zenmind.cc"
+	}
+	return baseDomain
+}
+
+func randomDesktopPublicLabel() (string, error) {
+	raw := make([]byte, 6)
+	if _, err := rand.Read(raw); err != nil {
+		return "", err
+	}
+	encoded := base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(raw)
+	return "zm" + strings.ToLower(encoded), nil
+}
+
 func (s *Server) writeInternal(w http.ResponseWriter, message string, err error) {
 	s.Logger.Error(message, "error", err)
 	writeError(w, http.StatusInternalServerError, message)
 }
 
 type registerPayload struct {
-	DeviceID    string `json:"deviceId"`
-	TargetURL   string `json:"targetUrl"`
-	RotateToken bool   `json:"rotateToken"`
+	DeviceID         string `json:"deviceId"`
+	DeviceName       string `json:"deviceName"`
+	TargetURL        string `json:"targetUrl"`
+	RotateToken      bool   `json:"rotateToken"`
+	RotatePublicHost bool   `json:"rotatePublicHost"`
 }
 
 func (p registerPayload) Validate() error {

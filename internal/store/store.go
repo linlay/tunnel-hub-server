@@ -2,7 +2,9 @@ package store
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"strings"
@@ -44,9 +46,12 @@ type TunnelToken struct {
 }
 
 type DesktopDevice struct {
+	DeviceKey        string    `json:"-"`
 	DeviceID         string    `json:"deviceId"`
+	DeviceName       string    `json:"deviceName,omitempty"`
 	OwnerUserID      string    `json:"ownerUserId,omitempty"`
 	OwnerEmail       string    `json:"ownerEmail,omitempty"`
+	OwnerName        string    `json:"ownerName,omitempty"`
 	DeviceSecretHash string    `json:"-"`
 	TokenID          string    `json:"tokenId"`
 	RouteID          string    `json:"routeId"`
@@ -57,12 +62,15 @@ type DesktopDevice struct {
 }
 
 type RegisterDesktopDeviceInput struct {
-	DeviceID    string
-	OwnerUserID string
-	OwnerEmail  string
-	PublicHost  string
-	TargetURL   string
-	RotateToken bool
+	DeviceID         string
+	DeviceName       string
+	OwnerUserID      string
+	OwnerEmail       string
+	OwnerName        string
+	PublicHost       string
+	TargetURL        string
+	RotateToken      bool
+	RotatePublicHost bool
 }
 
 type RegisterDesktopDeviceResult struct {
@@ -331,8 +339,10 @@ func (db *DB) DeactivateToken(ctx context.Context, id string) error {
 
 func (db *DB) RegisterDesktopDevice(ctx context.Context, input RegisterDesktopDeviceInput) (RegisterDesktopDeviceResult, error) {
 	input.DeviceID = strings.TrimSpace(input.DeviceID)
+	input.DeviceName = strings.TrimSpace(input.DeviceName)
 	input.OwnerUserID = strings.TrimSpace(input.OwnerUserID)
 	input.OwnerEmail = strings.TrimSpace(input.OwnerEmail)
+	input.OwnerName = strings.TrimSpace(input.OwnerName)
 	input.PublicHost = tunnel.NormalizeHost(input.PublicHost)
 	input.TargetURL = strings.TrimSpace(input.TargetURL)
 	if input.DeviceID == "" {
@@ -359,7 +369,7 @@ func (db *DB) RegisterDesktopDevice(ctx context.Context, input RegisterDesktopDe
 		}
 	}()
 
-	device, err := getDesktopDeviceTx(ctx, tx, input.DeviceID)
+	device, err := getDesktopDeviceForRegistrationTx(ctx, tx, input.OwnerUserID, input.DeviceID)
 	if errors.Is(err, ErrNotFound) {
 		result, err := createDesktopDeviceRegistration(ctx, tx, input)
 		if err != nil {
@@ -381,11 +391,15 @@ func (db *DB) RegisterDesktopDevice(ctx context.Context, input RegisterDesktopDe
 	if err != nil {
 		return RegisterDesktopDeviceResult{}, err
 	}
-	route, err := updateDesktopRouteTx(ctx, tx, device.RouteID, input.PublicHost, input.TargetURL, token.ID)
+	publicHost := device.PublicHost
+	if publicHost == "" || input.RotatePublicHost {
+		publicHost = input.PublicHost
+	}
+	route, err := updateDesktopRouteTx(ctx, tx, device.RouteID, publicHost, input.TargetURL, token.ID)
 	if err != nil {
 		return RegisterDesktopDeviceResult{}, err
 	}
-	device, err = updateDesktopDeviceTx(ctx, tx, device.DeviceID, input.OwnerUserID, input.OwnerEmail, token.ID, route.ID, route.PublicHost, route.TargetURL)
+	device, err = updateDesktopDeviceTx(ctx, tx, device.DeviceKey, input.DeviceID, input.DeviceName, input.OwnerUserID, input.OwnerEmail, input.OwnerName, token.ID, route.ID, route.PublicHost, route.TargetURL)
 	if err != nil {
 		return RegisterDesktopDeviceResult{}, err
 	}
@@ -497,10 +511,14 @@ func createDesktopDeviceRegistration(ctx context.Context, tx *sql.Tx, input Regi
 		return RegisterDesktopDeviceResult{}, err
 	}
 	now := time.Now().UTC()
+	deviceKey := desktopDeviceKey(input.OwnerUserID, input.DeviceID)
 	device := DesktopDevice{
+		DeviceKey:        deviceKey,
 		DeviceID:         input.DeviceID,
+		DeviceName:       input.DeviceName,
 		OwnerUserID:      input.OwnerUserID,
 		OwnerEmail:       input.OwnerEmail,
+		OwnerName:        input.OwnerName,
 		DeviceSecretHash: "",
 		TokenID:          token.ID,
 		RouteID:          route.ID,
@@ -510,9 +528,9 @@ func createDesktopDeviceRegistration(ctx context.Context, tx *sql.Tx, input Regi
 		UpdatedAt:        now,
 	}
 	_, err = tx.ExecContext(ctx, `
-		INSERT INTO desktop_devices (device_id, owner_user_id, owner_email, device_secret_hash, token_id, route_id, public_host, target_url, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`, device.DeviceID, device.OwnerUserID, device.OwnerEmail, device.DeviceSecretHash, device.TokenID, device.RouteID, device.PublicHost, device.TargetURL, device.CreatedAt, device.UpdatedAt)
+		INSERT INTO desktop_devices (device_id, display_device_id, device_name, owner_user_id, owner_email, owner_name, device_secret_hash, token_id, route_id, public_host, target_url, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, device.DeviceKey, device.DeviceID, device.DeviceName, device.OwnerUserID, device.OwnerEmail, device.OwnerName, device.DeviceSecretHash, device.TokenID, device.RouteID, device.PublicHost, device.TargetURL, device.CreatedAt, device.UpdatedAt)
 	if err != nil {
 		return RegisterDesktopDeviceResult{}, err
 	}
@@ -655,21 +673,45 @@ func getRouteByHostTx(ctx context.Context, tx *sql.Tx, host string) (Route, erro
 	return scanRoute(row)
 }
 
-func getDesktopDeviceTx(ctx context.Context, tx *sql.Tx, deviceID string) (DesktopDevice, error) {
+func getDesktopDeviceForRegistrationTx(ctx context.Context, tx *sql.Tx, ownerUserID, deviceID string) (DesktopDevice, error) {
+	device, err := getDesktopDeviceByOwnerAndDisplayTx(ctx, tx, ownerUserID, deviceID)
+	if !errors.Is(err, ErrNotFound) {
+		return device, err
+	}
+	legacy, legacyErr := getDesktopDeviceByKeyTx(ctx, tx, deviceID)
+	if legacyErr != nil {
+		return DesktopDevice{}, legacyErr
+	}
+	if legacy.OwnerUserID == "" || legacy.OwnerUserID == ownerUserID {
+		return legacy, nil
+	}
+	return DesktopDevice{}, ErrNotFound
+}
+
+func getDesktopDeviceByOwnerAndDisplayTx(ctx context.Context, tx *sql.Tx, ownerUserID, deviceID string) (DesktopDevice, error) {
 	row := tx.QueryRowContext(ctx, `
-		SELECT device_id, owner_user_id, owner_email, device_secret_hash, token_id, route_id, public_host, target_url, created_at, updated_at
-		FROM desktop_devices WHERE device_id = ?
-	`, strings.TrimSpace(deviceID))
+		SELECT device_id, display_device_id, device_name, owner_user_id, owner_email, owner_name, device_secret_hash, token_id, route_id, public_host, target_url, created_at, updated_at
+		FROM desktop_devices
+		WHERE owner_user_id = ? AND display_device_id = ?
+	`, strings.TrimSpace(ownerUserID), strings.TrimSpace(deviceID))
 	return scanDesktopDevice(row)
 }
 
-func updateDesktopDeviceTx(ctx context.Context, tx *sql.Tx, deviceID, ownerUserID, ownerEmail, tokenID, routeID, publicHost, targetURL string) (DesktopDevice, error) {
+func getDesktopDeviceByKeyTx(ctx context.Context, tx *sql.Tx, deviceKey string) (DesktopDevice, error) {
+	row := tx.QueryRowContext(ctx, `
+		SELECT device_id, display_device_id, device_name, owner_user_id, owner_email, owner_name, device_secret_hash, token_id, route_id, public_host, target_url, created_at, updated_at
+		FROM desktop_devices WHERE device_id = ?
+	`, strings.TrimSpace(deviceKey))
+	return scanDesktopDevice(row)
+}
+
+func updateDesktopDeviceTx(ctx context.Context, tx *sql.Tx, deviceKey, deviceID, deviceName, ownerUserID, ownerEmail, ownerName, tokenID, routeID, publicHost, targetURL string) (DesktopDevice, error) {
 	now := time.Now().UTC()
 	result, err := tx.ExecContext(ctx, `
 		UPDATE desktop_devices
-		SET owner_user_id = ?, owner_email = ?, token_id = ?, route_id = ?, public_host = ?, target_url = ?, updated_at = ?
+		SET display_device_id = ?, device_name = ?, owner_user_id = ?, owner_email = ?, owner_name = ?, token_id = ?, route_id = ?, public_host = ?, target_url = ?, updated_at = ?
 		WHERE device_id = ?
-	`, strings.TrimSpace(ownerUserID), strings.TrimSpace(ownerEmail), tokenID, routeID, tunnel.NormalizeHost(publicHost), strings.TrimSpace(targetURL), now, deviceID)
+	`, strings.TrimSpace(deviceID), strings.TrimSpace(deviceName), strings.TrimSpace(ownerUserID), strings.TrimSpace(ownerEmail), strings.TrimSpace(ownerName), tokenID, routeID, tunnel.NormalizeHost(publicHost), strings.TrimSpace(targetURL), now, strings.TrimSpace(deviceKey))
 	if err != nil {
 		return DesktopDevice{}, err
 	}
@@ -680,7 +722,7 @@ func updateDesktopDeviceTx(ctx context.Context, tx *sql.Tx, deviceID, ownerUserI
 	if affected == 0 {
 		return DesktopDevice{}, ErrNotFound
 	}
-	return getDesktopDeviceTx(ctx, tx, deviceID)
+	return getDesktopDeviceByKeyTx(ctx, tx, deviceKey)
 }
 
 type rowScanner interface {
@@ -705,12 +747,18 @@ func scanRoute(row rowScanner) (Route, error) {
 
 func scanDesktopDevice(row rowScanner) (DesktopDevice, error) {
 	var device DesktopDevice
+	var displayDeviceID sql.NullString
+	var deviceName sql.NullString
 	var ownerUserID sql.NullString
 	var ownerEmail sql.NullString
+	var ownerName sql.NullString
 	err := row.Scan(
-		&device.DeviceID,
+		&device.DeviceKey,
+		&displayDeviceID,
+		&deviceName,
 		&ownerUserID,
 		&ownerEmail,
+		&ownerName,
 		&device.DeviceSecretHash,
 		&device.TokenID,
 		&device.RouteID,
@@ -725,11 +773,22 @@ func scanDesktopDevice(row rowScanner) (DesktopDevice, error) {
 	if err != nil {
 		return DesktopDevice{}, err
 	}
+	if displayDeviceID.Valid && strings.TrimSpace(displayDeviceID.String) != "" {
+		device.DeviceID = strings.TrimSpace(displayDeviceID.String)
+	} else {
+		device.DeviceID = device.DeviceKey
+	}
+	if deviceName.Valid {
+		device.DeviceName = strings.TrimSpace(deviceName.String)
+	}
 	if ownerUserID.Valid {
 		device.OwnerUserID = ownerUserID.String
 	}
 	if ownerEmail.Valid {
 		device.OwnerEmail = ownerEmail.String
+	}
+	if ownerName.Valid {
+		device.OwnerName = ownerName.String
 	}
 	return device, nil
 }
@@ -768,6 +827,11 @@ func scanAgentSession(row rowScanner) (AgentSession, error) {
 
 func newID(prefix string) string {
 	return fmt.Sprintf("%s_%d", prefix, time.Now().UTC().UnixNano())
+}
+
+func desktopDeviceKey(ownerUserID, deviceID string) string {
+	sum := sha256.Sum256([]byte(strings.TrimSpace(ownerUserID) + "\x00" + strings.TrimSpace(deviceID)))
+	return "desktop_device_" + hex.EncodeToString(sum[:12])
 }
 
 func tokenPrefix(token string) string {
@@ -815,7 +879,32 @@ func (db *DB) ensureDesktopDeviceOwnerColumns(ctx context.Context) error {
 	if err := db.ensureColumn(ctx, "desktop_devices", "owner_user_id", "TEXT"); err != nil {
 		return err
 	}
-	return db.ensureColumn(ctx, "desktop_devices", "owner_email", "TEXT")
+	if err := db.ensureColumn(ctx, "desktop_devices", "owner_email", "TEXT"); err != nil {
+		return err
+	}
+	if err := db.ensureColumn(ctx, "desktop_devices", "owner_name", "TEXT"); err != nil {
+		return err
+	}
+	if err := db.ensureColumn(ctx, "desktop_devices", "display_device_id", "TEXT"); err != nil {
+		return err
+	}
+	if err := db.ensureColumn(ctx, "desktop_devices", "device_name", "TEXT"); err != nil {
+		return err
+	}
+	if _, err := db.sql.ExecContext(ctx, `
+		UPDATE desktop_devices
+		SET display_device_id = device_id
+		WHERE display_device_id IS NULL OR TRIM(display_device_id) = ''
+	`); err != nil {
+		return err
+	}
+	_, err := db.sql.ExecContext(ctx, `
+		CREATE UNIQUE INDEX IF NOT EXISTS idx_desktop_devices_owner_display
+		ON desktop_devices(owner_user_id, display_device_id)
+		WHERE owner_user_id IS NOT NULL AND owner_user_id != ''
+			AND display_device_id IS NOT NULL AND display_device_id != ''
+	`)
+	return err
 }
 
 func (db *DB) ensureColumn(ctx context.Context, table, column, definition string) error {
@@ -898,8 +987,11 @@ CREATE TABLE IF NOT EXISTS routes (
 
 CREATE TABLE IF NOT EXISTS desktop_devices (
 	device_id TEXT PRIMARY KEY,
+	display_device_id TEXT,
+	device_name TEXT,
 	owner_user_id TEXT,
 	owner_email TEXT,
+	owner_name TEXT,
 	device_secret_hash TEXT NOT NULL,
 	token_id TEXT NOT NULL,
 	route_id TEXT NOT NULL,

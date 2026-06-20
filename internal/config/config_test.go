@@ -16,3 +16,12 @@ func TestLoadRelayConfigSupportsLegacyBootstrapAdminEnv(t *testing.T) {
 		t.Fatalf("AdminPassword was not loaded from legacy env")
 	}
 }
+
+func TestLoadRelayConfigSupportsDesktopPublicBaseDomain(t *testing.T) {
+	t.Setenv("DESKTOP_PUBLIC_BASE_DOMAIN", "m.example.test")
+
+	cfg := LoadRelayConfig()
+	if cfg.DesktopPublicBaseDomain != "m.example.test" {
+		t.Fatalf("DesktopPublicBaseDomain = %q, want m.example.test", cfg.DesktopPublicBaseDomain)
+	}
+}

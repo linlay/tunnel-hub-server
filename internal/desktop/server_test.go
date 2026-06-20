@@ -54,10 +54,8 @@ func TestRegisterDesktopDeviceCreatesTokenAndRoute(t *testing.T) {
 	if !response.Created || response.Rotated {
 		t.Fatalf("unexpected create flags: %+v", response)
 	}
-	if response.PublicHost != "mac-mini.tunnel-hub.zenmind.cc" {
-		t.Fatalf("publicHost = %q", response.PublicHost)
-	}
-	if response.WebSocketURL != "wss://mac-mini.tunnel-hub.zenmind.cc/ws" {
+	assertDesktopPublicHost(t, response.PublicHost, "mac-mini")
+	if response.WebSocketURL != "wss://"+response.PublicHost+"/ws" {
 		t.Fatalf("webSocketUrl = %q", response.WebSocketURL)
 	}
 	if response.RelayURL != "wss://tunnel-hub.zenmind.cc/tunnel" {
@@ -86,10 +84,11 @@ func TestRegisterDesktopDeviceCreatesTokenAndRoute(t *testing.T) {
 func TestRegisterDesktopDeviceAcceptsSSOJWT(t *testing.T) {
 	privateKey, publicKeyPEM := testSSOJWTKey(t)
 	server, db := newDesktopTestServerWithConfig(t, config.RelayConfig{
-		PublicBaseDomain:   "tunnel-hub.zenmind.cc",
-		SSOJWTIssuer:       "https://official.example.test",
-		SSOJWTPublicKeyPEM: publicKeyPEM,
-		SSOJWTAudience:     "zenmind-tunnel-hub-server",
+		PublicBaseDomain:        "tunnel-hub.zenmind.cc",
+		DesktopPublicBaseDomain: "m.zenmind.cc",
+		SSOJWTIssuer:            "https://official.example.test",
+		SSOJWTPublicKeyPEM:      publicKeyPEM,
+		SSOJWTAudience:          "zenmind-tunnel-hub-server",
 	})
 	token := signTestSSOJWT(t, privateKey, testSSOJWTClaims{
 		Issuer:   "https://official.example.test",
@@ -106,7 +105,8 @@ func TestRegisterDesktopDeviceAcceptsSSOJWT(t *testing.T) {
 		t.Fatalf("JWT registration status = %d body = %s", rec.Code, rec.Body.String())
 	}
 	response := decodeRegisterResponse(t, rec.Body)
-	if response.PublicHost != "jwt-device.tunnel-hub.zenmind.cc" || response.AgentToken == "" {
+	assertDesktopPublicHost(t, response.PublicHost, "jwt-device")
+	if response.AgentToken == "" {
 		t.Fatalf("unexpected JWT registration response: %+v", response)
 	}
 	if _, err := db.GetRouteByHost(context.Background(), response.PublicHost); err != nil {
@@ -189,7 +189,7 @@ func TestRegisterDesktopDeviceIgnoresLegacyDeviceSecret(t *testing.T) {
 	}
 }
 
-func TestRegisterDesktopDeviceRejectsDifferentOwner(t *testing.T) {
+func TestRegisterDesktopDeviceAllowsSameDeviceIDForDifferentOwners(t *testing.T) {
 	server, db := newDesktopTestServer(t)
 	first := decodeRegisterResponse(t, performRegister(t, server, desktopRegisterBody("mac-mini", "http://127.0.0.1:7082", false), defaultDesktopJWT).Body)
 	otherOwnerJWT := signTestSSOJWT(t, defaultDesktopPrivateKey, testSSOJWTClaims{
@@ -203,15 +203,27 @@ func TestRegisterDesktopDeviceRejectsDifferentOwner(t *testing.T) {
 	})
 
 	rec := performRegister(t, server, desktopRegisterBody("mac-mini", "http://127.0.0.1:7083", false), otherOwnerJWT)
-	if rec.Code != http.StatusForbidden {
+	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
 	}
-	route, err := db.GetRouteByHost(context.Background(), first.PublicHost)
+	second := decodeRegisterResponse(t, rec.Body)
+	if !second.Created || second.PublicHost == first.PublicHost || second.TokenID == first.TokenID {
+		t.Fatalf("different owner should get an independent registration: first=%+v second=%+v", first, second)
+	}
+	assertDesktopPublicHost(t, second.PublicHost, "mac-mini")
+	firstRoute, err := db.GetRouteByHost(context.Background(), first.PublicHost)
 	if err != nil {
 		t.Fatalf("get route: %v", err)
 	}
-	if route.TargetURL != "http://127.0.0.1:7082" || route.TokenID != first.TokenID {
-		t.Fatalf("different owner changed route: %+v", route)
+	if firstRoute.TargetURL != "http://127.0.0.1:7082" || firstRoute.TokenID != first.TokenID {
+		t.Fatalf("different owner changed first route: %+v", firstRoute)
+	}
+	secondRoute, err := db.GetRouteByHost(context.Background(), second.PublicHost)
+	if err != nil {
+		t.Fatalf("get second route: %v", err)
+	}
+	if secondRoute.TargetURL != "http://127.0.0.1:7083" || secondRoute.TokenID != second.TokenID {
+		t.Fatalf("different owner route mismatch: %+v", secondRoute)
 	}
 }
 
@@ -369,10 +381,25 @@ func desktopTestConfig(t *testing.T) config.RelayConfig {
 		Expires:  time.Now().Add(time.Hour),
 	})
 	return config.RelayConfig{
-		PublicBaseDomain:   "tunnel-hub.zenmind.cc",
-		SSOJWTIssuer:       "https://official.example.test",
-		SSOJWTPublicKeyPEM: publicKeyPEM,
-		SSOJWTAudience:     "zenmind-tunnel-hub-server",
+		PublicBaseDomain:        "tunnel-hub.zenmind.cc",
+		DesktopPublicBaseDomain: "m.zenmind.cc",
+		SSOJWTIssuer:            "https://official.example.test",
+		SSOJWTPublicKeyPEM:      publicKeyPEM,
+		SSOJWTAudience:          "zenmind-tunnel-hub-server",
+	}
+}
+
+func assertDesktopPublicHost(t *testing.T, publicHost, deviceID string) {
+	t.Helper()
+	if !strings.HasSuffix(publicHost, ".m.zenmind.cc") {
+		t.Fatalf("publicHost = %q, want *.m.zenmind.cc", publicHost)
+	}
+	if strings.Contains(publicHost, deviceID) {
+		t.Fatalf("publicHost %q should not contain device id %q", publicHost, deviceID)
+	}
+	label := strings.TrimSuffix(publicHost, ".m.zenmind.cc")
+	if !strings.HasPrefix(label, "zm") || len(label) < 12 {
+		t.Fatalf("publicHost label = %q, want generated zm label", label)
 	}
 }
 
@@ -427,6 +454,7 @@ func signTestSSOJWT(t *testing.T, privateKey *rsa.PrivateKey, claims testSSOJWTC
 		"jti":     "test-jti",
 		"user_id": claims.UserID,
 		"email":   claims.Email,
+		"name":    "Desktop User",
 		"role":    claims.Role,
 		"scope":   claims.Scope,
 	})

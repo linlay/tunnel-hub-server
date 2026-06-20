@@ -29,6 +29,7 @@ type SSOJWTConfig struct {
 type SSOJWTPrincipal struct {
 	UserID string
 	Email  string
+	Name   string
 	Role   string
 	Scope  string
 }
@@ -176,6 +177,7 @@ func (v *SSOJWTVerifier) Verify(token string, now time.Time) (SSOJWTPrincipal, e
 	return SSOJWTPrincipal{
 		UserID: userID,
 		Email:  readStringClaim(claims, "email"),
+		Name:   readStringClaim(claims, "name"),
 		Role:   strings.ToLower(readStringClaim(claims, "role")),
 		Scope:  readStringClaim(claims, "scope"),
 	}, nil
