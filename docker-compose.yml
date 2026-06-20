@@ -13,6 +13,7 @@ services:
       RELAY_ADDR: ":8080"
       RELAY_DB_PATH: "/data/tunnel.db"
       DESKTOP_PUBLIC_BASE_DOMAIN: "m.zenmind.cc"
+      WEBAPP_PUBLIC_BASE_DOMAIN: "wa.zenmind.cc"
       SSO_JWT_PUBLIC_KEY_FILE: "/configs/jwt-public.pem"
     ports:
       - "8080:8080"

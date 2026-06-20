@@ -13,6 +13,7 @@ type RelayConfig struct {
 	WebsiteDist             string
 	PublicBaseDomain        string
 	DesktopPublicBaseDomain string
+	WebAppPublicBaseDomain  string
 	AdminUsername           string
 	AdminPassword           string
 	AdminSessionTTL         time.Duration
@@ -41,6 +42,7 @@ func LoadRelayConfig() RelayConfig {
 		WebsiteDist:             env("WEBSITE_DIST", ""),
 		PublicBaseDomain:        env("PUBLIC_BASE_DOMAIN", "tunnel-hub.zenmind.cc"),
 		DesktopPublicBaseDomain: env("DESKTOP_PUBLIC_BASE_DOMAIN", "m.zenmind.cc"),
+		WebAppPublicBaseDomain:  env("WEBAPP_PUBLIC_BASE_DOMAIN", "wa.zenmind.cc"),
 		AdminUsername:           env("ADMIN_USERNAME", env("BOOTSTRAP_ADMIN_USERNAME", "admin")),
 		AdminPassword:           env("ADMIN_PASSWORD", os.Getenv("BOOTSTRAP_ADMIN_PASSWORD")),
 		AdminSessionTTL:         envDuration("ADMIN_SESSION_TTL", 24*time.Hour),

@@ -1,6 +1,6 @@
 # Tunnel Hub Server
 
-Self-hosted HTTP/WebSocket reverse tunnel with a public relay and local agents. Management, APIs, and the agent relay live at `tunnel-hub.zenmind.cc`; Desktop mobile routes use random hosts under `*.m.zenmind.cc`.
+Self-hosted HTTP/WebSocket tunnel hub with a public relay and outbound Desktop/agent clients. Management, APIs, and the agent relay live at `tunnel-hub.zenmind.cc`; Desktop broker WebSockets use random hosts under `*.m.zenmind.cc`, while device-scoped webapp tunnels use random hosts under `*.wa.zenmind.cc`.
 
 This repository contains only the Go relay/agent server. The React + Vite management website lives in the sibling repository `tunnel-hub-website`.
 
@@ -20,7 +20,8 @@ Copy `.env.example` to `.env` for local development, then replace any placeholde
 | `ADMIN_HOST` | empty | Optional legacy admin hostname for Relay-served static files. Leave empty in the split website/server deployment. |
 | `WEBSITE_DIST` | empty | Optional legacy built website directory. Leave empty in the split website/server deployment. |
 | `PUBLIC_BASE_DOMAIN` | `tunnel-hub.zenmind.cc` | Base domain used by `/api/admin/services/{name}`. |
-| `DESKTOP_PUBLIC_BASE_DOMAIN` | `m.zenmind.cc` | Base domain used for random Desktop mobile routes returned by `/api/desktop/devices/register`. |
+| `DESKTOP_PUBLIC_BASE_DOMAIN` | `m.zenmind.cc` | Base domain used for random Desktop broker hosts returned by `/api/desktop/devices/register`. |
+| `WEBAPP_PUBLIC_BASE_DOMAIN` | `wa.zenmind.cc` | Base domain used for device-scoped webapp reverse proxy hosts. |
 | `ADMIN_USERNAME` | `admin` | Bootstrap username for local management website login. |
 | `ADMIN_PASSWORD` | empty | Bootstrap password for local management website login. Leave empty to skip local admin creation. |
 | `ADMIN_SESSION_TTL` | `24h` | Local admin login cookie lifetime. |
@@ -80,12 +81,25 @@ Desktop registration must use an official-site SSO JWT with `scope` containing `
 curl -X POST https://tunnel-hub.zenmind.cc/api/desktop/devices/register \
   -H "Authorization: Bearer $ZENMIND_OFFICIAL_JWT" \
   -H "Content-Type: application/json" \
-  -d '{"deviceId":"mac-mini","deviceName":"Frank MacBook Pro","targetUrl":"http://127.0.0.1:7083","rotateToken":false}'
+  -d '{"deviceId":"mac-mini","deviceName":"Frank MacBook Pro","rotateToken":false}'
 ```
 
-The first successful registration creates a tunnel token and an active route for a random host such as `zmabc123def4.m.zenmind.cc`; the public host never uses `deviceId`. Re-registering the same `(user_id, deviceId)` reuses the existing public host and token, and updates `targetUrl`. Different users may register the same `deviceId` and receive independent random public hosts. Set `rotateToken` to `true` to invalidate the old tunnel token and receive a new `agentToken`. Legacy `deviceSecret` request fields are ignored.
+The first successful registration creates a tunnel token and a random Desktop broker host such as `zmabc123def4.m.zenmind.cc`; the public host never uses `deviceId` and no `routes.target_url` is created for `*.m.zenmind.cc`. Re-registering the same `(user_id, deviceId)` reuses the existing public host and token. Different users may register the same `deviceId` and receive independent random public hosts. Set `rotateToken` to `true` to invalidate the old tunnel token and receive a new `agentToken`. Legacy `deviceSecret` and `targetUrl` request fields are ignored for Desktop registration.
 
-Phones can then connect to the Desktop remote WebSocket through `wss://<random>.m.zenmind.cc/ws`. The random host is only a route; Desktop still validates its own access token before accepting control messages. The original Admin service publish API above remains unchanged for webapp/service tunnels.
+Browsers and testers can then connect to the Desktop remote WebSocket through `wss://<random>.m.zenmind.cc/ws`. The hub opens a `desktop.websocket` tunnel stream to the connected Desktop App and forwards WebSocket metadata and frames transparently; Desktop still validates its own access token before accepting control messages. Only WebSocket requests are accepted on `*.m.zenmind.cc`.
+
+## Desktop WebApp Registration API
+
+Desktop-owned webapps keep the target-port reverse proxy model and are published under `*.wa.zenmind.cc`:
+
+```bash
+curl -X PUT https://tunnel-hub.zenmind.cc/api/desktop/devices/mac-mini/webapps/notes \
+  -H "Authorization: Bearer $ZENMIND_OFFICIAL_JWT" \
+  -H "Content-Type: application/json" \
+  -d '{"targetUrl":"http://127.0.0.1:5173","active":true}'
+```
+
+This creates or updates a random public host such as `zwaabc123def4.wa.zenmind.cc`, owned by the Desktop device and bound to that Desktop tunnel token. `targetUrl` is required for webapps because the connected Desktop tunnel client dials the configured local service port.
 
 ## Public Component List API
 
@@ -97,6 +111,6 @@ In production, run Relay and the management website as separate services:
 
 - Relay: `127.0.0.1:11961 -> 8080`
 - Website: `127.0.0.1:11963 -> 80`
-- Public Nginx routes `tunnel-hub.zenmind.cc/` to the website, `tunnel-hub.zenmind.cc/api/admin`, `tunnel-hub.zenmind.cc/api/desktop`, and `/tunnel` to Relay, and all `*.m.zenmind.cc` traffic directly to Relay.
+- Public Nginx routes `tunnel-hub.zenmind.cc/` to the website, `tunnel-hub.zenmind.cc/api/admin`, `tunnel-hub.zenmind.cc/api/desktop`, and `/tunnel` to Relay, and all `*.m.zenmind.cc` plus `*.wa.zenmind.cc` traffic directly to Relay.
 
 The example in `deploy/nginx/zenmind-tunnel.conf` matches this split deployment, so business tunnel traffic does not pass through the website container.

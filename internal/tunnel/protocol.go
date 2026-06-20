@@ -17,8 +17,9 @@ import (
 )
 
 const (
-	KindHTTP      = "http"
-	KindWebSocket = "websocket"
+	KindHTTP             = "http"
+	KindWebSocket        = "websocket"
+	KindDesktopWebSocket = "desktop.websocket"
 
 	maxJSONFrameBytes = 1 << 20
 )

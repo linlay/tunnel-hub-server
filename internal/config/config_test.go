@@ -19,9 +19,13 @@ func TestLoadRelayConfigSupportsLegacyBootstrapAdminEnv(t *testing.T) {
 
 func TestLoadRelayConfigSupportsDesktopPublicBaseDomain(t *testing.T) {
 	t.Setenv("DESKTOP_PUBLIC_BASE_DOMAIN", "m.example.test")
+	t.Setenv("WEBAPP_PUBLIC_BASE_DOMAIN", "wa.example.test")
 
 	cfg := LoadRelayConfig()
 	if cfg.DesktopPublicBaseDomain != "m.example.test" {
 		t.Fatalf("DesktopPublicBaseDomain = %q, want m.example.test", cfg.DesktopPublicBaseDomain)
+	}
+	if cfg.WebAppPublicBaseDomain != "wa.example.test" {
+		t.Fatalf("WebAppPublicBaseDomain = %q, want wa.example.test", cfg.WebAppPublicBaseDomain)
 	}
 }

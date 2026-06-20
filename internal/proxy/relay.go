@@ -21,6 +21,8 @@ type Relay struct {
 	Manager             *Manager
 	Logger              *slog.Logger
 	MaxRequestBodyBytes int64
+	DesktopBaseDomain   string
+	WebAppBaseDomain    string
 }
 
 func NewRelay(db *store.DB, manager *Manager, logger *slog.Logger, maxRequestBodyBytes int64) *Relay {
@@ -30,7 +32,23 @@ func NewRelay(db *store.DB, manager *Manager, logger *slog.Logger, maxRequestBod
 	if maxRequestBodyBytes <= 0 {
 		maxRequestBodyBytes = 64 << 20
 	}
-	return &Relay{DB: db, Manager: manager, Logger: logger, MaxRequestBodyBytes: maxRequestBodyBytes}
+	return &Relay{
+		DB:                  db,
+		Manager:             manager,
+		Logger:              logger,
+		MaxRequestBodyBytes: maxRequestBodyBytes,
+		DesktopBaseDomain:   "m.zenmind.cc",
+		WebAppBaseDomain:    "wa.zenmind.cc",
+	}
+}
+
+func (r *Relay) SetPublicBaseDomains(desktopBaseDomain, webAppBaseDomain string) {
+	if normalized := normalizeBaseDomain(desktopBaseDomain); normalized != "" {
+		r.DesktopBaseDomain = normalized
+	}
+	if normalized := normalizeBaseDomain(webAppBaseDomain); normalized != "" {
+		r.WebAppBaseDomain = normalized
+	}
 }
 
 func (r *Relay) HandleTunnel(w http.ResponseWriter, req *http.Request) {
@@ -89,6 +107,10 @@ func (r *Relay) HandleTunnel(w http.ResponseWriter, req *http.Request) {
 }
 
 func (r *Relay) HandlePublic(w http.ResponseWriter, req *http.Request) {
+	if isHostUnderBaseDomain(req.Host, r.DesktopBaseDomain) {
+		r.handleDesktopPublic(w, req)
+		return
+	}
 	route, err := r.DB.GetActiveRouteByHost(req.Context(), req.Host)
 	if errors.Is(err, store.ErrNotFound) {
 		http.NotFound(w, req)
@@ -103,6 +125,70 @@ func (r *Relay) HandlePublic(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 	r.handlePublicHTTP(w, req, route)
+}
+
+func (r *Relay) handleDesktopPublic(w http.ResponseWriter, req *http.Request) {
+	if !isWebSocketRequest(req) {
+		http.Error(w, "desktop public endpoint requires websocket", http.StatusUpgradeRequired)
+		return
+	}
+	device, err := r.DB.GetDesktopDeviceByPublicHost(req.Context(), req.Host)
+	if errors.Is(err, store.ErrNotFound) {
+		http.NotFound(w, req)
+		return
+	}
+	if err != nil {
+		r.writeGatewayError(w, "desktop lookup failed", err)
+		return
+	}
+	stream, err := r.Manager.OpenStream(req.Context(), device.TokenID)
+	if errors.Is(err, ErrNoAgent) {
+		http.Error(w, "desktop is offline", http.StatusBadGateway)
+		return
+	}
+	if err != nil {
+		r.writeGatewayError(w, "open desktop stream failed", err)
+		return
+	}
+	defer func() {
+		_ = stream.Close()
+		r.Manager.StreamClosed()
+	}()
+
+	request := tunnel.StreamRequest{
+		Kind:      tunnel.KindDesktopWebSocket,
+		RequestID: requestID(),
+		Method:    req.Method,
+		Path:      requestURI(req),
+		Host:      req.Host,
+		Header:    tunnel.StripHopHeaders(req.Header),
+	}
+	if err := tunnel.WriteJSON(stream, request); err != nil {
+		r.writeGatewayError(w, "write desktop request metadata failed", err)
+		return
+	}
+	var response tunnel.StreamResponse
+	if err := tunnel.ReadJSON(stream, &response); err != nil {
+		r.writeGatewayError(w, "read desktop response metadata failed", err)
+		return
+	}
+	if !response.OK {
+		http.Error(w, response.Error, statusOr(response.StatusCode, http.StatusBadGateway))
+		return
+	}
+	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+	clientWS, err := upgrader.Upgrade(w, req, response.Header)
+	if err != nil {
+		r.Logger.Error("upgrade desktop public websocket", "error", err)
+		return
+	}
+	defer clientWS.Close()
+
+	errs := make(chan error, 2)
+	go func() { errs <- tunnel.CopyWebSocketToFrames(clientWS, stream) }()
+	go func() { errs <- tunnel.CopyFramesToWebSocket(stream, clientWS) }()
+	err = <-errs
+	r.Logger.Debug("desktop websocket stream closed", "error", err)
 }
 
 func (r *Relay) handlePublicHTTP(w http.ResponseWriter, req *http.Request, route store.Route) {
@@ -231,6 +317,16 @@ func bearerToken(header string) string {
 		return ""
 	}
 	return strings.TrimSpace(strings.TrimPrefix(header, prefix))
+}
+
+func normalizeBaseDomain(host string) string {
+	return strings.TrimPrefix(tunnel.NormalizeHost(host), ".")
+}
+
+func isHostUnderBaseDomain(host, baseDomain string) bool {
+	normalizedHost := tunnel.NormalizeHost(host)
+	normalizedBase := normalizeBaseDomain(baseDomain)
+	return normalizedBase != "" && (normalizedHost == normalizedBase || strings.HasSuffix(normalizedHost, "."+normalizedBase))
 }
 
 func isWebSocketRequest(req *http.Request) bool {

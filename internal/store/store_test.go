@@ -97,7 +97,6 @@ func TestRegisterDesktopDeviceOwnership(t *testing.T) {
 		OwnerUserID: "42",
 		OwnerEmail:  "desktop.test",
 		PublicHost:  "mac-mini.tunnel-hub.zenmind.cc",
-		TargetURL:   "http://127.0.0.1:7082",
 	})
 	if err != nil {
 		t.Fatalf("register desktop device: %v", err)
@@ -111,12 +110,11 @@ func TestRegisterDesktopDeviceOwnership(t *testing.T) {
 		OwnerUserID: "42",
 		OwnerEmail:  "desktop.test",
 		PublicHost:  "mac-mini.tunnel-hub.zenmind.cc",
-		TargetURL:   "http://127.0.0.1:7083",
 	})
 	if err != nil {
 		t.Fatalf("update desktop device: %v", err)
 	}
-	if second.Created || second.Token.ID != first.Token.ID || second.AgentToken != "" || second.Device.TargetURL != "http://127.0.0.1:7083" {
+	if second.Created || second.Token.ID != first.Token.ID || second.AgentToken != "" || second.Device.TargetURL != "" {
 		t.Fatalf("unexpected second registration: %+v", second)
 	}
 
@@ -125,7 +123,6 @@ func TestRegisterDesktopDeviceOwnership(t *testing.T) {
 		OwnerUserID: "43",
 		OwnerEmail:  "other.test",
 		PublicHost:  "random.m.zenmind.cc",
-		TargetURL:   "http://127.0.0.1:7999",
 	})
 	if err != nil {
 		t.Fatalf("different owner with same display device id should register independently: %v", err)
@@ -133,12 +130,8 @@ func TestRegisterDesktopDeviceOwnership(t *testing.T) {
 	if !other.Created || other.Device.DeviceID != "mac-mini" || other.Device.OwnerUserID != "43" {
 		t.Fatalf("unexpected different owner registration: %+v", other)
 	}
-	route, err := db.GetRouteByHost(ctx, "mac-mini.tunnel-hub.zenmind.cc")
-	if err != nil {
-		t.Fatalf("get route: %v", err)
-	}
-	if route.TargetURL != "http://127.0.0.1:7083" {
-		t.Fatalf("different owner changed route: %+v", route)
+	if _, err := db.GetRouteByHost(ctx, "mac-mini.tunnel-hub.zenmind.cc"); err != ErrNotFound {
+		t.Fatalf("desktop registration should not create route, got %v", err)
 	}
 
 	third, err := db.RegisterDesktopDevice(ctx, RegisterDesktopDeviceInput{
@@ -146,13 +139,12 @@ func TestRegisterDesktopDeviceOwnership(t *testing.T) {
 		OwnerUserID: "42",
 		OwnerEmail:  "desktop.test",
 		PublicHost:  "mac-mini.tunnel-hub.zenmind.cc",
-		TargetURL:   "http://127.0.0.1:7999",
 	})
 	if err != nil {
 		t.Fatalf("same owner should update without device secret: %v", err)
 	}
-	if third.Device.TargetURL != "http://127.0.0.1:7999" {
-		t.Fatalf("same owner update did not apply: %+v", third)
+	if third.Device.TargetURL != "" {
+		t.Fatalf("desktop target url should stay empty: %+v", third)
 	}
 }
 
@@ -181,12 +173,11 @@ func TestRegisterDesktopDeviceClaimsLegacyDevice(t *testing.T) {
 		OwnerUserID: "42",
 		OwnerEmail:  "desktop.test",
 		PublicHost:  "legacy.tunnel-hub.zenmind.cc",
-		TargetURL:   "http://127.0.0.1:7083",
 	})
 	if err != nil {
 		t.Fatalf("claim legacy device: %v", err)
 	}
-	if result.Device.OwnerUserID != "42" || result.Token.ID != token.ID || result.Device.TargetURL != "http://127.0.0.1:7083" {
+	if result.Device.OwnerUserID != "42" || result.Token.ID != token.ID || result.Device.TargetURL != "" {
 		t.Fatalf("unexpected legacy claim: %+v", result)
 	}
 
@@ -195,13 +186,108 @@ func TestRegisterDesktopDeviceClaimsLegacyDevice(t *testing.T) {
 		OwnerUserID: "43",
 		OwnerEmail:  "other.test",
 		PublicHost:  "other-legacy.m.zenmind.cc",
-		TargetURL:   "http://127.0.0.1:7999",
 	})
 	if err != nil {
 		t.Fatalf("different owner should register independent legacy display id: %v", err)
 	}
-	if !other.Created || other.Device.OwnerUserID != "43" || other.Device.TargetURL != "http://127.0.0.1:7999" {
+	if !other.Created || other.Device.OwnerUserID != "43" || other.Device.TargetURL != "" {
 		t.Fatalf("unexpected different owner legacy registration: %+v", other)
+	}
+}
+
+func TestRegisterDesktopWebAppCreatesRoute(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+	device, err := db.RegisterDesktopDevice(ctx, RegisterDesktopDeviceInput{
+		DeviceID:    "mac-mini",
+		OwnerUserID: "42",
+		OwnerEmail:  "desktop.test",
+		PublicHost:  "desktop.m.zenmind.cc",
+	})
+	if err != nil {
+		t.Fatalf("register desktop: %v", err)
+	}
+
+	webapp, err := db.RegisterDesktopWebApp(ctx, RegisterDesktopWebAppInput{
+		OwnerUserID: "42",
+		DeviceID:    "mac-mini",
+		Name:        "notes",
+		PublicHost:  "notes.wa.zenmind.cc",
+		TargetURL:   "http://127.0.0.1:5173",
+		Active:      true,
+	})
+	if err != nil {
+		t.Fatalf("register webapp: %v", err)
+	}
+	if webapp.Device.TokenID != device.Token.ID || webapp.Route.TokenID != device.Token.ID {
+		t.Fatalf("webapp should bind to desktop token: %+v", webapp)
+	}
+	if webapp.Route.TargetURL != "http://127.0.0.1:5173" || !webapp.Route.Active {
+		t.Fatalf("unexpected webapp route: %+v", webapp.Route)
+	}
+
+	updated, err := db.RegisterDesktopWebApp(ctx, RegisterDesktopWebAppInput{
+		OwnerUserID: "42",
+		DeviceID:    "mac-mini",
+		Name:        "notes",
+		PublicHost:  "ignored.wa.zenmind.cc",
+		TargetURL:   "http://127.0.0.1:8080",
+		Active:      false,
+	})
+	if err != nil {
+		t.Fatalf("update webapp: %v", err)
+	}
+	if updated.Route.PublicHost != "notes.wa.zenmind.cc" || updated.Route.TargetURL != "http://127.0.0.1:8080" || updated.Route.Active {
+		t.Fatalf("webapp update should reuse host and route: %+v", updated.Route)
+	}
+}
+
+func TestRotateDesktopTokenUpdatesWebAppRoutes(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+	device, err := db.RegisterDesktopDevice(ctx, RegisterDesktopDeviceInput{
+		DeviceID:    "mac-mini",
+		OwnerUserID: "42",
+		OwnerEmail:  "desktop.test",
+		PublicHost:  "desktop.m.zenmind.cc",
+	})
+	if err != nil {
+		t.Fatalf("register desktop: %v", err)
+	}
+	webapp, err := db.RegisterDesktopWebApp(ctx, RegisterDesktopWebAppInput{
+		OwnerUserID: "42",
+		DeviceID:    "mac-mini",
+		Name:        "notes",
+		PublicHost:  "notes.wa.zenmind.cc",
+		TargetURL:   "http://127.0.0.1:5173",
+		Active:      true,
+	})
+	if err != nil {
+		t.Fatalf("register webapp: %v", err)
+	}
+	if webapp.Route.TokenID != device.Token.ID {
+		t.Fatalf("initial webapp token = %q, want %q", webapp.Route.TokenID, device.Token.ID)
+	}
+
+	rotated, err := db.RegisterDesktopDevice(ctx, RegisterDesktopDeviceInput{
+		DeviceID:    "mac-mini",
+		OwnerUserID: "42",
+		OwnerEmail:  "desktop.test",
+		PublicHost:  "desktop.m.zenmind.cc",
+		RotateToken: true,
+	})
+	if err != nil {
+		t.Fatalf("rotate desktop token: %v", err)
+	}
+	if rotated.Token.ID == device.Token.ID {
+		t.Fatal("token did not rotate")
+	}
+	route, err := db.GetActiveRouteByHost(ctx, "notes.wa.zenmind.cc")
+	if err != nil {
+		t.Fatalf("get webapp route: %v", err)
+	}
+	if route.TokenID != rotated.Token.ID {
+		t.Fatalf("webapp route token = %q, want %q", route.TokenID, rotated.Token.ID)
 	}
 }
 

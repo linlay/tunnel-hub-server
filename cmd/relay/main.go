@@ -44,6 +44,7 @@ func main() {
 	}
 	manager := proxy.NewManager()
 	relay := proxy.NewRelay(db, manager, logger, cfg.MaxRequestBodyBytes)
+	relay.SetPublicBaseDomains(cfg.DesktopPublicBaseDomain, cfg.WebAppPublicBaseDomain)
 	adminServer, err := admin.NewServer(db, manager, cfg, logger)
 	if err != nil {
 		log.Fatalf("configure admin server: %v", err)

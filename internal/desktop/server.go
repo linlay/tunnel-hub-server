@@ -47,15 +47,31 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
-	if r.URL.Path != registerPath {
+	switch {
+	case r.URL.Path == registerPath:
+		if r.Method != http.MethodPost {
+			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+		s.handleRegister(w, r)
+	case strings.HasPrefix(r.URL.Path, "/api/desktop/devices/"):
+		s.handleDeviceSubresource(w, r)
+	default:
+		writeError(w, http.StatusNotFound, "not found")
+	}
+}
+
+func (s *Server) handleDeviceSubresource(w http.ResponseWriter, r *http.Request) {
+	deviceID, webAppName, ok := parseWebAppPath(r.URL.Path)
+	if !ok {
 		writeError(w, http.StatusNotFound, "not found")
 		return
 	}
-	if r.Method != http.MethodPost {
+	if r.Method != http.MethodPut {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
-	s.handleRegister(w, r)
+	s.handleRegisterWebApp(w, r, deviceID, webAppName)
 }
 
 func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
@@ -93,6 +109,50 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, s.registrationResponse(result))
 }
 
+func (s *Server) handleRegisterWebApp(w http.ResponseWriter, r *http.Request, deviceID, name string) {
+	principal, ok := s.authorizeRegistration(w, r)
+	if !ok {
+		return
+	}
+	var payload webAppPayload
+	if err := decodeJSON(r, &payload); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid json")
+		return
+	}
+	payload.TargetURL = strings.TrimSpace(payload.TargetURL)
+	if err := validateDeviceID(deviceID); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if err := validateWebAppName(name); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if err := payload.Validate(); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	result, err := s.registerDesktopWebApp(r, principal, deviceID, name, payload)
+	if errors.Is(err, store.ErrNotFound) {
+		writeError(w, http.StatusNotFound, "desktop device not found")
+		return
+	}
+	if errors.Is(err, store.ErrDesktopDeviceOwnerMismatch) {
+		writeError(w, http.StatusForbidden, "desktop device belongs to another user")
+		return
+	}
+	if errors.Is(err, store.ErrDesktopDeviceHostConflict) {
+		writeError(w, http.StatusConflict, "webapp public host already exists")
+		return
+	}
+	if err != nil {
+		s.writeInternal(w, "register desktop webapp", err)
+		return
+	}
+	_ = s.DB.AddEvent(context.Background(), "desktop_webapp.registered", "Desktop webapp registered", result.WebApp.PublicHost)
+	writeJSON(w, http.StatusOK, s.webAppResponse(result))
+}
+
 func (s *Server) registerDesktopDevice(r *http.Request, principal auth.SSOJWTPrincipal, payload registerPayload) (store.RegisterDesktopDeviceResult, error) {
 	var lastErr error
 	for attempt := 0; attempt < publicHostRetryLimit; attempt++ {
@@ -120,6 +180,32 @@ func (s *Server) registerDesktopDevice(r *http.Request, principal auth.SSOJWTPri
 		return store.RegisterDesktopDeviceResult{}, lastErr
 	}
 	return store.RegisterDesktopDeviceResult{}, errors.New("desktop public host allocation failed")
+}
+
+func (s *Server) registerDesktopWebApp(r *http.Request, principal auth.SSOJWTPrincipal, deviceID, name string, payload webAppPayload) (store.RegisterDesktopWebAppResult, error) {
+	var lastErr error
+	for attempt := 0; attempt < publicHostRetryLimit; attempt++ {
+		publicHost, err := s.randomWebAppPublicHost()
+		if err != nil {
+			return store.RegisterDesktopWebAppResult{}, err
+		}
+		result, err := s.DB.RegisterDesktopWebApp(r.Context(), store.RegisterDesktopWebAppInput{
+			OwnerUserID: principal.UserID,
+			DeviceID:    deviceID,
+			Name:        name,
+			PublicHost:  publicHost,
+			TargetURL:   payload.TargetURL,
+			Active:      payload.active(),
+		})
+		if !errors.Is(err, store.ErrDesktopDeviceHostConflict) {
+			return result, err
+		}
+		lastErr = err
+	}
+	if lastErr != nil {
+		return store.RegisterDesktopWebAppResult{}, lastErr
+	}
+	return store.RegisterDesktopWebAppResult{}, errors.New("webapp public host allocation failed")
 }
 
 func (s *Server) authorizeRegistration(w http.ResponseWriter, r *http.Request) (auth.SSOJWTPrincipal, bool) {
@@ -179,12 +265,33 @@ func (s *Server) registrationResponse(result store.RegisterDesktopDeviceResult) 
 	}
 }
 
+func (s *Server) webAppResponse(result store.RegisterDesktopWebAppResult) webAppResponse {
+	publicHost := result.WebApp.PublicHost
+	return webAppResponse{
+		DeviceID:   result.Device.DeviceID,
+		Name:       result.WebApp.Name,
+		PublicHost: publicHost,
+		PublicURL:  "https://" + publicHost,
+		TargetURL:  result.WebApp.TargetURL,
+		RouteID:    result.WebApp.RouteID,
+		Active:     result.WebApp.Active,
+	}
+}
+
 func (s *Server) randomDesktopPublicHost() (string, error) {
 	label, err := randomDesktopPublicLabel()
 	if err != nil {
 		return "", err
 	}
 	return label + "." + s.desktopPublicBaseDomain(), nil
+}
+
+func (s *Server) randomWebAppPublicHost() (string, error) {
+	label, err := randomPublicLabel("zwa")
+	if err != nil {
+		return "", err
+	}
+	return label + "." + s.webAppPublicBaseDomain(), nil
 }
 
 func (s *Server) baseDomain() string {
@@ -203,13 +310,25 @@ func (s *Server) desktopPublicBaseDomain() string {
 	return baseDomain
 }
 
+func (s *Server) webAppPublicBaseDomain() string {
+	baseDomain := strings.TrimPrefix(tunnelHost(s.Config.WebAppPublicBaseDomain), ".")
+	if baseDomain == "" {
+		baseDomain = "wa.zenmind.cc"
+	}
+	return baseDomain
+}
+
 func randomDesktopPublicLabel() (string, error) {
+	return randomPublicLabel("zm")
+}
+
+func randomPublicLabel(prefix string) (string, error) {
 	raw := make([]byte, 6)
 	if _, err := rand.Read(raw); err != nil {
 		return "", err
 	}
 	encoded := base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(raw)
-	return "zm" + strings.ToLower(encoded), nil
+	return prefix + strings.ToLower(encoded), nil
 }
 
 func (s *Server) writeInternal(w http.ResponseWriter, message string, err error) {
@@ -229,10 +348,10 @@ func (p registerPayload) Validate() error {
 	if err := validateDeviceID(p.DeviceID); err != nil {
 		return err
 	}
-	if strings.TrimSpace(p.TargetURL) == "" {
-		return errors.New("targetUrl is required")
+	if strings.TrimSpace(p.TargetURL) != "" {
+		return validateTargetURL(p.TargetURL)
 	}
-	return validateTargetURL(p.TargetURL)
+	return nil
 }
 
 type registerResponse struct {
@@ -246,6 +365,35 @@ type registerResponse struct {
 	AgentToken   string `json:"agentToken,omitempty"`
 	Created      bool   `json:"created"`
 	Rotated      bool   `json:"rotated"`
+}
+
+type webAppPayload struct {
+	TargetURL string `json:"targetUrl"`
+	Active    *bool  `json:"active"`
+}
+
+func (p webAppPayload) Validate() error {
+	if strings.TrimSpace(p.TargetURL) == "" {
+		return errors.New("targetUrl is required")
+	}
+	return validateTargetURL(p.TargetURL)
+}
+
+func (p webAppPayload) active() bool {
+	if p.Active == nil {
+		return true
+	}
+	return *p.Active
+}
+
+type webAppResponse struct {
+	DeviceID   string `json:"deviceId"`
+	Name       string `json:"name"`
+	PublicHost string `json:"publicHost"`
+	PublicURL  string `json:"publicUrl"`
+	TargetURL  string `json:"targetUrl"`
+	RouteID    string `json:"routeId"`
+	Active     bool   `json:"active"`
 }
 
 func validateDeviceID(deviceID string) error {
@@ -277,6 +425,38 @@ func validateDeviceID(deviceID string) error {
 		return errors.New("deviceId must contain only lowercase letters, numbers, and hyphens")
 	}
 	return nil
+}
+
+func validateWebAppName(name string) error {
+	if name == "" {
+		return errors.New("webapp name is required")
+	}
+	if len(name) > 63 {
+		return errors.New("webapp name must be 63 characters or fewer")
+	}
+	if strings.HasPrefix(name, "-") || strings.HasSuffix(name, "-") {
+		return errors.New("webapp name cannot start or end with hyphen")
+	}
+	for _, char := range name {
+		if (char >= 'a' && char <= 'z') || (char >= '0' && char <= '9') || char == '-' {
+			continue
+		}
+		return errors.New("webapp name must contain only lowercase letters, numbers, and hyphens")
+	}
+	return nil
+}
+
+func parseWebAppPath(path string) (string, string, bool) {
+	const prefix = "/api/desktop/devices/"
+	rest := strings.TrimPrefix(path, prefix)
+	if rest == path {
+		return "", "", false
+	}
+	parts := strings.Split(rest, "/")
+	if len(parts) != 3 || parts[1] != "webapps" || parts[0] == "" || parts[2] == "" {
+		return "", "", false
+	}
+	return parts[0], parts[2], true
 }
 
 func validateTargetURL(raw string) error {

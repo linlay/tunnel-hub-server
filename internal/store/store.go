@@ -54,11 +54,23 @@ type DesktopDevice struct {
 	OwnerName        string    `json:"ownerName,omitempty"`
 	DeviceSecretHash string    `json:"-"`
 	TokenID          string    `json:"tokenId"`
-	RouteID          string    `json:"routeId"`
+	RouteID          string    `json:"routeId,omitempty"`
 	PublicHost       string    `json:"publicHost"`
-	TargetURL        string    `json:"targetUrl"`
+	TargetURL        string    `json:"targetUrl,omitempty"`
 	CreatedAt        time.Time `json:"createdAt"`
 	UpdatedAt        time.Time `json:"updatedAt"`
+}
+
+type DesktopWebApp struct {
+	ID         string    `json:"id"`
+	DeviceKey  string    `json:"-"`
+	Name       string    `json:"name"`
+	RouteID    string    `json:"routeId"`
+	PublicHost string    `json:"publicHost"`
+	TargetURL  string    `json:"targetUrl"`
+	Active     bool      `json:"active"`
+	CreatedAt  time.Time `json:"createdAt"`
+	UpdatedAt  time.Time `json:"updatedAt"`
 }
 
 type RegisterDesktopDeviceInput struct {
@@ -80,6 +92,21 @@ type RegisterDesktopDeviceResult struct {
 	AgentToken string
 	Created    bool
 	Rotated    bool
+}
+
+type RegisterDesktopWebAppInput struct {
+	OwnerUserID string
+	DeviceID    string
+	Name        string
+	PublicHost  string
+	TargetURL   string
+	Active      bool
+}
+
+type RegisterDesktopWebAppResult struct {
+	Device DesktopDevice
+	WebApp DesktopWebApp
+	Route  Route
 }
 
 type AgentSession struct {
@@ -125,7 +152,10 @@ func (db *DB) Migrate(ctx context.Context) error {
 	if err := db.ensureRouteTokenIDColumn(ctx); err != nil {
 		return err
 	}
-	return db.ensureDesktopDeviceOwnerColumns(ctx)
+	if err := db.ensureDesktopDeviceOwnerColumns(ctx); err != nil {
+		return err
+	}
+	return db.ensureDesktopWebAppTable(ctx)
 }
 
 func (db *DB) CreateRoute(ctx context.Context, publicHost, targetURL string, active bool, tokenID string) (Route, error) {
@@ -354,9 +384,6 @@ func (db *DB) RegisterDesktopDevice(ctx context.Context, input RegisterDesktopDe
 	if input.PublicHost == "" {
 		return RegisterDesktopDeviceResult{}, errors.New("publicHost is required")
 	}
-	if input.TargetURL == "" {
-		return RegisterDesktopDeviceResult{}, errors.New("targetUrl is required")
-	}
 
 	tx, err := db.sql.BeginTx(ctx, nil)
 	if err != nil {
@@ -391,15 +418,21 @@ func (db *DB) RegisterDesktopDevice(ctx context.Context, input RegisterDesktopDe
 	if err != nil {
 		return RegisterDesktopDeviceResult{}, err
 	}
+	if token.ID != device.TokenID {
+		if err := updateDesktopWebAppRouteTokensTx(ctx, tx, device.DeviceKey, token.ID); err != nil {
+			return RegisterDesktopDeviceResult{}, err
+		}
+	}
 	publicHost := device.PublicHost
 	if publicHost == "" || input.RotatePublicHost {
 		publicHost = input.PublicHost
 	}
-	route, err := updateDesktopRouteTx(ctx, tx, device.RouteID, publicHost, input.TargetURL, token.ID)
-	if err != nil {
-		return RegisterDesktopDeviceResult{}, err
+	if publicHost != device.PublicHost {
+		if err := ensurePublicHostAvailableTx(ctx, tx, publicHost, device.DeviceKey); err != nil {
+			return RegisterDesktopDeviceResult{}, err
+		}
 	}
-	device, err = updateDesktopDeviceTx(ctx, tx, device.DeviceKey, input.DeviceID, input.DeviceName, input.OwnerUserID, input.OwnerEmail, input.OwnerName, token.ID, route.ID, route.PublicHost, route.TargetURL)
+	device, err = updateDesktopDeviceTx(ctx, tx, device.DeviceKey, input.DeviceID, input.DeviceName, input.OwnerUserID, input.OwnerEmail, input.OwnerName, token.ID, "", publicHost, "")
 	if err != nil {
 		return RegisterDesktopDeviceResult{}, err
 	}
@@ -409,11 +442,97 @@ func (db *DB) RegisterDesktopDevice(ctx context.Context, input RegisterDesktopDe
 	committed = true
 	return RegisterDesktopDeviceResult{
 		Device:     device,
-		Route:      route,
 		Token:      token,
 		AgentToken: rawToken,
 		Rotated:    input.RotateToken,
 	}, nil
+}
+
+func (db *DB) GetDesktopDeviceByPublicHost(ctx context.Context, host string) (DesktopDevice, error) {
+	row := db.sql.QueryRowContext(ctx, `
+		SELECT device_id, display_device_id, device_name, owner_user_id, owner_email, owner_name, device_secret_hash, token_id, route_id, public_host, target_url, created_at, updated_at
+		FROM desktop_devices WHERE public_host = ?
+	`, tunnel.NormalizeHost(host))
+	return scanDesktopDevice(row)
+}
+
+func (db *DB) RegisterDesktopWebApp(ctx context.Context, input RegisterDesktopWebAppInput) (RegisterDesktopWebAppResult, error) {
+	input.OwnerUserID = strings.TrimSpace(input.OwnerUserID)
+	input.DeviceID = strings.TrimSpace(input.DeviceID)
+	input.Name = strings.TrimSpace(input.Name)
+	input.PublicHost = tunnel.NormalizeHost(input.PublicHost)
+	input.TargetURL = strings.TrimSpace(input.TargetURL)
+	if input.OwnerUserID == "" {
+		return RegisterDesktopWebAppResult{}, errors.New("ownerUserId is required")
+	}
+	if input.DeviceID == "" {
+		return RegisterDesktopWebAppResult{}, errors.New("deviceId is required")
+	}
+	if input.Name == "" {
+		return RegisterDesktopWebAppResult{}, errors.New("name is required")
+	}
+	if input.PublicHost == "" {
+		return RegisterDesktopWebAppResult{}, errors.New("publicHost is required")
+	}
+	if input.TargetURL == "" {
+		return RegisterDesktopWebAppResult{}, errors.New("targetUrl is required")
+	}
+
+	tx, err := db.sql.BeginTx(ctx, nil)
+	if err != nil {
+		return RegisterDesktopWebAppResult{}, err
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+
+	device, err := getDesktopDeviceForRegistrationTx(ctx, tx, input.OwnerUserID, input.DeviceID)
+	if err != nil {
+		return RegisterDesktopWebAppResult{}, err
+	}
+	if device.OwnerUserID != "" && device.OwnerUserID != input.OwnerUserID {
+		return RegisterDesktopWebAppResult{}, ErrDesktopDeviceOwnerMismatch
+	}
+
+	webApp, err := getDesktopWebAppByDeviceAndNameTx(ctx, tx, device.DeviceKey, input.Name)
+	if errors.Is(err, ErrNotFound) {
+		if err := ensurePublicHostAvailableTx(ctx, tx, input.PublicHost, ""); err != nil {
+			return RegisterDesktopWebAppResult{}, err
+		}
+		route, err := insertRouteTx(ctx, tx, input.PublicHost, input.TargetURL, input.Active, device.TokenID)
+		if err != nil {
+			return RegisterDesktopWebAppResult{}, err
+		}
+		webApp, err := insertDesktopWebAppTx(ctx, tx, device.DeviceKey, input.Name, route)
+		if err != nil {
+			return RegisterDesktopWebAppResult{}, err
+		}
+		if err := tx.Commit(); err != nil {
+			return RegisterDesktopWebAppResult{}, err
+		}
+		committed = true
+		return RegisterDesktopWebAppResult{Device: device, WebApp: webApp, Route: route}, nil
+	}
+	if err != nil {
+		return RegisterDesktopWebAppResult{}, err
+	}
+
+	route, err := updateDesktopWebAppRouteTx(ctx, tx, webApp.RouteID, webApp.PublicHost, input.TargetURL, input.Active, device.TokenID)
+	if err != nil {
+		return RegisterDesktopWebAppResult{}, err
+	}
+	webApp, err = updateDesktopWebAppTx(ctx, tx, webApp.ID, route)
+	if err != nil {
+		return RegisterDesktopWebAppResult{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return RegisterDesktopWebAppResult{}, err
+	}
+	committed = true
+	return RegisterDesktopWebAppResult{Device: device, WebApp: webApp, Route: route}, nil
 }
 
 func (db *DB) CreateAgentSession(ctx context.Context, tokenID, remoteAddr string) (AgentSession, error) {
@@ -493,9 +612,7 @@ func (db *DB) ListEvents(ctx context.Context, limit int) ([]Event, error) {
 }
 
 func createDesktopDeviceRegistration(ctx context.Context, tx *sql.Tx, input RegisterDesktopDeviceInput) (RegisterDesktopDeviceResult, error) {
-	if _, err := getRouteByHostTx(ctx, tx, input.PublicHost); err == nil {
-		return RegisterDesktopDeviceResult{}, ErrDesktopDeviceHostConflict
-	} else if !errors.Is(err, ErrNotFound) {
+	if err := ensurePublicHostAvailableTx(ctx, tx, input.PublicHost, ""); err != nil {
 		return RegisterDesktopDeviceResult{}, err
 	}
 	rawToken, err := auth.NewToken()
@@ -503,10 +620,6 @@ func createDesktopDeviceRegistration(ctx context.Context, tx *sql.Tx, input Regi
 		return RegisterDesktopDeviceResult{}, err
 	}
 	token, err := insertTokenTx(ctx, tx, "desktop:"+input.DeviceID, rawToken)
-	if err != nil {
-		return RegisterDesktopDeviceResult{}, err
-	}
-	route, err := insertRouteTx(ctx, tx, input.PublicHost, input.TargetURL, true, token.ID)
 	if err != nil {
 		return RegisterDesktopDeviceResult{}, err
 	}
@@ -521,9 +634,9 @@ func createDesktopDeviceRegistration(ctx context.Context, tx *sql.Tx, input Regi
 		OwnerName:        input.OwnerName,
 		DeviceSecretHash: "",
 		TokenID:          token.ID,
-		RouteID:          route.ID,
-		PublicHost:       route.PublicHost,
-		TargetURL:        route.TargetURL,
+		RouteID:          "",
+		PublicHost:       input.PublicHost,
+		TargetURL:        "",
 		CreatedAt:        now,
 		UpdatedAt:        now,
 	}
@@ -536,11 +649,29 @@ func createDesktopDeviceRegistration(ctx context.Context, tx *sql.Tx, input Regi
 	}
 	return RegisterDesktopDeviceResult{
 		Device:     device,
-		Route:      route,
 		Token:      token,
 		AgentToken: rawToken,
 		Created:    true,
 	}, nil
+}
+
+func ensurePublicHostAvailableTx(ctx context.Context, tx *sql.Tx, publicHost, allowedDeviceKey string) error {
+	if _, err := getRouteByHostTx(ctx, tx, publicHost); err == nil {
+		return ErrDesktopDeviceHostConflict
+	} else if !errors.Is(err, ErrNotFound) {
+		return err
+	}
+	device, err := getDesktopDeviceByPublicHostTx(ctx, tx, publicHost)
+	if errors.Is(err, ErrNotFound) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if allowedDeviceKey != "" && device.DeviceKey == allowedDeviceKey {
+		return nil
+	}
+	return ErrDesktopDeviceHostConflict
 }
 
 func tokenForDesktopRegistration(ctx context.Context, tx *sql.Tx, oldTokenID, deviceID string, rotate bool) (TunnelToken, string, error) {
@@ -673,6 +804,28 @@ func getRouteByHostTx(ctx context.Context, tx *sql.Tx, host string) (Route, erro
 	return scanRoute(row)
 }
 
+func updateDesktopWebAppRouteTx(ctx context.Context, tx *sql.Tx, routeID, publicHost, targetURL string, active bool, tokenID string) (Route, error) {
+	route, err := updateRouteByIDTx(ctx, tx, routeID, publicHost, targetURL, active, tokenID)
+	if !errors.Is(err, ErrNotFound) {
+		return route, err
+	}
+	if err := ensurePublicHostAvailableTx(ctx, tx, publicHost, ""); err != nil {
+		return Route{}, err
+	}
+	return insertRouteTx(ctx, tx, publicHost, targetURL, active, tokenID)
+}
+
+func updateDesktopWebAppRouteTokensTx(ctx context.Context, tx *sql.Tx, deviceKey, tokenID string) error {
+	_, err := tx.ExecContext(ctx, `
+		UPDATE routes
+		SET token_id = ?, updated_at = ?
+		WHERE id IN (
+			SELECT route_id FROM desktop_webapps WHERE device_id = ?
+		)
+	`, nullableTokenID(tokenID), time.Now().UTC(), strings.TrimSpace(deviceKey))
+	return err
+}
+
 func getDesktopDeviceForRegistrationTx(ctx context.Context, tx *sql.Tx, ownerUserID, deviceID string) (DesktopDevice, error) {
 	device, err := getDesktopDeviceByOwnerAndDisplayTx(ctx, tx, ownerUserID, deviceID)
 	if !errors.Is(err, ErrNotFound) {
@@ -703,6 +856,66 @@ func getDesktopDeviceByKeyTx(ctx context.Context, tx *sql.Tx, deviceKey string) 
 		FROM desktop_devices WHERE device_id = ?
 	`, strings.TrimSpace(deviceKey))
 	return scanDesktopDevice(row)
+}
+
+func getDesktopDeviceByPublicHostTx(ctx context.Context, tx *sql.Tx, publicHost string) (DesktopDevice, error) {
+	row := tx.QueryRowContext(ctx, `
+		SELECT device_id, display_device_id, device_name, owner_user_id, owner_email, owner_name, device_secret_hash, token_id, route_id, public_host, target_url, created_at, updated_at
+		FROM desktop_devices WHERE public_host = ?
+	`, tunnel.NormalizeHost(publicHost))
+	return scanDesktopDevice(row)
+}
+
+func getDesktopWebAppByDeviceAndNameTx(ctx context.Context, tx *sql.Tx, deviceKey, name string) (DesktopWebApp, error) {
+	row := tx.QueryRowContext(ctx, `
+		SELECT id, device_id, name, route_id, public_host, target_url, active, created_at, updated_at
+		FROM desktop_webapps WHERE device_id = ? AND name = ?
+	`, strings.TrimSpace(deviceKey), strings.TrimSpace(name))
+	return scanDesktopWebApp(row)
+}
+
+func insertDesktopWebAppTx(ctx context.Context, tx *sql.Tx, deviceKey, name string, route Route) (DesktopWebApp, error) {
+	now := time.Now().UTC()
+	webApp := DesktopWebApp{
+		ID:         newID("webapp"),
+		DeviceKey:  strings.TrimSpace(deviceKey),
+		Name:       strings.TrimSpace(name),
+		RouteID:    route.ID,
+		PublicHost: route.PublicHost,
+		TargetURL:  route.TargetURL,
+		Active:     route.Active,
+		CreatedAt:  now,
+		UpdatedAt:  now,
+	}
+	_, err := tx.ExecContext(ctx, `
+		INSERT INTO desktop_webapps (id, device_id, name, route_id, public_host, target_url, active, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, webApp.ID, webApp.DeviceKey, webApp.Name, webApp.RouteID, webApp.PublicHost, webApp.TargetURL, webApp.Active, webApp.CreatedAt, webApp.UpdatedAt)
+	return webApp, err
+}
+
+func updateDesktopWebAppTx(ctx context.Context, tx *sql.Tx, id string, route Route) (DesktopWebApp, error) {
+	now := time.Now().UTC()
+	result, err := tx.ExecContext(ctx, `
+		UPDATE desktop_webapps
+		SET route_id = ?, public_host = ?, target_url = ?, active = ?, updated_at = ?
+		WHERE id = ?
+	`, route.ID, route.PublicHost, route.TargetURL, route.Active, now, strings.TrimSpace(id))
+	if err != nil {
+		return DesktopWebApp{}, err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return DesktopWebApp{}, err
+	}
+	if affected == 0 {
+		return DesktopWebApp{}, ErrNotFound
+	}
+	row := tx.QueryRowContext(ctx, `
+		SELECT id, device_id, name, route_id, public_host, target_url, active, created_at, updated_at
+		FROM desktop_webapps WHERE id = ?
+	`, strings.TrimSpace(id))
+	return scanDesktopWebApp(row)
 }
 
 func updateDesktopDeviceTx(ctx context.Context, tx *sql.Tx, deviceKey, deviceID, deviceName, ownerUserID, ownerEmail, ownerName, tokenID, routeID, publicHost, targetURL string) (DesktopDevice, error) {
@@ -752,6 +965,8 @@ func scanDesktopDevice(row rowScanner) (DesktopDevice, error) {
 	var ownerUserID sql.NullString
 	var ownerEmail sql.NullString
 	var ownerName sql.NullString
+	var routeID sql.NullString
+	var targetURL sql.NullString
 	err := row.Scan(
 		&device.DeviceKey,
 		&displayDeviceID,
@@ -761,9 +976,9 @@ func scanDesktopDevice(row rowScanner) (DesktopDevice, error) {
 		&ownerName,
 		&device.DeviceSecretHash,
 		&device.TokenID,
-		&device.RouteID,
+		&routeID,
 		&device.PublicHost,
-		&device.TargetURL,
+		&targetURL,
 		&device.CreatedAt,
 		&device.UpdatedAt,
 	)
@@ -790,7 +1005,35 @@ func scanDesktopDevice(row rowScanner) (DesktopDevice, error) {
 	if ownerName.Valid {
 		device.OwnerName = ownerName.String
 	}
+	if routeID.Valid {
+		device.RouteID = strings.TrimSpace(routeID.String)
+	}
+	if targetURL.Valid {
+		device.TargetURL = strings.TrimSpace(targetURL.String)
+	}
 	return device, nil
+}
+
+func scanDesktopWebApp(row rowScanner) (DesktopWebApp, error) {
+	var webApp DesktopWebApp
+	err := row.Scan(
+		&webApp.ID,
+		&webApp.DeviceKey,
+		&webApp.Name,
+		&webApp.RouteID,
+		&webApp.PublicHost,
+		&webApp.TargetURL,
+		&webApp.Active,
+		&webApp.CreatedAt,
+		&webApp.UpdatedAt,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return DesktopWebApp{}, ErrNotFound
+	}
+	if err != nil {
+		return DesktopWebApp{}, err
+	}
+	return webApp, nil
 }
 
 func scanToken(row rowScanner) (TunnelToken, error) {
@@ -907,6 +1150,26 @@ func (db *DB) ensureDesktopDeviceOwnerColumns(ctx context.Context) error {
 	return err
 }
 
+func (db *DB) ensureDesktopWebAppTable(ctx context.Context) error {
+	_, err := db.sql.ExecContext(ctx, `
+		CREATE TABLE IF NOT EXISTS desktop_webapps (
+			id TEXT PRIMARY KEY,
+			device_id TEXT NOT NULL,
+			name TEXT NOT NULL,
+			route_id TEXT NOT NULL,
+			public_host TEXT NOT NULL UNIQUE,
+			target_url TEXT NOT NULL,
+			active BOOLEAN NOT NULL DEFAULT 1,
+			created_at TIMESTAMP NOT NULL,
+			updated_at TIMESTAMP NOT NULL,
+			FOREIGN KEY (device_id) REFERENCES desktop_devices(device_id),
+			FOREIGN KEY (route_id) REFERENCES routes(id),
+			UNIQUE(device_id, name)
+		)
+	`)
+	return err
+}
+
 func (db *DB) ensureColumn(ctx context.Context, table, column, definition string) error {
 	rows, err := db.sql.QueryContext(ctx, fmt.Sprintf(`PRAGMA table_info(%s)`, table))
 	if err != nil {
@@ -1000,6 +1263,21 @@ CREATE TABLE IF NOT EXISTS desktop_devices (
 	created_at TIMESTAMP NOT NULL,
 	updated_at TIMESTAMP NOT NULL,
 	FOREIGN KEY (token_id) REFERENCES tunnel_tokens(id)
+);
+
+CREATE TABLE IF NOT EXISTS desktop_webapps (
+	id TEXT PRIMARY KEY,
+	device_id TEXT NOT NULL,
+	name TEXT NOT NULL,
+	route_id TEXT NOT NULL,
+	public_host TEXT NOT NULL UNIQUE,
+	target_url TEXT NOT NULL,
+	active BOOLEAN NOT NULL DEFAULT 1,
+	created_at TIMESTAMP NOT NULL,
+	updated_at TIMESTAMP NOT NULL,
+	FOREIGN KEY (device_id) REFERENCES desktop_devices(device_id),
+	FOREIGN KEY (route_id) REFERENCES routes(id),
+	UNIQUE(device_id, name)
 );
 
 CREATE TABLE IF NOT EXISTS agent_sessions (
