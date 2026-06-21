@@ -1,0 +1,11 @@
+name: tunnel-hub-public
+
+services:
+  public:
+    image: tunnel-hub-public
+    container_name: tunnel-hub-public
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "127.0.0.1:${PUBLIC_HTTP_PORT:-11965}:80"

@@ -21,6 +21,16 @@ services:
       - relay-data:/data
       - ./configs:/configs:ro
 
+  public:
+    image: tunnel-hub-public
+    container_name: tunnel-hub-public
+    build:
+      context: ./tunnel-hub-public
+      dockerfile: Dockerfile
+    ports:
+      - "127.0.0.1:${TUNNEL_HUB_PUBLIC_PORT:-11965}:80"
+    restart: unless-stopped
+
 volumes:
   relay-data:
     name: tunnel-hub-server_relay-data
