@@ -99,6 +99,77 @@ describe('desktopWsClient', () => {
     vi.useRealTimers();
   });
 
+  it('dispatches stream frames without resolving requests before the response', async () => {
+    vi.useFakeTimers();
+    FakeWebSocket.instances = [];
+    const session = new DesktopWsSession({
+      url: 'wss://zm123.m.zenmind.cc/ws',
+      token: 'secret',
+      WebSocketCtor: FakeWebSocket,
+      requestTimeoutMs: 1000
+    });
+    const streamFrames: unknown[] = [];
+    const opened = session.connect();
+    const socket = FakeWebSocket.instances[0];
+    socket.open();
+    await opened;
+
+    let settled = false;
+    const request = session.request('ap', '/api/query', {}, {
+      onStream: (frame) => streamFrames.push(frame)
+    }).then((value) => {
+      settled = true;
+      return value;
+    });
+    const sent = socket.sent[0] as { id: string };
+    socket.message({
+      ns: 'ap',
+      frame: 'stream',
+      type: '/api/query',
+      id: sent.id,
+      event: { type: 'content.delta', delta: 'hi' }
+    });
+    await Promise.resolve();
+    expect(streamFrames).toHaveLength(1);
+    expect(settled).toBe(false);
+
+    socket.message({ ns: 'ap', frame: 'response', type: '/api/query', id: sent.id, code: 0, data: { answer: 'done' } });
+    await expect(request).resolves.toMatchObject({ frame: 'response', type: '/api/query' });
+    expect(settled).toBe(true);
+    vi.useRealTimers();
+  });
+
+  it('can resolve streaming requests on terminal stream frames', async () => {
+    vi.useFakeTimers();
+    FakeWebSocket.instances = [];
+    const session = new DesktopWsSession({
+      url: 'wss://zm123.m.zenmind.cc/ws',
+      token: 'secret',
+      WebSocketCtor: FakeWebSocket,
+      requestTimeoutMs: 1000
+    });
+    const opened = session.connect();
+    const socket = FakeWebSocket.instances[0];
+    socket.open();
+    await opened;
+
+    const request = session.request('ap', '/api/query', {}, { resolveOnStreamDone: true });
+    const sent = socket.sent[0] as { id: string };
+    socket.message({
+      ns: 'ap',
+      frame: 'stream',
+      type: '/api/query',
+      id: sent.id,
+      reason: 'done',
+      lastSeq: 4
+    });
+    await expect(request).resolves.toMatchObject({
+      frame: 'response',
+      data: { reason: 'done', lastSeq: 4 }
+    });
+    vi.useRealTimers();
+  });
+
   it('rejects timed out requests', async () => {
     vi.useFakeTimers();
     FakeWebSocket.instances = [];

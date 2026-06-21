@@ -32,6 +32,15 @@ export type DesktopResponse = DesktopFrame & {
   data?: unknown;
 };
 
+export type DesktopStreamFrame = DesktopFrame & {
+  frame: 'stream';
+  id: string;
+  event?: unknown;
+  reason?: string;
+  lastSeq?: number;
+  streamId?: string;
+};
+
 export type TaskBoardStatus = 'backlog' | 'todo' | 'in_progress' | 'in_review' | 'completed';
 export type TaskBoardPriority = 'low' | 'medium' | 'high';
 
@@ -87,6 +96,8 @@ type PendingRequest = {
   resolve: (frame: DesktopResponse) => void;
   reject: (error: Error) => void;
   timer: ReturnType<typeof setTimeout>;
+  onStream?: (frame: DesktopStreamFrame) => void;
+  resolveOnStreamDone?: boolean;
 };
 
 const DEFAULT_REQUEST_TIMEOUT_MS = 12_000;
@@ -112,6 +123,12 @@ export function createDesktopRequest(
     payload: payload ?? {}
   };
 }
+
+export type DesktopRequestOptions = {
+  timeoutMs?: number;
+  onStream?: (frame: DesktopStreamFrame) => void;
+  resolveOnStreamDone?: boolean;
+};
 
 export function desktopWsUrlFromLocation(locationLike: Pick<Location, 'protocol' | 'host'>, token?: string) {
   const protocol = locationLike.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -219,6 +236,7 @@ export class DesktopWsSession {
   private readonly pending = new Map<string, PendingRequest>();
   private readonly messageListeners = new Set<(frame: DesktopFrame) => void>();
   private readonly pushListeners = new Set<(frame: DesktopFrame) => void>();
+  private readonly streamListeners = new Set<(frame: DesktopStreamFrame) => void>();
   private readonly stateListeners = new Set<(state: ConnectionState) => void>();
   private state: ConnectionState = 'idle';
 
@@ -308,27 +326,47 @@ export class DesktopWsSession {
     return () => this.pushListeners.delete(listener);
   }
 
+  onStream(listener: (frame: DesktopStreamFrame) => void) {
+    this.streamListeners.add(listener);
+    return () => this.streamListeners.delete(listener);
+  }
+
   onState(listener: (state: ConnectionState) => void) {
     this.stateListeners.add(listener);
     return () => this.stateListeners.delete(listener);
   }
 
-  request(ns: DesktopNamespace, type: string, payload: unknown = {}, timeoutMs = this.options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS) {
+  request(
+    ns: DesktopNamespace,
+    type: string,
+    payload: unknown = {},
+    requestOptions: number | DesktopRequestOptions = {}
+  ) {
     const frame = createDesktopRequest(ns, type, payload);
-    return this.sendRequest(frame, timeoutMs);
+    return this.sendRequest(frame, normalizeRequestOptions(requestOptions, this.options.requestTimeoutMs));
   }
 
-  sendRequest(frame: DesktopRequest, timeoutMs = this.options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS) {
+  sendRequest(
+    frame: DesktopRequest,
+    requestOptions: number | DesktopRequestOptions = {}
+  ) {
     if (!this.socket || this.state !== 'open') {
       return Promise.reject(new Error('WebSocket is not connected'));
     }
 
+    const options = normalizeRequestOptions(requestOptions, this.options.requestTimeoutMs);
     return new Promise<DesktopResponse>((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(frame.id);
         reject(new Error(`${frame.type} timed out`));
-      }, timeoutMs);
-      this.pending.set(frame.id, { resolve, reject, timer });
+      }, options.timeoutMs);
+      this.pending.set(frame.id, {
+        resolve,
+        reject,
+        timer,
+        onStream: options.onStream,
+        resolveOnStreamDone: options.resolveOnStreamDone
+      });
       this.socket?.send(JSON.stringify(frame));
     });
   }
@@ -356,8 +394,36 @@ export class DesktopWsSession {
     if (!id) {
       return;
     }
+    if (frame.frame === 'stream') {
+      const streamFrame = frame as DesktopStreamFrame;
+      for (const listener of this.streamListeners) {
+        listener(streamFrame);
+      }
+      const streamPending = this.pending.get(id);
+      streamPending?.onStream?.(streamFrame);
+      if (streamPending?.resolveOnStreamDone && readString(streamFrame.reason)) {
+        clearTimeout(streamPending.timer);
+        this.pending.delete(id);
+        streamPending.resolve({
+          ...streamFrame,
+          ns: streamFrame.ns ?? 'ap',
+          frame: 'response',
+          type: streamFrame.type || 'stream.done',
+          id,
+          code: 0,
+          data: {
+            reason: streamFrame.reason,
+            lastSeq: streamFrame.lastSeq
+          }
+        });
+      }
+      return;
+    }
     const pending = this.pending.get(id);
     if (!pending) {
+      return;
+    }
+    if (frame.frame !== 'response' && frame.frame !== 'error') {
       return;
     }
     clearTimeout(pending.timer);
@@ -383,6 +449,23 @@ export class DesktopWsSession {
       listener(nextState);
     }
   }
+}
+
+function normalizeRequestOptions(
+  value: number | DesktopRequestOptions,
+  defaultTimeoutMs?: number
+): Required<Pick<DesktopRequestOptions, 'timeoutMs'>> & Omit<DesktopRequestOptions, 'timeoutMs'> {
+  if (typeof value === 'number') {
+    return {
+      timeoutMs: value,
+      resolveOnStreamDone: false
+    };
+  }
+  return {
+    ...value,
+    timeoutMs: value.timeoutMs ?? defaultTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS,
+    resolveOnStreamDone: value.resolveOnStreamDone ?? false
+  };
 }
 
 function desktopWsUrlWithToken(rawURL: string, token: string) {

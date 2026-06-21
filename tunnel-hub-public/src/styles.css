@@ -1397,3 +1397,502 @@ label {
     min-height: calc(100vh - 224px);
   }
 }
+
+/* Compact revision shell */
+.desktop-public-app {
+  display: grid;
+  width: min(1480px, 100%);
+  min-height: 100vh;
+  grid-template-rows: auto minmax(0, 1fr);
+  gap: 10px;
+  padding: 10px;
+}
+
+.app-tabs-shell {
+  display: flex;
+  min-height: 48px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--panel) 96%, transparent);
+  box-shadow: var(--shadow-soft);
+  padding: 5px;
+}
+
+.primary-tabs {
+  display: grid;
+  min-width: 0;
+  grid-template-columns: repeat(2, minmax(128px, 190px));
+  gap: 5px;
+}
+
+.primary-tabs button,
+.diagnostics-trigger {
+  display: inline-flex;
+  height: 38px;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--muted);
+  font-weight: 850;
+  transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+}
+
+.primary-tabs button:hover,
+.diagnostics-trigger:hover {
+  border-color: color-mix(in srgb, var(--accent) 28%, var(--border));
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.primary-tabs button.active {
+  border-color: color-mix(in srgb, var(--accent) 40%, var(--border));
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.diagnostics-trigger {
+  min-width: 78px;
+  padding: 0 12px;
+}
+
+.connection-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  background: var(--muted-2);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--muted-2) 14%, transparent);
+}
+
+.diagnostics-trigger.open .connection-dot {
+  background: var(--good);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--good) 18%, transparent);
+}
+
+.diagnostics-trigger.connecting .connection-dot {
+  background: var(--accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 18%, transparent);
+}
+
+.diagnostics-trigger.error .connection-dot {
+  background: var(--danger);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--danger) 18%, transparent);
+}
+
+.main-stage {
+  display: grid;
+  min-height: calc(100vh - 68px);
+}
+
+.main-stage > .workspace-card {
+  display: grid;
+  min-height: 0;
+}
+
+.copilot-card {
+  grid-template-rows: auto minmax(0, 1fr) auto;
+}
+
+.copilot-header {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+  border-bottom: 1px solid var(--border-soft);
+  padding: 8px 10px;
+}
+
+.copilot-tools {
+  display: grid;
+  min-width: 0;
+  grid-template-columns: auto minmax(150px, 230px) 38px 38px;
+  gap: 7px;
+  align-items: center;
+}
+
+.agent-inline-label {
+  display: inline-flex;
+  min-width: 0;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 820;
+  white-space: nowrap;
+}
+
+.copilot-tools select {
+  min-width: 0;
+}
+
+.summary-strip {
+  display: flex;
+  min-width: 0;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+.summary-chip {
+  display: inline-flex;
+  min-height: 26px;
+  align-items: center;
+  gap: 5px;
+  border: 1px solid var(--border-soft);
+  border-radius: 7px;
+  background: var(--panel-soft);
+  color: var(--muted);
+  padding: 0 8px;
+  font-size: 12px;
+  font-weight: 780;
+  white-space: nowrap;
+}
+
+.summary-chip strong {
+  color: var(--text-strong);
+  font-size: 13px;
+}
+
+.summary-chip.good {
+  background: var(--good-soft);
+  color: var(--good);
+}
+
+.summary-chip.progress {
+  background: var(--warn-soft);
+  color: var(--warn);
+}
+
+.summary-chip.violet {
+  background: var(--violet-soft);
+  color: var(--violet);
+}
+
+.summary-chip.good strong,
+.summary-chip.progress strong,
+.summary-chip.violet strong {
+  color: currentColor;
+}
+
+.message-stream {
+  padding: 12px;
+}
+
+.empty-chat {
+  min-height: min(430px, 100%);
+  gap: 10px;
+}
+
+.empty-chat strong {
+  font-size: 16px;
+}
+
+.prompt-grid button {
+  min-height: 40px;
+}
+
+.message-bubble {
+  gap: 6px;
+}
+
+.reasoning-block {
+  border: 1px solid var(--border-soft);
+  border-radius: 7px;
+  background: var(--panel-soft);
+  padding: 7px 8px;
+}
+
+.reasoning-block summary {
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 820;
+}
+
+.message-bubble .reasoning-block p {
+  margin-top: 6px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.composer {
+  padding: 8px 10px 10px;
+}
+
+.composer textarea {
+  min-height: 70px;
+}
+
+.board-card {
+  min-height: calc(100vh - 68px);
+}
+
+.modal-layer,
+.drawer-layer {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  background: rgba(12, 18, 24, 0.42);
+}
+
+.modal-layer {
+  display: grid;
+  place-items: center;
+  padding: 18px;
+}
+
+.auth-modal,
+.diagnostics-drawer {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel);
+  box-shadow: var(--shadow);
+}
+
+.auth-modal {
+  display: grid;
+  width: min(460px, 100%);
+  gap: 14px;
+  padding: 16px;
+}
+
+.auth-modal header,
+.diagnostics-drawer > header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.auth-modal h2,
+.diagnostics-drawer h2 {
+  margin: 0;
+  color: var(--text-strong);
+  font-size: 18px;
+}
+
+.auth-modal p,
+.diagnostics-drawer p {
+  margin: 4px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 720;
+}
+
+.auth-form {
+  display: grid;
+  gap: 10px;
+}
+
+.auth-form .primary {
+  width: 100%;
+}
+
+.drawer-layer {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.diagnostics-drawer {
+  display: grid;
+  width: min(440px, 100%);
+  height: 100%;
+  grid-template-rows: auto auto minmax(0, 1fr);
+  gap: 12px;
+  border-radius: 8px 0 0 8px;
+  padding: 14px;
+}
+
+.diagnostic-section {
+  display: grid;
+  gap: 9px;
+  border: 1px solid var(--border-soft);
+  border-radius: 8px;
+  background: var(--panel-soft);
+  padding: 10px;
+}
+
+.diagnostic-row {
+  display: grid;
+  min-height: 32px;
+  grid-template-columns: 92px minmax(0, 1fr);
+  gap: 10px;
+  align-items: center;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 780;
+}
+
+.diagnostic-row strong,
+.diagnostic-row code {
+  min-width: 0;
+  color: var(--text-strong);
+  font-size: 12px;
+  font-weight: 760;
+  overflow-wrap: anywhere;
+}
+
+.diagnostic-row code {
+  font-family: "SFMono-Regular", Consolas, monospace;
+}
+
+.diagnostic-actions {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 7px;
+}
+
+.log-drawer-section {
+  min-height: 0;
+  grid-template-rows: auto minmax(0, 1fr);
+}
+
+.toast {
+  position: fixed;
+  right: 14px;
+  bottom: 14px;
+  z-index: 60;
+  display: flex;
+  max-width: min(420px, calc(100vw - 28px));
+  min-height: 38px;
+  align-items: center;
+  gap: 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel);
+  box-shadow: var(--shadow-soft);
+  padding: 8px 10px;
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 780;
+}
+
+.toast.success {
+  border-color: color-mix(in srgb, var(--good) 34%, var(--border));
+  background: var(--good-soft);
+  color: var(--good);
+}
+
+.toast.error {
+  border-color: color-mix(in srgb, var(--danger) 34%, var(--border));
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+
+.toast.info {
+  border-color: color-mix(in srgb, var(--accent) 34%, var(--border));
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.toast button {
+  display: grid;
+  width: 26px;
+  height: 26px;
+  margin-left: auto;
+  place-items: center;
+  border-radius: 6px;
+  background: transparent;
+  color: inherit;
+}
+
+@media (max-width: 780px) {
+  .desktop-public-app {
+    gap: 8px;
+    padding: 8px;
+  }
+
+  .app-tabs-shell {
+    min-height: 46px;
+  }
+
+  .primary-tabs {
+    flex: 1 1 auto;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .primary-tabs button,
+  .diagnostics-trigger {
+    height: 36px;
+  }
+
+  .main-stage,
+  .board-card {
+    min-height: calc(100vh - 62px);
+    min-height: calc(100dvh - 62px);
+  }
+
+  .copilot-card {
+    grid-template-rows: auto minmax(0, 1fr) auto;
+  }
+
+  .copilot-header {
+    grid-template-columns: 1fr;
+    align-items: stretch;
+    padding: 7px;
+  }
+
+  .copilot-tools {
+    width: 100%;
+    grid-template-columns: minmax(0, 1fr) 36px 36px;
+  }
+
+  .agent-inline-label {
+    display: none;
+  }
+
+  .summary-strip {
+    justify-content: flex-start;
+    overflow-x: auto;
+    padding-bottom: 1px;
+  }
+
+  .message-stream {
+    padding: 10px;
+  }
+
+  .composer {
+    padding: 7px;
+  }
+
+  .composer textarea {
+    min-height: 62px;
+  }
+
+  .composer-footer {
+    align-items: center;
+    flex-direction: row;
+  }
+
+  .composer-footer .primary {
+    width: auto;
+  }
+
+  .auth-modal {
+    padding: 14px;
+  }
+
+  .diagnostics-drawer {
+    border-radius: 0;
+  }
+}
+
+@media (max-width: 430px) {
+  .diagnostics-trigger {
+    min-width: 42px;
+    padding: 0 9px;
+  }
+
+  .diagnostic-actions {
+    grid-template-columns: 1fr;
+  }
+
+  .chat-message {
+    max-width: 100%;
+  }
+}

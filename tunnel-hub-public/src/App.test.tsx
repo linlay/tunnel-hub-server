@@ -65,14 +65,14 @@ describe('App', () => {
     const user = userEvent.setup();
     render(<App />);
     await user.click(screen.getByRole('button', { name: '连接' }));
-    expect(screen.getByText('需要 Desktop token')).toBeInTheDocument();
+    expect(screen.getAllByText('需要 Desktop token').length).toBeGreaterThan(0);
     expect(FakeWebSocket.instances).toHaveLength(0);
   });
 
   it('consumes token from the URL without leaving it in history', async () => {
     window.history.replaceState(null, '', 'https://zm123.m.zenmind.cc/?token=secret&view=board');
     render(<App />);
-    expect(screen.getByLabelText('Desktop token')).toHaveValue('secret');
+    expect(screen.queryByLabelText('Desktop token')).not.toBeInTheDocument();
     expect(window.location.href).toBe('https://zm123.m.zenmind.cc/?view=board');
     await waitFor(() => expect(FakeWebSocket.instances).toHaveLength(1));
     expect(String(FakeWebSocket.instances[0].url)).toBe('wss://zm123.m.zenmind.cc/ws?token=secret');
@@ -96,11 +96,12 @@ describe('App', () => {
       platformAgents: [{ key: 'coder', name: 'Coder', role: 'Engineering' }]
     });
 
-    expect(await screen.findByText('Ship mobile board')).toBeInTheDocument();
     const agentSelect = screen.getByRole('combobox', { name: '选择智能体' });
     expect(within(agentSelect).getByRole('option', { name: '小宅' })).toBeInTheDocument();
     expect(within(agentSelect).getByRole('option', { name: 'Coder' })).toBeInTheDocument();
 
+    await user.click(screen.getByRole('button', { name: '看板' }));
+    expect(await screen.findByText('Ship mobile board')).toBeInTheDocument();
     await user.click(screen.getByRole('button', { name: '右移 Ship mobile board' }));
     await waitFor(() => expect(socket.sent.some((frame) => frame.type === 'issue.move')).toBe(true));
     const moveIndex = socket.sent.findIndex((frame) => frame.type === 'issue.move');
@@ -131,7 +132,7 @@ describe('App', () => {
     await user.click(screen.getByRole('button', { name: '发送' }));
     await waitFor(() => expect(socket.sent.some((frame) => frame.type === '/api/query')).toBe(true));
     const queryIndex = socket.sent.findIndex((frame) => frame.type === '/api/query');
-    expect(socket.sent[queryIndex].payload).toMatchObject({ agentKey: 'zenmi', message: '你好', stream: false });
+    expect(socket.sent[queryIndex].payload).toMatchObject({ agentKey: 'zenmi', message: '你好', stream: true });
     await act(async () => {
       socket.reply(queryIndex, { answer: '你好，我在。' });
     });
@@ -153,6 +154,69 @@ describe('App', () => {
     });
 
     expect(await screen.findAllByText('agent-platform is not running')).not.toHaveLength(0);
+  });
+
+  it('renders agent stream reasoning and content before stream completion', async () => {
+    const user = userEvent.setup();
+    render(<App />);
+    await user.type(screen.getByLabelText('Desktop token'), 'secret');
+    await user.click(screen.getByRole('button', { name: '连接' }));
+    const socket = FakeWebSocket.instances[0];
+    await act(async () => {
+      socket.open();
+    });
+
+    await replyBootstrap(socket, {
+      issues: [],
+      desktopAgents: [{ agentKey: 'zenmi', displayName: '小宅', role: '平台总管' }],
+      platformAgents: []
+    });
+
+    await user.clear(screen.getByLabelText('Agent message'));
+    await user.type(screen.getByLabelText('Agent message'), '流式回答');
+    await user.click(screen.getByRole('button', { name: '发送' }));
+    await waitFor(() => expect(socket.sent.some((frame) => frame.type === '/api/query')).toBe(true));
+    const queryIndex = lastFrameIndex(socket.sent, '/api/query');
+    const id = socket.sent[queryIndex].id;
+    await act(async () => {
+      socket.message({
+        ns: 'ap',
+        frame: 'stream',
+        type: '/api/query',
+        id,
+        event: {
+          type: 'reasoning.delta',
+          reasoningLabel: '正在追线索',
+          delta: '先检查看板。'
+        }
+      });
+      socket.message({
+        ns: 'ap',
+        frame: 'stream',
+        type: '/api/query',
+        id,
+        event: {
+          type: 'content.delta',
+          contentId: 'content_1',
+          delta: '这是流式正文。'
+        }
+      });
+    });
+
+    expect(await screen.findByText('正在追线索')).toBeInTheDocument();
+    expect(screen.getByText('先检查看板。')).toBeInTheDocument();
+    expect(screen.getByText('这是流式正文。')).toBeInTheDocument();
+
+    await act(async () => {
+      socket.message({
+        ns: 'ap',
+        frame: 'stream',
+        type: '/api/query',
+        id,
+        reason: 'done',
+        lastSeq: 8
+      });
+    });
   });
 });
 

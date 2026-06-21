@@ -29,6 +29,7 @@ import {
   AgentSummary,
   ConnectionState,
   DesktopFrame,
+  DesktopStreamFrame,
   DesktopWsSession,
   TaskBoardIssue,
   TaskBoardPriority,
@@ -42,7 +43,7 @@ import {
   redactSensitiveText
 } from './lib/desktopWsClient';
 
-type View = 'copilot' | 'board' | 'logs';
+type View = 'copilot' | 'board';
 type LogDirection = 'in' | 'out' | 'system';
 type ChatRole = 'user' | 'assistant' | 'system';
 type BoardPriorityFilter = TaskBoardPriority | 'all';
@@ -54,6 +55,8 @@ type ChatMessage = {
   at: string;
   agentKey?: string;
   status?: 'pending' | 'done' | 'error';
+  reasoning?: string;
+  reasoningLabel?: string;
 };
 
 type LogEntry = {
@@ -100,6 +103,8 @@ export function App() {
   const [token, setToken] = useState(initialToken);
   const [connectionState, setConnectionState] = useState<ConnectionState>('idle');
   const [activeView, setActiveView] = useState<View>('copilot');
+  const [authModalOpen, setAuthModalOpen] = useState(!initialToken);
+  const [diagnosticsOpen, setDiagnosticsOpen] = useState(false);
   const [snapshot, setSnapshot] = useState<TaskBoardSnapshot>(emptySnapshot);
   const [desktopAgents, setDesktopAgents] = useState<AgentSummary[]>([]);
   const [platformAgents, setPlatformAgents] = useState<AgentSummary[]>([]);
@@ -171,11 +176,20 @@ export function App() {
     setMessages((current) => current.map((message) => message.id === id ? { ...message, ...patch } : message));
   }, []);
 
+  const updateMessageWith = useCallback((id: string, updater: (message: ChatMessage) => ChatMessage) => {
+    setMessages((current) => current.map((message) => message.id === id ? updater(message) : message));
+  }, []);
+
   const request = useCallback(async (
     ns: 'd' | 'ap',
     type: string,
     payload: unknown = {},
-    options: { silent?: boolean } = {}
+    options: {
+      silent?: boolean;
+      timeoutMs?: number;
+      onStream?: (frame: DesktopStreamFrame) => void;
+      resolveOnStreamDone?: boolean;
+    } = {}
   ) => {
     const session = sessionRef.current;
     if (!session || session.readyState !== 'open') {
@@ -184,7 +198,11 @@ export function App() {
     if (!options.silent) {
       addLog('out', `${ns}:${type}`, payload);
     }
-    const response = await session.request(ns, type, payload);
+    const response = await session.request(ns, type, payload, {
+      timeoutMs: options.timeoutMs,
+      onStream: options.onStream,
+      resolveOnStreamDone: options.resolveOnStreamDone
+    });
     if (!options.silent) {
       addLog('in', `${response.ns || ns}:${response.type || type}`, response);
     }
@@ -240,6 +258,7 @@ export function App() {
     const trimmedToken = rawToken.trim();
     if (!trimmedToken) {
       setFeedback({ tone: 'error', message: '需要 Desktop token' });
+      setAuthModalOpen(true);
       return;
     }
     sessionRef.current?.close();
@@ -260,10 +279,13 @@ export function App() {
 
     try {
       await session.connect();
+      setToken(trimmedToken);
+      setAuthModalOpen(false);
       setFeedback({ tone: 'success', message: mode === 'auto' ? '已用访问链接连接 Desktop' : '已连接 Desktop' });
       addLog('system', 'Connected', wsURL);
       await bootstrapSession();
     } catch (error) {
+      setAuthModalOpen(true);
       showError(setFeedback, error);
       addLog('system', 'Connection failed', error instanceof Error ? error.message : String(error));
     }
@@ -277,6 +299,12 @@ export function App() {
     void connectWithToken(initialToken, 'auto');
   }, [connectWithToken, initialToken]);
 
+  useEffect(() => {
+    if (connectionState === 'closed' || connectionState === 'error') {
+      setAuthModalOpen(true);
+    }
+  }, [connectionState]);
+
   async function handleConnect(event?: FormEvent) {
     event?.preventDefault();
     await connectWithToken(token, 'manual');
@@ -286,6 +314,7 @@ export function App() {
     sessionRef.current?.close();
     sessionRef.current = null;
     setConnectionState('closed');
+    setAuthModalOpen(true);
     addLog('system', 'Disconnected');
   }
 
@@ -378,15 +407,26 @@ export function App() {
       const data = await request('ap', '/api/query', {
         agentKey: selectedAgent,
         message,
-        stream: false,
+        stream: true,
         includeUsage: true,
         context: {
           board: boardSummary
         }
+      }, {
+        timeoutMs: 120_000,
+        resolveOnStreamDone: true,
+        onStream: (frame) => {
+          applyAgentStreamFrame(frame, pendingId, updateMessageWith);
+        }
       });
-      updateMessage(pendingId, {
-        content: readAgentAnswer(data),
-        status: 'done'
+      const answer = readAgentAnswer(data);
+      updateMessageWith(pendingId, (current) => {
+        const nextContent = answer || (current.content === '正在思考...' ? '' : current.content);
+        return {
+          ...current,
+          content: nextContent || '已完成，但没有返回文本。',
+          status: 'done'
+        };
       });
       setFeedback({ tone: 'success', message: '智能体已回复' });
     } catch (error) {
@@ -418,52 +458,22 @@ export function App() {
 
   return (
     <main className="desktop-public-app">
-      <header className="topbar">
-        <div className="brand">
-          <div className="brand-icon"><Sparkles size={21} /></div>
-          <div>
-            <h1>ZenMind Desktop</h1>
-            <p>{hostLabel}</p>
-          </div>
-        </div>
-        <div className="topbar-actions">
-          <StatusPill state={connectionState} />
-          <button className="icon-button" type="button" onClick={() => void refreshBoard()} disabled={!isConnected || busyAction === 'refresh-board'} aria-label="刷新看板">
-            <RefreshCcw size={17} className={busyAction === 'refresh-board' ? 'spin' : ''} />
-          </button>
-        </div>
+      <header className="app-tabs-shell">
+        <nav className="primary-tabs" aria-label="主工作区">
+          <TabButton active={activeView === 'copilot'} onClick={() => setActiveView('copilot')} icon={<MessageCircle size={17} />} label="对话" />
+          <TabButton active={activeView === 'board'} onClick={() => setActiveView('board')} icon={<ClipboardList size={17} />} label="看板" />
+        </nav>
+        <button className={`diagnostics-trigger ${connectionState}`} type="button" onClick={() => setDiagnosticsOpen(true)}>
+          <span className="connection-dot" aria-hidden="true" />
+          诊断
+        </button>
       </header>
 
-      <ConnectionPanel
-        connectionState={connectionState}
-        feedback={feedback}
-        isConnected={isConnected}
-        token={token}
-        onConnect={handleConnect}
-        onDisconnect={handleDisconnect}
-        onDismissFeedback={() => setFeedback(null)}
-        setToken={setToken}
-      />
+      {feedback && !authModalOpen ? <Toast feedback={feedback} onDismiss={() => setFeedback(null)} /> : null}
 
-      <nav className="mobile-tabs" aria-label="工作区">
-        <TabButton active={activeView === 'copilot'} onClick={() => setActiveView('copilot')} icon={<MessageCircle size={16} />} label="对话" />
-        <TabButton active={activeView === 'board'} onClick={() => setActiveView('board')} icon={<ClipboardList size={16} />} label="看板" />
-        <TabButton active={activeView === 'logs'} onClick={() => setActiveView('logs')} icon={<Activity size={16} />} label="诊断" />
-      </nav>
-
-      <section className="workspace-grid" data-view={activeView}>
-        <SidePanel
-          agents={allAgents}
-          boardSummary={boardSummary}
-          busyAction={busyAction}
-          issueTotals={issueTotals}
-          isConnected={isConnected}
-          selectedAgent={selectedAgent}
-          onRefreshAgents={refreshAgents}
-          setSelectedAgentKey={setSelectedAgentKey}
-        />
-
-        <CopilotPanel
+      <section className="main-stage" data-view={activeView}>
+        {activeView === 'copilot' ? (
+          <CopilotPanel
           agentQuery={agentQuery}
           agents={allAgents}
           boardSummary={boardSummary}
@@ -479,9 +489,9 @@ export function App() {
           onRunQuery={runAgentQuery}
           setAgentQuery={setAgentQuery}
           setSelectedAgentKey={setSelectedAgentKey}
-        />
-
-        <BoardPanel
+          />
+        ) : (
+          <BoardPanel
           boardPriorityFilter={boardPriorityFilter}
           boardQuery={boardQuery}
           busyAction={busyAction}
@@ -504,10 +514,36 @@ export function App() {
           setIssueStatus={setIssueStatus}
           setIssueTitle={setIssueTitle}
           setMobileStatus={setMobileStatus}
-        />
-
-        <LogsPanel logs={logs} onClear={() => setLogs([])} />
+          />
+        )}
       </section>
+
+      {authModalOpen ? (
+        <AuthModal
+          connectionState={connectionState}
+          feedback={feedback}
+          token={token}
+          onClose={isConnected ? () => setAuthModalOpen(false) : undefined}
+          onConnect={handleConnect}
+          setToken={setToken}
+        />
+      ) : null}
+
+      {diagnosticsOpen ? (
+        <DiagnosticsPanel
+          connectionState={connectionState}
+          hostLabel={hostLabel}
+          isConnected={isConnected}
+          logs={logs}
+          token={token}
+          wsURL={wsURL}
+          onClearLogs={() => setLogs([])}
+          onClose={() => setDiagnosticsOpen(false)}
+          onConnect={() => void connectWithToken(token, 'manual')}
+          onDisconnect={handleDisconnect}
+          onOpenAuth={() => setAuthModalOpen(true)}
+        />
+      ) : null}
     </main>
   );
 }
@@ -690,14 +726,8 @@ function CopilotPanel({
   return (
     <section className="workspace-card copilot-card" aria-label="智能体对话">
       <div className="copilot-header">
-        <div className="copilot-title">
-          <span className="panel-icon"><MessageCircle size={18} /></span>
-          <div>
-            <h2>{selectedAgentSummary?.displayName || selectedAgent}</h2>
-            <p>{selectedAgentSummary?.role || 'Agent platform'}</p>
-          </div>
-        </div>
         <div className="copilot-tools">
+          <span className="agent-inline-label"><Bot size={15} />{selectedAgentSummary?.role || 'Agent'}</span>
           <select value={selectedAgent} onChange={(event) => setSelectedAgentKey(event.target.value)} aria-label="选择智能体">
             {agents.length === 0 ? <option value="zenmi">zenmi</option> : null}
             {agents.map((agent) => (
@@ -713,13 +743,12 @@ function CopilotPanel({
             <Trash2 size={17} />
           </button>
         </div>
-      </div>
-
-      <div className="copilot-metrics" aria-label="看板摘要">
-        <SummaryMetric label="任务" value={boardSummary.total} tone="neutral" />
-        <SummaryMetric label="运行中" value={boardSummary.running} tone="progress" />
-        <SummaryMetric label="待审查" value={boardSummary.reviewing} tone="violet" />
-        <SummaryMetric label="已完成" value={boardSummary.completed} tone="good" />
+        <div className="summary-strip" aria-label="看板摘要">
+          <SummaryChip label="任务" value={boardSummary.total} />
+          <SummaryChip label="运行中" value={boardSummary.running} tone="progress" />
+          <SummaryChip label="待审查" value={boardSummary.reviewing} tone="violet" />
+          <SummaryChip label="已完成" value={boardSummary.completed} tone="good" />
+        </div>
       </div>
 
       <div className="message-stream" aria-live="polite">
@@ -746,6 +775,12 @@ function CopilotPanel({
                 <strong>{message.role === 'user' ? 'You' : message.agentKey || 'Agent'}</strong>
                 <time>{message.at}</time>
               </header>
+              {message.reasoning ? (
+                <details className="reasoning-block" open={message.status === 'pending'}>
+                  <summary>{message.reasoningLabel || '思考中'}</summary>
+                  <p>{message.reasoning}</p>
+                </details>
+              ) : null}
               <p>{message.content}</p>
             </div>
           </article>
@@ -994,6 +1029,181 @@ function LogsPanel({ logs, onClear }: { logs: LogEntry[]; onClear: () => void })
   );
 }
 
+function AuthModal({
+  connectionState,
+  feedback,
+  token,
+  onClose,
+  onConnect,
+  setToken
+}: {
+  connectionState: ConnectionState;
+  feedback: Feedback | null;
+  token: string;
+  onClose?: () => void;
+  onConnect: (event: FormEvent) => void;
+  setToken: (token: string) => void;
+}) {
+  return (
+    <div className="modal-layer" role="presentation">
+      <section className="auth-modal" role="dialog" aria-modal="true" aria-labelledby="auth-title">
+        <header>
+          <div>
+            <h2 id="auth-title">连接 Desktop</h2>
+            <p>输入访问 token 后即可使用对话和看板。</p>
+          </div>
+          {onClose ? (
+            <button className="icon-button" type="button" onClick={onClose} aria-label="关闭登录">
+              <X size={17} />
+            </button>
+          ) : null}
+        </header>
+        <form className="auth-form" onSubmit={onConnect}>
+          <label>
+            <span>Desktop token</span>
+            <div className="token-field">
+              <KeyRound size={16} />
+              <input
+                aria-label="Desktop token"
+                autoComplete="off"
+                value={token}
+                onChange={(event) => setToken(event.target.value)}
+                placeholder="Paste app token"
+                type="password"
+              />
+            </div>
+          </label>
+          <button className="primary" type="submit" disabled={connectionState === 'connecting'}>
+            {connectionState === 'connecting' ? <Loader2 className="spin" size={16} /> : <Wifi size={16} />}
+            连接
+          </button>
+        </form>
+        {feedback && feedback.tone === 'error' ? <FeedbackLine feedback={feedback} onDismiss={() => undefined} /> : null}
+      </section>
+    </div>
+  );
+}
+
+function DiagnosticsPanel({
+  connectionState,
+  hostLabel,
+  isConnected,
+  logs,
+  token,
+  wsURL,
+  onClearLogs,
+  onClose,
+  onConnect,
+  onDisconnect,
+  onOpenAuth
+}: {
+  connectionState: ConnectionState;
+  hostLabel: string;
+  isConnected: boolean;
+  logs: LogEntry[];
+  token: string;
+  wsURL: string;
+  onClearLogs: () => void;
+  onClose: () => void;
+  onConnect: () => void;
+  onDisconnect: () => void;
+  onOpenAuth: () => void;
+}) {
+  return (
+    <div className="drawer-layer" role="presentation" onMouseDown={onClose}>
+      <aside className="diagnostics-drawer" role="dialog" aria-modal="true" aria-label="诊断" onMouseDown={(event) => event.stopPropagation()}>
+        <header>
+          <div>
+            <h2>诊断</h2>
+            <p>{hostLabel}</p>
+          </div>
+          <button className="icon-button" type="button" onClick={onClose} aria-label="关闭诊断">
+            <X size={17} />
+          </button>
+        </header>
+
+        <section className="diagnostic-section">
+          <div className="diagnostic-row">
+            <span>连接状态</span>
+            <StatusPill state={connectionState} />
+          </div>
+          <div className="diagnostic-row">
+            <span>WebSocket</span>
+            <code>{redactSensitiveText(wsURL, [token])}</code>
+          </div>
+          <div className="diagnostic-row">
+            <span>Token</span>
+            <strong>{token.trim() ? '已载入' : '未提供'}</strong>
+          </div>
+          <div className="diagnostic-actions">
+            <button className="secondary compact" type="button" onClick={onOpenAuth}>
+              <KeyRound size={15} />
+              Token
+            </button>
+            <button className="primary compact" type="button" onClick={onConnect} disabled={connectionState === 'connecting'}>
+              {connectionState === 'connecting' ? <Loader2 className="spin" size={15} /> : <Wifi size={15} />}
+              重连
+            </button>
+            <button className="secondary compact" type="button" onClick={onDisconnect} disabled={!isConnected}>
+              <Unplug size={15} />
+              断开
+            </button>
+          </div>
+        </section>
+
+        <section className="diagnostic-section log-drawer-section">
+          <div className="section-head compact-head">
+            <div>
+              <h2>日志</h2>
+              <p>{logs.length} entries</p>
+            </div>
+            <button className="secondary compact" onClick={onClearLogs} disabled={logs.length === 0}>
+              Clear
+            </button>
+          </div>
+          <div className="log-list">
+            {logs.length === 0 ? <div className="empty-panel"><ListChecks size={18} /> No logs yet</div> : null}
+            {logs.map((entry) => (
+              <article className={`log-entry ${entry.direction}`} key={entry.id}>
+                <header>
+                  <span>{entry.direction}</span>
+                  <strong>{entry.title}</strong>
+                  <time>{entry.at}</time>
+                </header>
+                {entry.detail ? <pre>{entry.detail}</pre> : null}
+              </article>
+            ))}
+          </div>
+        </section>
+      </aside>
+    </div>
+  );
+}
+
+function Toast({ feedback, onDismiss }: { feedback: Feedback; onDismiss: () => void }) {
+  const icon = feedback.tone === 'success'
+    ? <CheckCircle2 size={16} />
+    : feedback.tone === 'error'
+      ? <XCircle size={16} />
+      : <ShieldCheck size={16} />;
+  return (
+    <div className={`toast ${feedback.tone}`} role="status">
+      {icon}
+      <span>{feedback.message}</span>
+      <button onClick={onDismiss} aria-label="Dismiss" type="button"><X size={15} /></button>
+    </div>
+  );
+}
+
+function SummaryChip({ label, value, tone = 'neutral' }: { label: string; value: number; tone?: 'neutral' | 'good' | 'progress' | 'danger' | 'violet' }) {
+  return (
+    <span className={`summary-chip ${tone}`}>
+      <strong>{value}</strong>
+      {label}
+    </span>
+  );
+}
+
 function SummaryMetric({ label, value, tone }: { label: string; value: number; tone: 'neutral' | 'good' | 'progress' | 'danger' | 'violet' }) {
   return (
     <div className={`summary-metric ${tone}`}>
@@ -1159,22 +1369,116 @@ function showError(setFeedback: (feedback: Feedback) => void, error: unknown) {
   setFeedback({ tone: 'error', message: error instanceof Error ? error.message : String(error) });
 }
 
+function applyAgentStreamFrame(
+  frame: DesktopStreamFrame,
+  messageId: string,
+  updateMessageWith: (id: string, updater: (message: ChatMessage) => ChatMessage) => void
+) {
+  const event = readObject(frame.event);
+  const type = readText(event.type);
+  if (!type) {
+    return;
+  }
+
+  if (type === 'content.start' || type === 'content.snapshot' || type === 'content.end') {
+    const text = readText(event.text);
+    if (!text) {
+      return;
+    }
+    updateMessageWith(messageId, (message) => ({
+      ...message,
+      content: text,
+      status: type === 'content.end' || type === 'content.snapshot' ? 'done' : message.status
+    }));
+    return;
+  }
+
+  if (type === 'content.delta') {
+    const delta = readText(event.delta) || readText(event.text);
+    if (!delta) {
+      return;
+    }
+    updateMessageWith(messageId, (message) => ({
+      ...message,
+      content: `${message.content === '正在思考...' ? '' : message.content}${delta}`,
+      status: 'pending'
+    }));
+    return;
+  }
+
+  if (type === 'reasoning.start' || type === 'reasoning.snapshot' || type === 'reasoning.end') {
+    const text = readText(event.text);
+    const label = readText(event.reasoningLabel);
+    updateMessageWith(messageId, (message) => ({
+      ...message,
+      reasoning: text || message.reasoning,
+      reasoningLabel: label || message.reasoningLabel || '思考中',
+      status: type === 'reasoning.end' && message.content ? 'done' : message.status
+    }));
+    return;
+  }
+
+  if (type === 'reasoning.delta') {
+    const delta = readText(event.delta) || readText(event.text);
+    const label = readText(event.reasoningLabel);
+    if (!delta && !label) {
+      return;
+    }
+    updateMessageWith(messageId, (message) => ({
+      ...message,
+      reasoning: `${message.reasoning || ''}${delta}`,
+      reasoningLabel: label || message.reasoningLabel || '思考中',
+      status: 'pending'
+    }));
+    return;
+  }
+
+  if (type === 'run.error') {
+    const text = readText(event.error) || readText(event.message) || '智能体运行失败';
+    updateMessageWith(messageId, (message) => ({
+      ...message,
+      content: text,
+      status: 'error'
+    }));
+    return;
+  }
+
+  if (type === 'run.complete' || type === 'run.cancel') {
+    updateMessageWith(messageId, (message) => ({
+      ...message,
+      status: message.status === 'error' ? 'error' : 'done'
+    }));
+  }
+}
+
 function readAgentAnswer(value: unknown) {
-  const record = value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {};
+  const record = readObject(value);
+  const result = readObject(record.result);
   const candidates = [
     record.answer,
     record.message,
     record.content,
     record.text,
     record.assistantText,
-    record.result
+    result.answer,
+    result.message,
+    result.content,
+    result.text
   ];
   for (const candidate of candidates) {
     if (typeof candidate === 'string' && candidate.trim()) {
       return candidate.trim();
     }
   }
-  return JSON.stringify(value, null, 2);
+  return '';
+}
+
+function readObject(value: unknown): Record<string, unknown> {
+  return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {};
+}
+
+function readText(value: unknown) {
+  return typeof value === 'string' ? value : '';
 }
 
 function formatClock() {
