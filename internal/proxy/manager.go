@@ -74,6 +74,22 @@ func (m *Manager) Clear(sessionID string) {
 	}
 }
 
+func (m *Manager) CloseSession(sessionID string) error {
+	m.mu.RLock()
+	var session *yamux.Session
+	for _, active := range m.active {
+		if active != nil && active.SessionID == sessionID {
+			session = active.Yamux
+			break
+		}
+	}
+	m.mu.RUnlock()
+	if session == nil || session.IsClosed() {
+		return ErrNoAgent
+	}
+	return session.Close()
+}
+
 func (m *Manager) OpenStream(ctx context.Context, tokenID string) (*yamux.Stream, error) {
 	m.mu.RLock()
 	active := m.active[tokenID]
@@ -132,4 +148,19 @@ func (m *Manager) ActiveAgents() []ActiveAgentMetric {
 		return agents[i].TokenID < agents[j].TokenID
 	})
 	return agents
+}
+
+func (m *Manager) ActiveAgentForToken(tokenID string) (ActiveAgentMetric, bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	active := m.active[tokenID]
+	if active == nil || active.Yamux == nil || active.Yamux.IsClosed() {
+		return ActiveAgentMetric{}, false
+	}
+	return ActiveAgentMetric{
+		SessionID:   active.SessionID,
+		TokenID:     active.TokenID,
+		RemoteAddr:  active.RemoteAddr,
+		ConnectedAt: active.ConnectedAt,
+	}, true
 }

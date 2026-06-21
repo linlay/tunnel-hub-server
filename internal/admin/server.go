@@ -7,6 +7,8 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -65,10 +67,20 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.requireAuth(w, r, s.handleTokens)
 	case path == "/users" || strings.HasPrefix(path, "/users/"):
 		s.requireAuth(w, r, s.handleUsers)
+	case path == "/overview" && r.Method == http.MethodGet:
+		s.requireAuth(w, r, s.handleOverview)
+	case path == "/desktops" && r.Method == http.MethodGet:
+		s.requireAuth(w, r, s.handleDesktops)
+	case path == "/webapps" && r.Method == http.MethodGet:
+		s.requireAuth(w, r, s.handleWebApps)
+	case path == "/activity" && r.Method == http.MethodGet:
+		s.requireAuth(w, r, s.handleActivity)
 	case path == "/agents" && r.Method == http.MethodGet:
 		s.requireAuth(w, r, s.handleAgents)
 	case path == "/sessions" && r.Method == http.MethodGet:
 		s.requireAuth(w, r, s.handleSessions)
+	case strings.HasPrefix(path, "/sessions/"):
+		s.requireAuth(w, r, s.handleSessionActions)
 	case path == "/events" && r.Method == http.MethodGet:
 		s.requireAuth(w, r, s.handleEvents)
 	case path == "/metrics" && r.Method == http.MethodGet:
@@ -207,30 +219,7 @@ func (s *Server) handleTokens(w http.ResponseWriter, r *http.Request) {
 		}
 		writeJSON(w, http.StatusOK, tokens)
 	case http.MethodPost:
-		var payload struct {
-			Name string `json:"name"`
-		}
-		if err := decodeJSON(r, &payload); err != nil {
-			writeError(w, http.StatusBadRequest, "invalid json")
-			return
-		}
-		payload.Name = strings.TrimSpace(payload.Name)
-		if payload.Name == "" {
-			writeError(w, http.StatusBadRequest, "name is required")
-			return
-		}
-		rawToken, err := auth.NewToken()
-		if err != nil {
-			s.writeInternal(w, "generate token", err)
-			return
-		}
-		token, err := s.DB.CreateToken(r.Context(), payload.Name, rawToken)
-		if err != nil {
-			s.writeInternal(w, "create token", err)
-			return
-		}
-		_ = s.DB.AddEvent(context.Background(), "token.created", "Tunnel token created", token.Name)
-		writeJSON(w, http.StatusCreated, map[string]any{"token": token, "secret": rawToken})
+		writeError(w, http.StatusMethodNotAllowed, "manual token creation is disabled")
 	case http.MethodDelete:
 		if id == "" {
 			writeError(w, http.StatusBadRequest, "token id is required")
@@ -403,6 +392,342 @@ func (s *Server) handleServices(w http.ResponseWriter, r *http.Request) {
 	default:
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 	}
+}
+
+func (s *Server) handleOverview(w http.ResponseWriter, r *http.Request) {
+	devices, err := s.DB.ListDesktopDevices(r.Context())
+	if err != nil {
+		s.writeInternal(w, "list desktop devices", err)
+		return
+	}
+	webApps, err := s.DB.ListDesktopWebApps(r.Context())
+	if err != nil {
+		s.writeInternal(w, "list desktop webapps", err)
+		return
+	}
+	sessions, err := s.DB.ListAgentSessions(r.Context(), 500)
+	if err != nil {
+		s.writeInternal(w, "list agent sessions", err)
+		return
+	}
+	totals, err := s.DB.TrafficTotals(r.Context())
+	if err != nil {
+		s.writeInternal(w, "traffic totals", err)
+		return
+	}
+	trafficRange := normalizeTrafficRange(r.URL.Query().Get("range"))
+	series, err := s.trafficSeries(r.Context(), trafficRange)
+	if err != nil {
+		s.writeInternal(w, "traffic series", err)
+		return
+	}
+
+	tokenToDevice := desktopIdentityByToken(devices)
+	var recentAt *time.Time
+	recentIdentity := ""
+	recentDevice := ""
+	if len(sessions) > 0 {
+		recentAt = &sessions[0].ConnectedAt
+		if device, ok := tokenToDevice[sessions[0].TokenID]; ok {
+			recentIdentity = desktopIdentity(device)
+			recentDevice = device.DeviceName
+			if recentDevice == "" {
+				recentDevice = device.DeviceID
+			}
+		}
+	}
+	activeWebApps := 0
+	for _, webApp := range webApps {
+		if webApp.Active {
+			activeWebApps++
+		}
+	}
+	metrics := s.Manager.Metrics()
+	writeJSON(w, http.StatusOK, overviewResponse{
+		Range:                  trafficRange,
+		DesktopConnectionCount: metrics.ActiveAgentCount,
+		WebAppCount:            len(webApps),
+		TotalTrafficBytes:      totals.BytesIn + totals.BytesOut,
+		RecentConnectionAt:     recentAt,
+		RecentIdentity:         recentIdentity,
+		RecentDevice:           recentDevice,
+		Resources: overviewResourceSummary{
+			TotalDesktops:  len(devices),
+			OnlineDesktops: metrics.ActiveAgentCount,
+			TotalWebApps:   len(webApps),
+			ActiveWebApps:  activeWebApps,
+			ActiveStreams:  metrics.ActiveStreams,
+			TotalStreams:   metrics.TotalStreams,
+		},
+		Traffic: series,
+	})
+}
+
+func (s *Server) handleDesktops(w http.ResponseWriter, r *http.Request) {
+	devices, err := s.DB.ListDesktopDevices(r.Context())
+	if err != nil {
+		s.writeInternal(w, "list desktop devices", err)
+		return
+	}
+	tokens, err := s.DB.ListTokens(r.Context())
+	if err != nil {
+		s.writeInternal(w, "list tokens for desktops", err)
+		return
+	}
+	webApps, err := s.DB.ListDesktopWebApps(r.Context())
+	if err != nil {
+		s.writeInternal(w, "list desktop webapps", err)
+		return
+	}
+	sessions, err := s.DB.ListAgentSessions(r.Context(), 500)
+	if err != nil {
+		s.writeInternal(w, "list desktop sessions", err)
+		return
+	}
+	statsByToken, err := s.DB.TrafficStatsByToken(r.Context())
+	if err != nil {
+		s.writeInternal(w, "desktop traffic stats", err)
+		return
+	}
+
+	activeByToken := make(map[string]proxy.ActiveAgentMetric)
+	for _, active := range s.Manager.ActiveAgents() {
+		activeByToken[active.TokenID] = active
+	}
+	tokenByID := make(map[string]store.TunnelToken)
+	for _, token := range tokens {
+		tokenByID[token.ID] = token
+	}
+	lastSessionByToken := make(map[string]store.AgentSession)
+	for _, session := range sessions {
+		if _, ok := lastSessionByToken[session.TokenID]; !ok {
+			lastSessionByToken[session.TokenID] = session
+		}
+	}
+	webAppCountByDevice := make(map[string]int)
+	for _, webApp := range webApps {
+		webAppCountByDevice[webApp.DeviceKey]++
+	}
+
+	response := make([]desktopAdminResponse, 0, len(devices))
+	for _, device := range devices {
+		token := tokenByID[device.TokenID]
+		item := desktopAdminResponse{
+			DeviceID:    device.DeviceID,
+			DeviceName:  device.DeviceName,
+			OwnerUserID: device.OwnerUserID,
+			OwnerEmail:  device.OwnerEmail,
+			OwnerName:   device.OwnerName,
+			PublicHost:  device.PublicHost,
+			PublicURL:   "https://" + device.PublicHost,
+			TokenID:     device.TokenID,
+			TokenName:   token.Name,
+			TokenActive: token.Active,
+			CreatedAt:   device.CreatedAt,
+			UpdatedAt:   device.UpdatedAt,
+			WebAppCount: webAppCountByDevice[device.DeviceKey],
+			Traffic:     statsByToken[device.TokenID],
+		}
+		if active, ok := activeByToken[device.TokenID]; ok {
+			item.Online = true
+			item.SessionID = active.SessionID
+			item.RemoteAddr = active.RemoteAddr
+			item.ConnectedAt = &active.ConnectedAt
+		}
+		if session, ok := lastSessionByToken[device.TokenID]; ok {
+			item.LastConnectedAt = &session.ConnectedAt
+		}
+		response = append(response, item)
+	}
+	writeJSON(w, http.StatusOK, response)
+}
+
+func (s *Server) handleWebApps(w http.ResponseWriter, r *http.Request) {
+	webApps, err := s.DB.ListDesktopWebApps(r.Context())
+	if err != nil {
+		s.writeInternal(w, "list desktop webapps", err)
+		return
+	}
+	routes, err := s.DB.ListRoutes(r.Context())
+	if err != nil {
+		s.writeInternal(w, "list webapp routes", err)
+		return
+	}
+	devices, err := s.DB.ListDesktopDevices(r.Context())
+	if err != nil {
+		s.writeInternal(w, "list webapp devices", err)
+		return
+	}
+	statsByHost, err := s.DB.TrafficStatsByPublicHost(r.Context())
+	if err != nil {
+		s.writeInternal(w, "webapp traffic stats", err)
+		return
+	}
+
+	routeByID := make(map[string]store.Route)
+	for _, route := range routes {
+		routeByID[route.ID] = route
+	}
+	deviceByKey := make(map[string]store.DesktopDevice)
+	for _, device := range devices {
+		deviceByKey[device.DeviceKey] = device
+	}
+	onlineTokenIDs := make(map[string]bool)
+	for _, active := range s.Manager.ActiveAgents() {
+		onlineTokenIDs[active.TokenID] = true
+	}
+
+	response := make([]webAppAdminResponse, 0, len(webApps))
+	for _, webApp := range webApps {
+		route := routeByID[webApp.RouteID]
+		device := deviceByKey[webApp.DeviceKey]
+		stats := statsByHost[webApp.PublicHost]
+		item := webAppAdminResponse{
+			ID:           webApp.ID,
+			Name:         webApp.Name,
+			RouteID:      webApp.RouteID,
+			PublicHost:   webApp.PublicHost,
+			PublicURL:    "https://" + webApp.PublicHost,
+			TargetURL:    webApp.TargetURL,
+			TokenID:      route.TokenID,
+			DeviceID:     device.DeviceID,
+			DeviceName:   device.DeviceName,
+			Active:       webApp.Active,
+			Online:       onlineTokenIDs[route.TokenID],
+			Route:        route,
+			RequestCount: stats.RequestCount,
+			LastAccessAt: stats.LastAt,
+			Traffic:      stats,
+			CreatedAt:    webApp.CreatedAt,
+			UpdatedAt:    webApp.UpdatedAt,
+		}
+		response = append(response, item)
+	}
+	writeJSON(w, http.StatusOK, response)
+}
+
+func (s *Server) handleActivity(w http.ResponseWriter, r *http.Request) {
+	objectType := normalizeActivityObjectType(r.URL.Query().Get("objectType"))
+	query := strings.TrimSpace(r.URL.Query().Get("q"))
+
+	sessions, err := s.DB.ListAgentSessions(r.Context(), 300)
+	if err != nil {
+		s.writeInternal(w, "list activity sessions", err)
+		return
+	}
+	events, err := s.DB.ListEvents(r.Context(), 300)
+	if err != nil {
+		s.writeInternal(w, "list activity events", err)
+		return
+	}
+	trafficEvents, err := s.DB.ListTrafficEvents(r.Context(), 500, objectType, query)
+	if err != nil {
+		s.writeInternal(w, "list traffic activity", err)
+		return
+	}
+
+	items := make([]activityResponseItem, 0, len(sessions)+len(events)+len(trafficEvents))
+	for _, session := range sessions {
+		items = appendActivityItem(items, activityResponseItem{
+			ID:         "session-connected-" + session.ID,
+			ObjectType: "desktop",
+			Type:       "agent.connected",
+			Message:    "Agent connected",
+			Details:    session.RemoteAddr,
+			TokenID:    session.TokenID,
+			SessionID:  session.ID,
+			CreatedAt:  session.ConnectedAt,
+		}, objectType, query)
+		if session.DisconnectedAt != nil {
+			items = appendActivityItem(items, activityResponseItem{
+				ID:         "session-disconnected-" + session.ID,
+				ObjectType: "desktop",
+				Type:       "agent.disconnected",
+				Message:    "Agent disconnected",
+				Details:    session.RemoteAddr,
+				TokenID:    session.TokenID,
+				SessionID:  session.ID,
+				CreatedAt:  *session.DisconnectedAt,
+			}, objectType, query)
+		}
+	}
+	for _, event := range events {
+		items = appendActivityItem(items, activityResponseItem{
+			ID:         "event-" + strconv.FormatInt(event.ID, 10),
+			ObjectType: eventObjectType(event.Type),
+			Type:       event.Type,
+			Message:    event.Message,
+			Details:    event.Details,
+			CreatedAt:  event.CreatedAt,
+		}, objectType, query)
+	}
+	for _, event := range trafficEvents {
+		message := "Tunnel request"
+		if event.ObjectType == "webapp" {
+			message = "Webapp request"
+		}
+		if event.ObjectType == "desktop" {
+			message = "Desktop websocket"
+		}
+		items = append(items, activityResponseItem{
+			ID:         "traffic-" + strconv.FormatInt(event.ID, 10),
+			ObjectType: event.ObjectType,
+			Type:       "traffic." + event.Kind,
+			Message:    message,
+			Details:    event.PublicHost + event.Path,
+			PublicHost: event.PublicHost,
+			RouteID:    event.RouteID,
+			TokenID:    event.TokenID,
+			SessionID:  event.SessionID,
+			StatusCode: event.StatusCode,
+			BytesIn:    event.BytesIn,
+			BytesOut:   event.BytesOut,
+			Error:      event.Error,
+			CreatedAt:  event.OccurredAt,
+		})
+	}
+	sort.Slice(items, func(i, j int) bool {
+		return items[i].CreatedAt.After(items[j].CreatedAt)
+	})
+	if len(items) > 500 {
+		items = items[:500]
+	}
+	writeJSON(w, http.StatusOK, activityResponse{Items: items})
+}
+
+func (s *Server) handleSessionActions(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	suffix := strings.TrimPrefix(r.URL.Path, "/api/admin/sessions/")
+	sessionID := strings.TrimSuffix(suffix, "/close")
+	if sessionID == suffix || strings.TrimSpace(sessionID) == "" {
+		writeError(w, http.StatusNotFound, "not found")
+		return
+	}
+	session, err := s.DB.GetAgentSession(r.Context(), sessionID)
+	if errors.Is(err, store.ErrNotFound) {
+		writeError(w, http.StatusNotFound, "session not found")
+		return
+	}
+	if err != nil {
+		s.writeInternal(w, "get agent session", err)
+		return
+	}
+	if session.DisconnectedAt != nil {
+		writeError(w, http.StatusConflict, "session already disconnected")
+		return
+	}
+	if err := s.Manager.CloseSession(sessionID); errors.Is(err, proxy.ErrNoAgent) {
+		writeError(w, http.StatusConflict, "session is not active")
+		return
+	} else if err != nil {
+		s.writeInternal(w, "close agent session", err)
+		return
+	}
+	_ = s.DB.AddEvent(context.Background(), "agent.closed", "Agent connection closed", sessionID)
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
 func (s *Server) handleAgents(w http.ResponseWriter, r *http.Request) {
@@ -651,6 +976,98 @@ type componentResponse struct {
 	UpdatedAt  time.Time `json:"updatedAt"`
 }
 
+type overviewResponse struct {
+	Range                  string                  `json:"range"`
+	DesktopConnectionCount int                     `json:"desktopConnectionCount"`
+	WebAppCount            int                     `json:"webAppCount"`
+	TotalTrafficBytes      int64                   `json:"totalTrafficBytes"`
+	RecentConnectionAt     *time.Time              `json:"recentConnectionAt,omitempty"`
+	RecentIdentity         string                  `json:"recentIdentity,omitempty"`
+	RecentDevice           string                  `json:"recentDevice,omitempty"`
+	Resources              overviewResourceSummary `json:"resources"`
+	Traffic                []trafficPoint          `json:"traffic"`
+}
+
+type overviewResourceSummary struct {
+	TotalDesktops  int   `json:"totalDesktops"`
+	OnlineDesktops int   `json:"onlineDesktops"`
+	TotalWebApps   int   `json:"totalWebApps"`
+	ActiveWebApps  int   `json:"activeWebApps"`
+	ActiveStreams  int64 `json:"activeStreams"`
+	TotalStreams   int64 `json:"totalStreams"`
+}
+
+type trafficPoint struct {
+	Bucket     time.Time `json:"bucket"`
+	Label      string    `json:"label"`
+	BytesIn    int64     `json:"bytesIn"`
+	BytesOut   int64     `json:"bytesOut"`
+	TotalBytes int64     `json:"totalBytes"`
+}
+
+type desktopAdminResponse struct {
+	DeviceID        string             `json:"deviceId"`
+	DeviceName      string             `json:"deviceName,omitempty"`
+	OwnerUserID     string             `json:"ownerUserId,omitempty"`
+	OwnerEmail      string             `json:"ownerEmail,omitempty"`
+	OwnerName       string             `json:"ownerName,omitempty"`
+	PublicHost      string             `json:"publicHost"`
+	PublicURL       string             `json:"publicUrl"`
+	TokenID         string             `json:"tokenId"`
+	TokenName       string             `json:"tokenName,omitempty"`
+	TokenActive     bool               `json:"tokenActive"`
+	Online          bool               `json:"online"`
+	SessionID       string             `json:"sessionId,omitempty"`
+	RemoteAddr      string             `json:"remoteAddr,omitempty"`
+	ConnectedAt     *time.Time         `json:"connectedAt,omitempty"`
+	LastConnectedAt *time.Time         `json:"lastConnectedAt,omitempty"`
+	Traffic         store.TrafficStats `json:"traffic"`
+	WebAppCount     int                `json:"webAppCount"`
+	CreatedAt       time.Time          `json:"createdAt"`
+	UpdatedAt       time.Time          `json:"updatedAt"`
+}
+
+type webAppAdminResponse struct {
+	ID           string             `json:"id"`
+	Name         string             `json:"name"`
+	RouteID      string             `json:"routeId"`
+	PublicHost   string             `json:"publicHost"`
+	PublicURL    string             `json:"publicUrl"`
+	TargetURL    string             `json:"targetUrl"`
+	TokenID      string             `json:"tokenId,omitempty"`
+	DeviceID     string             `json:"deviceId,omitempty"`
+	DeviceName   string             `json:"deviceName,omitempty"`
+	Active       bool               `json:"active"`
+	Online       bool               `json:"online"`
+	Route        store.Route        `json:"route"`
+	RequestCount int64              `json:"requestCount"`
+	LastAccessAt *time.Time         `json:"lastAccessAt,omitempty"`
+	Traffic      store.TrafficStats `json:"traffic"`
+	CreatedAt    time.Time          `json:"createdAt"`
+	UpdatedAt    time.Time          `json:"updatedAt"`
+}
+
+type activityResponse struct {
+	Items []activityResponseItem `json:"items"`
+}
+
+type activityResponseItem struct {
+	ID         string    `json:"id"`
+	ObjectType string    `json:"objectType"`
+	Type       string    `json:"type"`
+	Message    string    `json:"message"`
+	Details    string    `json:"details,omitempty"`
+	PublicHost string    `json:"publicHost,omitempty"`
+	RouteID    string    `json:"routeId,omitempty"`
+	TokenID    string    `json:"tokenId,omitempty"`
+	SessionID  string    `json:"sessionId,omitempty"`
+	StatusCode int       `json:"statusCode,omitempty"`
+	BytesIn    int64     `json:"bytesIn,omitempty"`
+	BytesOut   int64     `json:"bytesOut,omitempty"`
+	Error      string    `json:"error,omitempty"`
+	CreatedAt  time.Time `json:"createdAt"`
+}
+
 type agentResponse struct {
 	Token       store.TunnelToken `json:"token"`
 	Online      bool              `json:"online"`
@@ -747,6 +1164,138 @@ func (s *Server) validateActiveTokenID(ctx context.Context, tokenID string) erro
 		return err
 	}
 	return nil
+}
+
+func (s *Server) trafficSeries(ctx context.Context, rangeName string) ([]trafficPoint, error) {
+	now := time.Now().UTC()
+	start, step, count, label := trafficRangeSpec(now, rangeName)
+	events, err := s.DB.ListTrafficEventsSince(ctx, start)
+	if err != nil {
+		return nil, err
+	}
+	points := make([]trafficPoint, 0, count)
+	indexByBucket := make(map[time.Time]int, count)
+	for i := 0; i < count; i++ {
+		bucket := start.Add(time.Duration(i) * step)
+		if rangeName == "month" {
+			bucket = start.AddDate(0, i, 0)
+		}
+		points = append(points, trafficPoint{Bucket: bucket, Label: label(bucket)})
+		indexByBucket[bucket] = i
+	}
+	for _, event := range events {
+		bucket := trafficBucket(event.OccurredAt.UTC(), rangeName)
+		index, ok := indexByBucket[bucket]
+		if !ok {
+			continue
+		}
+		points[index].BytesIn += event.BytesIn
+		points[index].BytesOut += event.BytesOut
+		points[index].TotalBytes = points[index].BytesIn + points[index].BytesOut
+	}
+	return points, nil
+}
+
+func trafficRangeSpec(now time.Time, rangeName string) (time.Time, time.Duration, int, func(time.Time) string) {
+	switch rangeName {
+	case "day":
+		start := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC).AddDate(0, 0, -29)
+		return start, 24 * time.Hour, 30, func(t time.Time) string { return t.Format("01-02") }
+	case "month":
+		start := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC).AddDate(0, -11, 0)
+		return start, 0, 12, func(t time.Time) string { return t.Format("2006-01") }
+	default:
+		start := now.Truncate(time.Hour).Add(-23 * time.Hour)
+		return start, time.Hour, 24, func(t time.Time) string { return t.Format("15:04") }
+	}
+}
+
+func trafficBucket(value time.Time, rangeName string) time.Time {
+	switch rangeName {
+	case "day":
+		return time.Date(value.Year(), value.Month(), value.Day(), 0, 0, 0, 0, time.UTC)
+	case "month":
+		return time.Date(value.Year(), value.Month(), 1, 0, 0, 0, 0, time.UTC)
+	default:
+		return value.Truncate(time.Hour)
+	}
+}
+
+func normalizeTrafficRange(value string) string {
+	switch strings.TrimSpace(value) {
+	case "day", "month":
+		return strings.TrimSpace(value)
+	default:
+		return "hour"
+	}
+}
+
+func normalizeActivityObjectType(value string) string {
+	switch strings.TrimSpace(value) {
+	case "desktop", "webapp", "admin", "system":
+		return strings.TrimSpace(value)
+	default:
+		return "all"
+	}
+}
+
+func desktopIdentityByToken(devices []store.DesktopDevice) map[string]store.DesktopDevice {
+	out := make(map[string]store.DesktopDevice, len(devices))
+	for _, device := range devices {
+		out[device.TokenID] = device
+	}
+	return out
+}
+
+func desktopIdentity(device store.DesktopDevice) string {
+	for _, value := range []string{device.OwnerName, device.OwnerEmail, device.DeviceName, device.DeviceID, device.PublicHost} {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return device.TokenID
+}
+
+func eventObjectType(eventType string) string {
+	switch {
+	case strings.HasPrefix(eventType, "admin_user"):
+		return "admin"
+	case strings.HasPrefix(eventType, "route"), strings.HasPrefix(eventType, "service"), strings.HasPrefix(eventType, "desktop_webapp"):
+		return "webapp"
+	case strings.HasPrefix(eventType, "agent"), strings.HasPrefix(eventType, "desktop_device"), strings.HasPrefix(eventType, "token"):
+		return "desktop"
+	default:
+		return "system"
+	}
+}
+
+func appendActivityItem(items []activityResponseItem, item activityResponseItem, objectType, query string) []activityResponseItem {
+	if objectType != "all" && item.ObjectType != objectType {
+		return items
+	}
+	if query != "" && !activityMatches(item, query) {
+		return items
+	}
+	return append(items, item)
+}
+
+func activityMatches(item activityResponseItem, query string) bool {
+	query = strings.ToLower(strings.TrimSpace(query))
+	if query == "" {
+		return true
+	}
+	haystack := strings.ToLower(strings.Join([]string{
+		item.ObjectType,
+		item.Type,
+		item.Message,
+		item.Details,
+		item.PublicHost,
+		item.RouteID,
+		item.TokenID,
+		item.SessionID,
+		item.Error,
+	}, " "))
+	return strings.Contains(haystack, query)
 }
 
 func tunnelHost(host string) string {

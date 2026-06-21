@@ -262,6 +262,239 @@ func TestAdminAPIKeyEndpointRemoved(t *testing.T) {
 	}
 }
 
+func TestManualTokenCreationDisabledAndDesktopRegistrationStillReturnsAgentToken(t *testing.T) {
+	server, db := newAdminTestServer(t)
+	req := authedAdminRequest(http.MethodPost, "/api/admin/tokens", `{"name":"manual"}`)
+	rec := httptest.NewRecorder()
+
+	server.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("manual token status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	registration, err := db.RegisterDesktopDevice(context.Background(), store.RegisterDesktopDeviceInput{
+		DeviceID:    "mac-mini",
+		DeviceName:  "Mac Mini",
+		OwnerUserID: "42",
+		OwnerEmail:  "desktop@example.test",
+		PublicHost:  "desk.m.zenmind.cc",
+	})
+	if err != nil {
+		t.Fatalf("register desktop device: %v", err)
+	}
+	if registration.AgentToken == "" || registration.Token.ID == "" || !registration.Created {
+		t.Fatalf("registration should still issue agent token: %+v", registration)
+	}
+}
+
+func TestConsoleAggregationEndpoints(t *testing.T) {
+	server, db := newAdminTestServer(t)
+	ctx := context.Background()
+	registration, err := db.RegisterDesktopDevice(ctx, store.RegisterDesktopDeviceInput{
+		DeviceID:    "mac-mini",
+		DeviceName:  "Mac Mini",
+		OwnerUserID: "42",
+		OwnerEmail:  "desktop@example.test",
+		OwnerName:   "Lin",
+		PublicHost:  "desk.m.zenmind.cc",
+	})
+	if err != nil {
+		t.Fatalf("register desktop: %v", err)
+	}
+	webapp, err := db.RegisterDesktopWebApp(ctx, store.RegisterDesktopWebAppInput{
+		OwnerUserID: "42",
+		DeviceID:    "mac-mini",
+		Name:        "notes",
+		PublicHost:  "notes.wa.zenmind.cc",
+		TargetURL:   "http://127.0.0.1:5173",
+		Active:      true,
+	})
+	if err != nil {
+		t.Fatalf("register webapp: %v", err)
+	}
+	sessionRecord, err := db.CreateAgentSession(ctx, registration.Token.ID, "127.0.0.1:50000")
+	if err != nil {
+		t.Fatalf("create agent session: %v", err)
+	}
+	activeYamux, peer := newAdminTestSession(t)
+	defer peer.Close()
+	server.Manager.SetActive(&proxy.ActiveAgent{
+		SessionID:   sessionRecord.ID,
+		TokenID:     registration.Token.ID,
+		RemoteAddr:  sessionRecord.RemoteAddr,
+		ConnectedAt: sessionRecord.ConnectedAt,
+		Yamux:       activeYamux,
+	})
+	if err := db.RecordTrafficEvent(ctx, store.TrafficEvent{
+		ObjectType: "webapp",
+		PublicHost: webapp.Route.PublicHost,
+		RouteID:    webapp.Route.ID,
+		TokenID:    registration.Token.ID,
+		SessionID:  sessionRecord.ID,
+		Kind:       "http",
+		Method:     http.MethodGet,
+		Path:       "/hello",
+		StatusCode: http.StatusOK,
+		BytesIn:    111,
+		BytesOut:   222,
+		OccurredAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("record traffic event: %v", err)
+	}
+	if err := db.AddEvent(ctx, "admin_user.created", "Admin user created", "ops"); err != nil {
+		t.Fatalf("add event: %v", err)
+	}
+
+	overviewReq := authedAdminRequest(http.MethodGet, "/api/admin/overview?range=hour", "")
+	overviewRec := httptest.NewRecorder()
+	server.ServeHTTP(overviewRec, overviewReq)
+	if overviewRec.Code != http.StatusOK {
+		t.Fatalf("overview status = %d, body = %s", overviewRec.Code, overviewRec.Body.String())
+	}
+	var overview overviewResponse
+	if err := json.NewDecoder(overviewRec.Body).Decode(&overview); err != nil {
+		t.Fatalf("decode overview: %v", err)
+	}
+	if overview.Range != "hour" || overview.DesktopConnectionCount != 1 || overview.WebAppCount != 1 || overview.TotalTrafficBytes != 333 {
+		t.Fatalf("unexpected overview: %+v", overview)
+	}
+	if overview.Resources.TotalDesktops != 1 || overview.Resources.OnlineDesktops != 1 || overview.Resources.ActiveWebApps != 1 || len(overview.Traffic) == 0 {
+		t.Fatalf("unexpected overview resources/traffic: %+v", overview)
+	}
+	if overview.RecentIdentity != "Lin" || overview.RecentDevice != "Mac Mini" {
+		t.Fatalf("unexpected recent identity/device: %+v", overview)
+	}
+
+	desktopsReq := authedAdminRequest(http.MethodGet, "/api/admin/desktops", "")
+	desktopsRec := httptest.NewRecorder()
+	server.ServeHTTP(desktopsRec, desktopsReq)
+	if desktopsRec.Code != http.StatusOK {
+		t.Fatalf("desktops status = %d, body = %s", desktopsRec.Code, desktopsRec.Body.String())
+	}
+	var desktops []desktopAdminResponse
+	if err := json.NewDecoder(desktopsRec.Body).Decode(&desktops); err != nil {
+		t.Fatalf("decode desktops: %v", err)
+	}
+	if len(desktops) != 1 || desktops[0].PublicHost != "desk.m.zenmind.cc" || !desktops[0].Online || desktops[0].SessionID != sessionRecord.ID || desktops[0].Traffic.BytesOut != 222 {
+		t.Fatalf("unexpected desktops: %+v", desktops)
+	}
+
+	webappsReq := authedAdminRequest(http.MethodGet, "/api/admin/webapps", "")
+	webappsRec := httptest.NewRecorder()
+	server.ServeHTTP(webappsRec, webappsReq)
+	if webappsRec.Code != http.StatusOK {
+		t.Fatalf("webapps status = %d, body = %s", webappsRec.Code, webappsRec.Body.String())
+	}
+	var webapps []webAppAdminResponse
+	if err := json.NewDecoder(webappsRec.Body).Decode(&webapps); err != nil {
+		t.Fatalf("decode webapps: %v", err)
+	}
+	if len(webapps) != 1 || webapps[0].PublicHost != "notes.wa.zenmind.cc" || !webapps[0].Online || webapps[0].Traffic.BytesIn != 111 || webapps[0].Route.ID != webapp.Route.ID {
+		t.Fatalf("unexpected webapps: %+v", webapps)
+	}
+
+	activityReq := authedAdminRequest(http.MethodGet, "/api/admin/activity?objectType=webapp&q=notes", "")
+	activityRec := httptest.NewRecorder()
+	server.ServeHTTP(activityRec, activityReq)
+	if activityRec.Code != http.StatusOK {
+		t.Fatalf("activity status = %d, body = %s", activityRec.Code, activityRec.Body.String())
+	}
+	var activity activityResponse
+	if err := json.NewDecoder(activityRec.Body).Decode(&activity); err != nil {
+		t.Fatalf("decode activity: %v", err)
+	}
+	if len(activity.Items) != 1 || activity.Items[0].ObjectType != "webapp" || activity.Items[0].BytesOut != 222 {
+		t.Fatalf("unexpected activity: %+v", activity)
+	}
+}
+
+func TestConsoleAggregationEndpointsEmptyData(t *testing.T) {
+	server, _ := newAdminTestServer(t)
+	req := authedAdminRequest(http.MethodGet, "/api/admin/overview?range=month", "")
+	rec := httptest.NewRecorder()
+
+	server.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var overview overviewResponse
+	if err := json.NewDecoder(rec.Body).Decode(&overview); err != nil {
+		t.Fatalf("decode overview: %v", err)
+	}
+	if overview.Range != "month" || overview.DesktopConnectionCount != 0 || overview.WebAppCount != 0 || overview.TotalTrafficBytes != 0 || len(overview.Traffic) == 0 {
+		t.Fatalf("unexpected empty overview: %+v", overview)
+	}
+}
+
+func TestSessionCloseEndpoint(t *testing.T) {
+	server, db := newAdminTestServer(t)
+	ctx := context.Background()
+	token := createAdminTestToken(t, db, "mac-mini")
+
+	missingReq := authedAdminRequest(http.MethodPost, "/api/admin/sessions/session_missing/close", "")
+	missingRec := httptest.NewRecorder()
+	server.ServeHTTP(missingRec, missingReq)
+	if missingRec.Code != http.StatusNotFound {
+		t.Fatalf("missing status = %d, body = %s", missingRec.Code, missingRec.Body.String())
+	}
+
+	disconnected, err := db.CreateAgentSession(ctx, token.ID, "127.0.0.1:50000")
+	if err != nil {
+		t.Fatalf("create disconnected session: %v", err)
+	}
+	if err := db.EndAgentSession(ctx, disconnected.ID); err != nil {
+		t.Fatalf("end disconnected session: %v", err)
+	}
+	disconnectedReq := authedAdminRequest(http.MethodPost, "/api/admin/sessions/"+disconnected.ID+"/close", "")
+	disconnectedRec := httptest.NewRecorder()
+	server.ServeHTTP(disconnectedRec, disconnectedReq)
+	if disconnectedRec.Code != http.StatusConflict {
+		t.Fatalf("disconnected status = %d, body = %s", disconnectedRec.Code, disconnectedRec.Body.String())
+	}
+
+	inactive, err := db.CreateAgentSession(ctx, token.ID, "127.0.0.1:50001")
+	if err != nil {
+		t.Fatalf("create inactive session: %v", err)
+	}
+	inactiveReq := authedAdminRequest(http.MethodPost, "/api/admin/sessions/"+inactive.ID+"/close", "")
+	inactiveRec := httptest.NewRecorder()
+	server.ServeHTTP(inactiveRec, inactiveReq)
+	if inactiveRec.Code != http.StatusConflict {
+		t.Fatalf("inactive status = %d, body = %s", inactiveRec.Code, inactiveRec.Body.String())
+	}
+
+	activeRecord, err := db.CreateAgentSession(ctx, token.ID, "127.0.0.1:50002")
+	if err != nil {
+		t.Fatalf("create active session: %v", err)
+	}
+	activeYamux, peer := newAdminTestSession(t)
+	defer peer.Close()
+	server.Manager.SetActive(&proxy.ActiveAgent{
+		SessionID:   activeRecord.ID,
+		TokenID:     token.ID,
+		RemoteAddr:  activeRecord.RemoteAddr,
+		ConnectedAt: activeRecord.ConnectedAt,
+		Yamux:       activeYamux,
+	})
+	activeReq := authedAdminRequest(http.MethodPost, "/api/admin/sessions/"+activeRecord.ID+"/close", "")
+	activeRec := httptest.NewRecorder()
+	server.ServeHTTP(activeRec, activeReq)
+	if activeRec.Code != http.StatusOK {
+		t.Fatalf("active status = %d, body = %s", activeRec.Code, activeRec.Body.String())
+	}
+	if !activeYamux.IsClosed() {
+		t.Fatal("active yamux session was not closed")
+	}
+	events, err := db.ListEvents(ctx, 10)
+	if err != nil {
+		t.Fatalf("list events: %v", err)
+	}
+	if len(events) == 0 || events[0].Type != "agent.closed" || events[0].Details != activeRecord.ID {
+		t.Fatalf("missing agent.closed event: %+v", events)
+	}
+}
+
 func TestServicePublishUpsertsManagedRoute(t *testing.T) {
 	server, db := newAdminTestServer(t)
 	token := createAdminTestToken(t, db, "mac-mini")

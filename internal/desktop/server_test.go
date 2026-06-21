@@ -552,6 +552,10 @@ func TestDesktopRegistrationWebAppHTTPIntegration(t *testing.T) {
 	if resp.StatusCode != http.StatusOK || resp.Header.Get("X-WebApp") != "ok" || string(body) != "hello webapp" {
 		t.Fatalf("unexpected webapp response: status=%d header=%q body=%q", resp.StatusCode, resp.Header.Get("X-WebApp"), string(body))
 	}
+	event := waitForTrafficEvent(t, db, "webapp", webApp.PublicHost, "http")
+	if event.StatusCode != http.StatusOK || event.RouteID == "" || event.SessionID == "" || event.Path != "/hello?source=wa" || event.BytesIn != 0 || event.BytesOut != int64(len("hello webapp")) {
+		t.Fatalf("unexpected http traffic event: %+v", event)
+	}
 }
 
 func TestDesktopRegistrationWebAppWebSocketIntegration(t *testing.T) {
@@ -627,6 +631,13 @@ func TestDesktopRegistrationWebAppWebSocketIntegration(t *testing.T) {
 	}
 	if string(payload) != "webapp:ping" {
 		t.Fatalf("payload = %q", payload)
+	}
+	if err := client.Close(); err != nil {
+		t.Fatalf("close webapp ws: %v", err)
+	}
+	event := waitForTrafficEvent(t, db, "webapp", webApp.PublicHost, "websocket")
+	if event.StatusCode != http.StatusSwitchingProtocols || event.RouteID == "" || event.SessionID == "" || event.Path != "/socket?room=1" || event.BytesIn != int64(len("ping")) || event.BytesOut != int64(len("webapp:ping")) {
+		t.Fatalf("unexpected websocket traffic event: %+v", event)
 	}
 }
 
@@ -1188,4 +1199,23 @@ func waitForDesktopAgentToken(t *testing.T, manager *proxy.Manager, tokenID stri
 		time.Sleep(20 * time.Millisecond)
 	}
 	t.Fatalf("agent token %s did not connect", tokenID)
+}
+
+func waitForTrafficEvent(t *testing.T, db *store.DB, objectType, publicHost, kind string) store.TrafficEvent {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		events, err := db.ListTrafficEvents(context.Background(), 20, objectType, publicHost)
+		if err != nil {
+			t.Fatalf("list traffic events: %v", err)
+		}
+		for _, event := range events {
+			if event.PublicHost == publicHost && event.Kind == kind {
+				return event
+			}
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("traffic event objectType=%s publicHost=%s kind=%s not recorded", objectType, publicHost, kind)
+	return store.TrafficEvent{}
 }

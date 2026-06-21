@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -208,6 +209,26 @@ func (r *Relay) handleDesktopPublic(w http.ResponseWriter, req *http.Request) {
 		_ = stream.Close()
 		r.Manager.StreamClosed()
 	}()
+	active, _ := r.Manager.ActiveAgentForToken(device.TokenID)
+	var bytesIn atomic.Int64
+	var bytesOut atomic.Int64
+	statusCode := 0
+	trafficError := ""
+	defer func() {
+		r.recordTrafficEvent(store.TrafficEvent{
+			ObjectType: "desktop",
+			PublicHost: req.Host,
+			TokenID:    device.TokenID,
+			SessionID:  active.SessionID,
+			Kind:       "websocket",
+			Method:     req.Method,
+			Path:       requestURIWithoutQueryParam(req, "token"),
+			StatusCode: statusCode,
+			BytesIn:    bytesIn.Load(),
+			BytesOut:   bytesOut.Load(),
+			Error:      trafficError,
+		})
+	}()
 
 	id := requestID()
 	authToken, subprotocol := desktopWebSocketAuth(req)
@@ -224,25 +245,33 @@ func (r *Relay) handleDesktopPublic(w http.ResponseWriter, req *http.Request) {
 	}
 	var response tunnel.StreamResponse
 	if err := tunnel.ReadJSON(stream, &response); err != nil {
+		trafficError = err.Error()
 		r.writeGatewayError(w, "read desktop response metadata failed", err)
 		return
 	}
 	if !standardResponseOK(response, tunnel.NamespaceDesktop, tunnel.TypeDesktopWebSocketOpen) {
+		statusCode = standardStreamStatus(response, http.StatusBadGateway)
+		trafficError = response.Msg
 		writeStandardStreamError(w, response, http.StatusBadGateway)
 		return
 	}
+	statusCode = statusOr(tunnel.StreamResponseStatusCode(response), http.StatusSwitchingProtocols)
 	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
 	clientWS, err := upgrader.Upgrade(w, req, tunnel.StreamResponseHeaders(response))
 	if err != nil {
+		trafficError = err.Error()
 		r.Logger.Error("upgrade desktop public websocket", "error", err)
 		return
 	}
 	defer clientWS.Close()
 
 	errs := make(chan error, 2)
-	go func() { errs <- tunnel.CopyWebSocketToFrames(clientWS, stream) }()
-	go func() { errs <- tunnel.CopyFramesToWebSocket(stream, clientWS) }()
+	go func() { errs <- copyWebSocketToFramesCounted(clientWS, stream, &bytesIn) }()
+	go func() { errs <- copyFramesToWebSocketCounted(stream, clientWS, &bytesOut) }()
 	err = <-errs
+	if err != nil {
+		trafficError = err.Error()
+	}
 	r.Logger.Debug("desktop websocket stream closed", "error", err)
 }
 
@@ -265,12 +294,36 @@ func (r *Relay) handleWebAppPublicHTTP(w http.ResponseWriter, req *http.Request,
 		_ = stream.Close()
 		r.Manager.StreamClosed()
 	}()
+	active, _ := r.Manager.ActiveAgentForToken(route.TokenID)
+	bytesIn := int64(0)
+	bytesOut := int64(0)
+	statusCode := 0
+	trafficError := ""
+	defer func() {
+		r.recordTrafficEvent(store.TrafficEvent{
+			ObjectType: "webapp",
+			PublicHost: req.Host,
+			RouteID:    route.ID,
+			TokenID:    route.TokenID,
+			SessionID:  active.SessionID,
+			Kind:       "http",
+			Method:     req.Method,
+			Path:       requestURI(req),
+			StatusCode: statusCode,
+			BytesIn:    bytesIn,
+			BytesOut:   bytesOut,
+			Error:      trafficError,
+		})
+	}()
 
 	body, err := io.ReadAll(http.MaxBytesReader(w, req.Body, r.MaxRequestBodyBytes))
 	if err != nil {
+		trafficError = err.Error()
+		statusCode = http.StatusRequestEntityTooLarge
 		http.Error(w, "request body too large", http.StatusRequestEntityTooLarge)
 		return
 	}
+	bytesIn = int64(len(body))
 
 	id := requestID()
 	request := tunnel.NewStreamRequest(tunnel.NamespaceWebApp, tunnel.FrameRequest, tunnel.TypeWebAppHTTPRequest, id, &tunnel.StreamPayload{
@@ -292,18 +345,24 @@ func (r *Relay) handleWebAppPublicHTTP(w http.ResponseWriter, req *http.Request,
 
 	var response tunnel.StreamResponse
 	if err := tunnel.ReadJSON(stream, &response); err != nil {
+		trafficError = err.Error()
 		r.writeGatewayError(w, "read webapp response metadata failed", err)
 		return
 	}
 	if !standardResponseOK(response, tunnel.NamespaceWebApp, tunnel.TypeWebAppHTTPRequest) {
+		statusCode = standardStreamStatus(response, http.StatusBadGateway)
+		trafficError = response.Msg
 		writeStandardStreamError(w, response, http.StatusBadGateway)
 		return
 	}
 	copyHeaders(w.Header(), tunnel.StripHopHeaders(tunnel.StreamResponseHeaders(response)))
-	w.WriteHeader(statusOr(tunnel.StreamResponseStatusCode(response), http.StatusOK))
+	statusCode = statusOr(tunnel.StreamResponseStatusCode(response), http.StatusOK)
+	w.WriteHeader(statusCode)
 	bodyLength := tunnel.StreamResponseBodyLength(response)
+	bytesOut = bodyLength
 	if bodyLength > 0 {
 		if _, err := io.CopyN(w, stream, bodyLength); err != nil {
+			trafficError = err.Error()
 			r.Logger.Error("copy webapp response body", "error", err)
 		}
 	}
@@ -328,6 +387,27 @@ func (r *Relay) handleWebAppPublicWebSocket(w http.ResponseWriter, req *http.Req
 		_ = stream.Close()
 		r.Manager.StreamClosed()
 	}()
+	active, _ := r.Manager.ActiveAgentForToken(route.TokenID)
+	var bytesIn atomic.Int64
+	var bytesOut atomic.Int64
+	statusCode := 0
+	trafficError := ""
+	defer func() {
+		r.recordTrafficEvent(store.TrafficEvent{
+			ObjectType: "webapp",
+			PublicHost: req.Host,
+			RouteID:    route.ID,
+			TokenID:    route.TokenID,
+			SessionID:  active.SessionID,
+			Kind:       "websocket",
+			Method:     req.Method,
+			Path:       requestURI(req),
+			StatusCode: statusCode,
+			BytesIn:    bytesIn.Load(),
+			BytesOut:   bytesOut.Load(),
+			Error:      trafficError,
+		})
+	}()
 
 	id := requestID()
 	request := tunnel.NewStreamRequest(tunnel.NamespaceWebApp, tunnel.FrameRequest, tunnel.TypeWebSocketConnect, id, &tunnel.StreamPayload{
@@ -341,26 +421,34 @@ func (r *Relay) handleWebAppPublicWebSocket(w http.ResponseWriter, req *http.Req
 	}
 	var response tunnel.StreamResponse
 	if err := tunnel.ReadJSON(stream, &response); err != nil {
+		trafficError = err.Error()
 		r.writeGatewayError(w, "read webapp websocket response metadata failed", err)
 		return
 	}
 	if !standardResponseOK(response, tunnel.NamespaceWebApp, tunnel.TypeWebSocketConnect) {
+		statusCode = standardStreamStatus(response, http.StatusBadGateway)
+		trafficError = response.Msg
 		writeStandardStreamError(w, response, http.StatusBadGateway)
 		return
 	}
+	statusCode = statusOr(tunnel.StreamResponseStatusCode(response), http.StatusSwitchingProtocols)
 
 	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
 	clientWS, err := upgrader.Upgrade(w, req, tunnel.StreamResponseHeaders(response))
 	if err != nil {
+		trafficError = err.Error()
 		r.Logger.Error("upgrade webapp public websocket", "error", err)
 		return
 	}
 	defer clientWS.Close()
 
 	errs := make(chan error, 2)
-	go func() { errs <- tunnel.CopyWebSocketToFrames(clientWS, stream) }()
-	go func() { errs <- tunnel.CopyFramesToWebSocket(stream, clientWS) }()
+	go func() { errs <- copyWebSocketToFramesCounted(clientWS, stream, &bytesIn) }()
+	go func() { errs <- copyFramesToWebSocketCounted(stream, clientWS, &bytesOut) }()
 	err = <-errs
+	if err != nil {
+		trafficError = err.Error()
+	}
 	r.Logger.Debug("webapp websocket stream closed", "error", err)
 }
 
@@ -559,13 +647,7 @@ func standardResponseOK(response tunnel.StreamResponse, ns, typ string) bool {
 }
 
 func writeStandardStreamError(w http.ResponseWriter, response tunnel.StreamResponse, fallbackStatus int) {
-	status := tunnel.StreamResponseStatusCode(response)
-	if status == 0 && response.Code >= http.StatusBadRequest && response.Code <= 599 {
-		status = response.Code
-	}
-	if status == 0 {
-		status = fallbackStatus
-	}
+	status := standardStreamStatus(response, fallbackStatus)
 	msg := response.Msg
 	if msg == "" {
 		msg = response.Error
@@ -574,6 +656,55 @@ func writeStandardStreamError(w http.ResponseWriter, response tunnel.StreamRespo
 		msg = http.StatusText(status)
 	}
 	http.Error(w, msg, status)
+}
+
+func standardStreamStatus(response tunnel.StreamResponse, fallbackStatus int) int {
+	status := tunnel.StreamResponseStatusCode(response)
+	if status == 0 && response.Code >= http.StatusBadRequest && response.Code <= 599 {
+		status = response.Code
+	}
+	if status == 0 {
+		status = fallbackStatus
+	}
+	return status
+}
+
+func (r *Relay) recordTrafficEvent(event store.TrafficEvent) {
+	if r.DB == nil {
+		return
+	}
+	if event.OccurredAt.IsZero() {
+		event.OccurredAt = time.Now().UTC()
+	}
+	if err := r.DB.RecordTrafficEvent(context.Background(), event); err != nil {
+		r.Logger.Error("record traffic event", "error", err)
+	}
+}
+
+func copyWebSocketToFramesCounted(ws *websocket.Conn, dst io.Writer, count *atomic.Int64) error {
+	for {
+		messageType, payload, err := ws.ReadMessage()
+		if err != nil {
+			return err
+		}
+		count.Add(int64(len(payload)))
+		if err := tunnel.WriteWSFrame(dst, messageType, payload); err != nil {
+			return err
+		}
+	}
+}
+
+func copyFramesToWebSocketCounted(src io.Reader, ws *websocket.Conn, count *atomic.Int64) error {
+	for {
+		header, payload, err := tunnel.ReadWSFrame(src)
+		if err != nil {
+			return err
+		}
+		count.Add(int64(len(payload)))
+		if err := ws.WriteMessage(header.Type, payload); err != nil {
+			return err
+		}
+	}
 }
 
 func routeMetadata(route store.Route) *tunnel.RouteMetadata {

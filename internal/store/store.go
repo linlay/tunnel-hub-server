@@ -73,6 +73,30 @@ type DesktopWebApp struct {
 	UpdatedAt  time.Time `json:"updatedAt"`
 }
 
+type TrafficEvent struct {
+	ID         int64     `json:"id"`
+	ObjectType string    `json:"objectType"`
+	PublicHost string    `json:"publicHost"`
+	RouteID    string    `json:"routeId,omitempty"`
+	TokenID    string    `json:"tokenId,omitempty"`
+	SessionID  string    `json:"sessionId,omitempty"`
+	Kind       string    `json:"kind"`
+	Method     string    `json:"method,omitempty"`
+	Path       string    `json:"path,omitempty"`
+	StatusCode int       `json:"statusCode,omitempty"`
+	BytesIn    int64     `json:"bytesIn"`
+	BytesOut   int64     `json:"bytesOut"`
+	Error      string    `json:"error,omitempty"`
+	OccurredAt time.Time `json:"occurredAt"`
+}
+
+type TrafficStats struct {
+	RequestCount int64      `json:"requestCount"`
+	BytesIn      int64      `json:"bytesIn"`
+	BytesOut     int64      `json:"bytesOut"`
+	LastAt       *time.Time `json:"lastAt,omitempty"`
+}
+
 type RegisterDesktopDeviceInput struct {
 	DeviceID         string
 	DeviceName       string
@@ -155,7 +179,10 @@ func (db *DB) Migrate(ctx context.Context) error {
 	if err := db.ensureDesktopDeviceOwnerColumns(ctx); err != nil {
 		return err
 	}
-	return db.ensureDesktopWebAppTable(ctx)
+	if err := db.ensureDesktopWebAppTable(ctx); err != nil {
+		return err
+	}
+	return db.ensureTrafficEventsTable(ctx)
 }
 
 func (db *DB) CreateRoute(ctx context.Context, publicHost, targetURL string, active bool, tokenID string) (Route, error) {
@@ -456,6 +483,26 @@ func (db *DB) GetDesktopDeviceByPublicHost(ctx context.Context, host string) (De
 	return scanDesktopDevice(row)
 }
 
+func (db *DB) ListDesktopDevices(ctx context.Context) ([]DesktopDevice, error) {
+	rows, err := db.sql.QueryContext(ctx, `
+		SELECT device_id, display_device_id, device_name, owner_user_id, owner_email, owner_name, device_secret_hash, token_id, route_id, public_host, target_url, created_at, updated_at
+		FROM desktop_devices ORDER BY updated_at DESC
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	devices := make([]DesktopDevice, 0)
+	for rows.Next() {
+		device, err := scanDesktopDevice(rows)
+		if err != nil {
+			return nil, err
+		}
+		devices = append(devices, device)
+	}
+	return devices, rows.Err()
+}
+
 func (db *DB) RegisterDesktopWebApp(ctx context.Context, input RegisterDesktopWebAppInput) (RegisterDesktopWebAppResult, error) {
 	input.OwnerUserID = strings.TrimSpace(input.OwnerUserID)
 	input.DeviceID = strings.TrimSpace(input.DeviceID)
@@ -535,6 +582,26 @@ func (db *DB) RegisterDesktopWebApp(ctx context.Context, input RegisterDesktopWe
 	return RegisterDesktopWebAppResult{Device: device, WebApp: webApp, Route: route}, nil
 }
 
+func (db *DB) ListDesktopWebApps(ctx context.Context) ([]DesktopWebApp, error) {
+	rows, err := db.sql.QueryContext(ctx, `
+		SELECT id, device_id, name, route_id, public_host, target_url, active, created_at, updated_at
+		FROM desktop_webapps ORDER BY updated_at DESC
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	webApps := make([]DesktopWebApp, 0)
+	for rows.Next() {
+		webApp, err := scanDesktopWebApp(rows)
+		if err != nil {
+			return nil, err
+		}
+		webApps = append(webApps, webApp)
+	}
+	return webApps, rows.Err()
+}
+
 func (db *DB) CreateAgentSession(ctx context.Context, tokenID, remoteAddr string) (AgentSession, error) {
 	session := AgentSession{
 		ID:          newID("session"),
@@ -555,6 +622,14 @@ func (db *DB) EndAgentSession(ctx context.Context, id string) error {
 		WHERE id = ? AND disconnected_at IS NULL
 	`, time.Now().UTC(), id)
 	return err
+}
+
+func (db *DB) GetAgentSession(ctx context.Context, id string) (AgentSession, error) {
+	row := db.sql.QueryRowContext(ctx, `
+		SELECT id, token_id, remote_addr, connected_at, disconnected_at
+		FROM agent_sessions WHERE id = ?
+	`, strings.TrimSpace(id))
+	return scanAgentSession(row)
 }
 
 func (db *DB) ListAgentSessions(ctx context.Context, limit int) ([]AgentSession, error) {
@@ -609,6 +684,129 @@ func (db *DB) ListEvents(ctx context.Context, limit int) ([]Event, error) {
 		events = append(events, event)
 	}
 	return events, rows.Err()
+}
+
+func (db *DB) RecordTrafficEvent(ctx context.Context, event TrafficEvent) error {
+	event.ObjectType = strings.TrimSpace(event.ObjectType)
+	event.PublicHost = tunnel.NormalizeHost(event.PublicHost)
+	event.RouteID = strings.TrimSpace(event.RouteID)
+	event.TokenID = strings.TrimSpace(event.TokenID)
+	event.SessionID = strings.TrimSpace(event.SessionID)
+	event.Kind = strings.TrimSpace(event.Kind)
+	event.Method = strings.TrimSpace(event.Method)
+	event.Path = strings.TrimSpace(event.Path)
+	event.Error = strings.TrimSpace(event.Error)
+	if event.OccurredAt.IsZero() {
+		event.OccurredAt = time.Now().UTC()
+	}
+	_, err := db.sql.ExecContext(ctx, `
+		INSERT INTO traffic_events (
+			object_type, public_host, route_id, token_id, session_id, kind, method, path,
+			status_code, bytes_in, bytes_out, error, occurred_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, event.ObjectType, event.PublicHost, nullableString(event.RouteID), nullableString(event.TokenID), nullableString(event.SessionID), event.Kind, event.Method, event.Path, event.StatusCode, event.BytesIn, event.BytesOut, event.Error, event.OccurredAt)
+	return err
+}
+
+func (db *DB) ListTrafficEvents(ctx context.Context, limit int, objectType, query string) ([]TrafficEvent, error) {
+	if limit <= 0 || limit > 5000 {
+		limit = 500
+	}
+	objectType = strings.TrimSpace(objectType)
+	query = strings.TrimSpace(query)
+	clauses := []string{"1 = 1"}
+	args := make([]any, 0, 4)
+	if objectType != "" && objectType != "all" {
+		clauses = append(clauses, "object_type = ?")
+		args = append(args, objectType)
+	}
+	if query != "" {
+		clauses = append(clauses, "(public_host LIKE ? OR route_id LIKE ? OR token_id LIKE ? OR session_id LIKE ? OR kind LIKE ? OR method LIKE ? OR path LIKE ? OR error LIKE ?)")
+		like := "%" + query + "%"
+		for i := 0; i < 8; i++ {
+			args = append(args, like)
+		}
+	}
+	args = append(args, limit)
+	rows, err := db.sql.QueryContext(ctx, `
+		SELECT id, object_type, public_host, route_id, token_id, session_id, kind, method, path, status_code, bytes_in, bytes_out, error, occurred_at
+		FROM traffic_events
+		WHERE `+strings.Join(clauses, " AND ")+`
+		ORDER BY occurred_at DESC, id DESC LIMIT ?
+	`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanTrafficEvents(rows)
+}
+
+func (db *DB) ListTrafficEventsSince(ctx context.Context, since time.Time) ([]TrafficEvent, error) {
+	rows, err := db.sql.QueryContext(ctx, `
+		SELECT id, object_type, public_host, route_id, token_id, session_id, kind, method, path, status_code, bytes_in, bytes_out, error, occurred_at
+		FROM traffic_events
+		WHERE occurred_at >= ?
+		ORDER BY occurred_at ASC, id ASC
+	`, since.UTC())
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanTrafficEvents(rows)
+}
+
+func (db *DB) TrafficStatsByPublicHost(ctx context.Context) (map[string]TrafficStats, error) {
+	rows, err := db.sql.QueryContext(ctx, `
+		SELECT public_host, COUNT(*), COALESCE(SUM(bytes_in), 0), COALESCE(SUM(bytes_out), 0), MAX(occurred_at)
+		FROM traffic_events
+		WHERE public_host != ''
+		GROUP BY public_host
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	stats := make(map[string]TrafficStats)
+	for rows.Next() {
+		var key string
+		value, err := scanTrafficStatsWithKey(rows, &key)
+		if err != nil {
+			return nil, err
+		}
+		stats[key] = value
+	}
+	return stats, rows.Err()
+}
+
+func (db *DB) TrafficStatsByToken(ctx context.Context) (map[string]TrafficStats, error) {
+	rows, err := db.sql.QueryContext(ctx, `
+		SELECT token_id, COUNT(*), COALESCE(SUM(bytes_in), 0), COALESCE(SUM(bytes_out), 0), MAX(occurred_at)
+		FROM traffic_events
+		WHERE token_id IS NOT NULL AND token_id != ''
+		GROUP BY token_id
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	stats := make(map[string]TrafficStats)
+	for rows.Next() {
+		var key string
+		value, err := scanTrafficStatsWithKey(rows, &key)
+		if err != nil {
+			return nil, err
+		}
+		stats[key] = value
+	}
+	return stats, rows.Err()
+}
+
+func (db *DB) TrafficTotals(ctx context.Context) (TrafficStats, error) {
+	row := db.sql.QueryRowContext(ctx, `
+		SELECT COUNT(*), COALESCE(SUM(bytes_in), 0), COALESCE(SUM(bytes_out), 0), MAX(occurred_at)
+		FROM traffic_events
+	`)
+	return scanTrafficStatsNoKey(row)
 }
 
 func createDesktopDeviceRegistration(ctx context.Context, tx *sql.Tx, input RegisterDesktopDeviceInput) (RegisterDesktopDeviceResult, error) {
@@ -1036,6 +1234,117 @@ func scanDesktopWebApp(row rowScanner) (DesktopWebApp, error) {
 	return webApp, nil
 }
 
+func scanTrafficEvents(rows *sql.Rows) ([]TrafficEvent, error) {
+	events := make([]TrafficEvent, 0)
+	for rows.Next() {
+		var event TrafficEvent
+		var routeID sql.NullString
+		var tokenID sql.NullString
+		var sessionID sql.NullString
+		err := rows.Scan(
+			&event.ID,
+			&event.ObjectType,
+			&event.PublicHost,
+			&routeID,
+			&tokenID,
+			&sessionID,
+			&event.Kind,
+			&event.Method,
+			&event.Path,
+			&event.StatusCode,
+			&event.BytesIn,
+			&event.BytesOut,
+			&event.Error,
+			&event.OccurredAt,
+		)
+		if err != nil {
+			return nil, err
+		}
+		if routeID.Valid {
+			event.RouteID = routeID.String
+		}
+		if tokenID.Valid {
+			event.TokenID = tokenID.String
+		}
+		if sessionID.Valid {
+			event.SessionID = sessionID.String
+		}
+		events = append(events, event)
+	}
+	return events, rows.Err()
+}
+
+func scanTrafficStatsWithKey(row rowScanner, key *string) (TrafficStats, error) {
+	var stats TrafficStats
+	var lastAt any
+	if err := row.Scan(key, &stats.RequestCount, &stats.BytesIn, &stats.BytesOut, &lastAt); err != nil {
+		return TrafficStats{}, err
+	}
+	parsed, ok, err := parseNullableTime(lastAt)
+	if err != nil {
+		return TrafficStats{}, err
+	}
+	if ok {
+		stats.LastAt = &parsed
+	}
+	return stats, nil
+}
+
+func scanTrafficStatsNoKey(row rowScanner) (TrafficStats, error) {
+	var stats TrafficStats
+	var lastAt any
+	if err := row.Scan(&stats.RequestCount, &stats.BytesIn, &stats.BytesOut, &lastAt); err != nil {
+		return TrafficStats{}, err
+	}
+	parsed, ok, err := parseNullableTime(lastAt)
+	if err != nil {
+		return TrafficStats{}, err
+	}
+	if ok {
+		stats.LastAt = &parsed
+	}
+	return stats, nil
+}
+
+func parseNullableTime(value any) (time.Time, bool, error) {
+	switch typed := value.(type) {
+	case nil:
+		return time.Time{}, false, nil
+	case time.Time:
+		return typed, true, nil
+	case string:
+		return parseTimeString(typed)
+	case []byte:
+		return parseTimeString(string(typed))
+	default:
+		return time.Time{}, false, fmt.Errorf("unsupported time value %T", value)
+	}
+}
+
+func parseTimeString(value string) (time.Time, bool, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return time.Time{}, false, nil
+	}
+	layouts := []string{
+		time.RFC3339Nano,
+		"2006-01-02 15:04:05.999999999-07:00",
+		"2006-01-02 15:04:05.999999999Z07:00",
+		"2006-01-02 15:04:05.999999999 -0700 MST",
+		"2006-01-02 15:04:05.999999999",
+		"2006-01-02 15:04:05 -0700 MST",
+		"2006-01-02 15:04:05-07:00",
+		"2006-01-02 15:04:05",
+	}
+	for _, layout := range layouts {
+		parsed, err := time.Parse(layout, value)
+		if err == nil {
+			return parsed, true, nil
+		}
+	}
+	return time.Time{}, false, fmt.Errorf("parse time %q", value)
+}
+
 func scanToken(row rowScanner) (TunnelToken, error) {
 	var token TunnelToken
 	var lastUsed sql.NullTime
@@ -1085,11 +1394,15 @@ func tokenPrefix(token string) string {
 }
 
 func nullableTokenID(tokenID string) any {
-	tokenID = strings.TrimSpace(tokenID)
-	if tokenID == "" {
+	return nullableString(tokenID)
+}
+
+func nullableString(value string) any {
+	value = strings.TrimSpace(value)
+	if value == "" {
 		return nil
 	}
-	return tokenID
+	return value
 }
 
 func (db *DB) ensureRouteTokenIDColumn(ctx context.Context) error {
@@ -1166,6 +1479,31 @@ func (db *DB) ensureDesktopWebAppTable(ctx context.Context) error {
 			FOREIGN KEY (route_id) REFERENCES routes(id),
 			UNIQUE(device_id, name)
 		)
+	`)
+	return err
+}
+
+func (db *DB) ensureTrafficEventsTable(ctx context.Context) error {
+	_, err := db.sql.ExecContext(ctx, `
+		CREATE TABLE IF NOT EXISTS traffic_events (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			object_type TEXT NOT NULL,
+			public_host TEXT NOT NULL DEFAULT '',
+			route_id TEXT,
+			token_id TEXT,
+			session_id TEXT,
+			kind TEXT NOT NULL,
+			method TEXT NOT NULL DEFAULT '',
+			path TEXT NOT NULL DEFAULT '',
+			status_code INTEGER NOT NULL DEFAULT 0,
+			bytes_in INTEGER NOT NULL DEFAULT 0,
+			bytes_out INTEGER NOT NULL DEFAULT 0,
+			error TEXT NOT NULL DEFAULT '',
+			occurred_at TIMESTAMP NOT NULL
+		);
+		CREATE INDEX IF NOT EXISTS idx_traffic_events_occurred_at ON traffic_events(occurred_at);
+		CREATE INDEX IF NOT EXISTS idx_traffic_events_public_host ON traffic_events(public_host);
+		CREATE INDEX IF NOT EXISTS idx_traffic_events_token_id ON traffic_events(token_id);
 	`)
 	return err
 }
@@ -1296,4 +1634,25 @@ CREATE TABLE IF NOT EXISTS events (
 	details TEXT NOT NULL DEFAULT '',
 	created_at TIMESTAMP NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS traffic_events (
+	id INTEGER PRIMARY KEY AUTOINCREMENT,
+	object_type TEXT NOT NULL,
+	public_host TEXT NOT NULL DEFAULT '',
+	route_id TEXT,
+	token_id TEXT,
+	session_id TEXT,
+	kind TEXT NOT NULL,
+	method TEXT NOT NULL DEFAULT '',
+	path TEXT NOT NULL DEFAULT '',
+	status_code INTEGER NOT NULL DEFAULT 0,
+	bytes_in INTEGER NOT NULL DEFAULT 0,
+	bytes_out INTEGER NOT NULL DEFAULT 0,
+	error TEXT NOT NULL DEFAULT '',
+	occurred_at TIMESTAMP NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_traffic_events_occurred_at ON traffic_events(occurred_at);
+CREATE INDEX IF NOT EXISTS idx_traffic_events_public_host ON traffic_events(public_host);
+CREATE INDEX IF NOT EXISTS idx_traffic_events_token_id ON traffic_events(token_id);
 `
