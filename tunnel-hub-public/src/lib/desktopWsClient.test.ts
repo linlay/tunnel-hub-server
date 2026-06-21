@@ -117,6 +117,22 @@ describe('desktopWsClient', () => {
     vi.useRealTimers();
   });
 
+  it('rejects timed out connections', async () => {
+    vi.useFakeTimers();
+    FakeWebSocket.instances = [];
+    const session = new DesktopWsSession({
+      url: 'wss://zm123.m.zenmind.cc/ws',
+      token: '',
+      WebSocketCtor: FakeWebSocket,
+      connectTimeoutMs: 10
+    });
+    const opened = session.connect();
+    vi.advanceTimersByTime(11);
+    await expect(opened).rejects.toThrow('WebSocket connection timed out');
+    expect(session.readyState).toBe('error');
+    vi.useRealTimers();
+  });
+
   it('normalizes snapshots and agent lists', () => {
     expect(
       normalizeTaskBoardSnapshot({

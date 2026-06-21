@@ -1,23 +1,28 @@
-import { FormEvent, ReactNode, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { FormEvent, ReactNode, KeyboardEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Activity,
+  ArrowLeft,
+  ArrowRight,
   Bot,
   CheckCircle2,
-  ChevronLeft,
-  ChevronRight,
   Circle,
   ClipboardList,
   KeyRound,
+  LayoutDashboard,
   ListChecks,
   Loader2,
+  MessageCircle,
   MessageSquareText,
-  PlugZap,
   Plus,
   RefreshCcw,
+  Search,
   Send,
   ShieldCheck,
+  Sparkles,
+  Trash2,
   Unplug,
   Wifi,
+  X,
   XCircle
 } from 'lucide-react';
 import {
@@ -37,8 +42,19 @@ import {
   redactSensitiveText
 } from './lib/desktopWsClient';
 
-type View = 'board' | 'agents' | 'logs';
+type View = 'copilot' | 'board' | 'logs';
 type LogDirection = 'in' | 'out' | 'system';
+type ChatRole = 'user' | 'assistant' | 'system';
+type BoardPriorityFilter = TaskBoardPriority | 'all';
+
+type ChatMessage = {
+  id: string;
+  role: ChatRole;
+  content: string;
+  at: string;
+  agentKey?: string;
+  status?: 'pending' | 'done' | 'error';
+};
 
 type LogEntry = {
   id: number;
@@ -54,18 +70,27 @@ type Feedback = {
 };
 
 const visibleStatuses: TaskBoardStatus[] = ['backlog', 'todo', 'in_progress', 'in_review', 'completed'];
+
 const statusLabel: Record<TaskBoardStatus, string> = {
-  backlog: 'Backlog',
-  todo: 'Todo',
-  in_progress: 'Progress',
+  backlog: '需求池',
+  todo: '待办',
+  in_progress: '进行中',
+  in_review: '审查中',
+  completed: '已完成'
+};
+
+const statusCaption: Record<TaskBoardStatus, string> = {
+  backlog: 'Ideas',
+  todo: 'Ready',
+  in_progress: 'Running',
   in_review: 'Review',
   completed: 'Done'
 };
 
 const priorityLabel: Record<TaskBoardPriority, string> = {
-  low: 'Low',
-  medium: 'Medium',
-  high: 'High'
+  low: '低',
+  medium: '中',
+  high: '高'
 };
 
 const emptySnapshot: TaskBoardSnapshot = { issues: [] };
@@ -74,26 +99,38 @@ export function App() {
   const initialToken = useMemo(() => consumeInitialToken(), []);
   const [token, setToken] = useState(initialToken);
   const [connectionState, setConnectionState] = useState<ConnectionState>('idle');
-  const [activeView, setActiveView] = useState<View>('board');
+  const [activeView, setActiveView] = useState<View>('copilot');
   const [snapshot, setSnapshot] = useState<TaskBoardSnapshot>(emptySnapshot);
   const [desktopAgents, setDesktopAgents] = useState<AgentSummary[]>([]);
   const [platformAgents, setPlatformAgents] = useState<AgentSummary[]>([]);
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const [feedback, setFeedback] = useState<Feedback | null>(null);
   const [issueTitle, setIssueTitle] = useState('');
+  const [issueStatus, setIssueStatus] = useState<TaskBoardStatus>('backlog');
   const [issuePriority, setIssuePriority] = useState<TaskBoardPriority>('medium');
-  const [agentQuery, setAgentQuery] = useState('帮我用一句话总结当前看板状态');
+  const [boardQuery, setBoardQuery] = useState('');
+  const [boardPriorityFilter, setBoardPriorityFilter] = useState<BoardPriorityFilter>('all');
+  const [mobileStatus, setMobileStatus] = useState<TaskBoardStatus>('todo');
+  const [agentQuery, setAgentQuery] = useState('总结当前看板状态，并给我三个下一步建议');
   const [selectedAgentKey, setSelectedAgentKey] = useState('');
-  const [queryResult, setQueryResult] = useState('');
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [busyAction, setBusyAction] = useState('');
   const sessionRef = useRef<DesktopWsSession | null>(null);
   const tokenRef = useRef(initialToken);
+  const autoConnectStartedRef = useRef(false);
 
   const wsURL = useMemo(() => desktopWsUrlFromLocation(window.location), []);
   const isConnected = connectionState === 'open';
-  const issueCountByStatus = useMemo(() => groupIssues(snapshot.issues), [snapshot.issues]);
   const allAgents = useMemo(() => mergeAgents(desktopAgents, platformAgents), [desktopAgents, platformAgents]);
   const selectedAgent = selectedAgentKey || allAgents[0]?.agentKey || 'zenmi';
+  const selectedAgentSummary = allAgents.find((agent) => agent.agentKey === selectedAgent);
+  const filteredIssues = useMemo(
+    () => filterIssues(snapshot.issues, boardQuery, boardPriorityFilter),
+    [boardPriorityFilter, boardQuery, snapshot.issues]
+  );
+  const groupedIssues = useMemo(() => groupIssues(filteredIssues), [filteredIssues]);
+  const issueTotals = useMemo(() => buildIssueTotals(snapshot.issues), [snapshot.issues]);
+  const boardSummary = useMemo(() => summarizeBoard(snapshot.issues), [snapshot.issues]);
 
   useEffect(() => {
     tokenRef.current = token;
@@ -109,7 +146,7 @@ export function App() {
     setLogs((current) => [
       {
         id: Date.now() + Math.random(),
-        at: new Date().toLocaleTimeString([], { hour12: false }),
+        at: formatClock(),
         direction,
         title,
         detail: detail === undefined
@@ -117,7 +154,21 @@ export function App() {
           : redactSensitiveText(typeof detail === 'string' ? detail : JSON.stringify(detail, null, 2), [tokenRef.current])
       },
       ...current
-    ].slice(0, 80));
+    ].slice(0, 120));
+  }, []);
+
+  const addMessage = useCallback((message: Omit<ChatMessage, 'id' | 'at'>) => {
+    const nextMessage: ChatMessage = {
+      id: createLocalId('msg'),
+      at: formatClock(),
+      ...message
+    };
+    setMessages((current) => [...current, nextMessage]);
+    return nextMessage.id;
+  }, []);
+
+  const updateMessage = useCallback((id: string, patch: Partial<ChatMessage>) => {
+    setMessages((current) => current.map((message) => message.id === id ? { ...message, ...patch } : message));
   }, []);
 
   const request = useCallback(async (
@@ -145,7 +196,7 @@ export function App() {
     try {
       const data = await request('d', 'snapshot.get', {}, { silent: false });
       setSnapshot(normalizeTaskBoardSnapshot(data));
-      setFeedback({ tone: 'success', message: 'Board refreshed.' });
+      setFeedback({ tone: 'success', message: '看板已刷新' });
     } catch (error) {
       showError(setFeedback, error);
     } finally {
@@ -169,7 +220,7 @@ export function App() {
       if (desktop.status === 'rejected' && platform.status === 'rejected') {
         throw desktop.reason;
       }
-      setFeedback({ tone: 'success', message: 'Agents refreshed.' });
+      setFeedback({ tone: 'success', message: '智能体已刷新' });
     } catch (error) {
       showError(setFeedback, error);
     } finally {
@@ -185,15 +236,14 @@ export function App() {
     await Promise.allSettled([refreshBoard(), refreshAgents()]);
   }, [refreshAgents, refreshBoard, request]);
 
-  async function handleConnect(event?: FormEvent) {
-    event?.preventDefault();
-    const trimmedToken = token.trim();
+  const connectWithToken = useCallback(async (rawToken: string, mode: 'manual' | 'auto' = 'manual') => {
+    const trimmedToken = rawToken.trim();
     if (!trimmedToken) {
-      setFeedback({ tone: 'error', message: 'Token is required.' });
+      setFeedback({ tone: 'error', message: '需要 Desktop token' });
       return;
     }
     sessionRef.current?.close();
-    const session = new DesktopWsSession({ url: wsURL, token: trimmedToken });
+    const session = new DesktopWsSession({ url: wsURL, token: trimmedToken, connectTimeoutMs: 12_000 });
     sessionRef.current = session;
     session.onState(setConnectionState);
     session.onMessage((frame) => {
@@ -210,13 +260,26 @@ export function App() {
 
     try {
       await session.connect();
-      setFeedback({ tone: 'success', message: 'Connected.' });
+      setFeedback({ tone: 'success', message: mode === 'auto' ? '已用访问链接连接 Desktop' : '已连接 Desktop' });
       addLog('system', 'Connected', wsURL);
       await bootstrapSession();
     } catch (error) {
       showError(setFeedback, error);
       addLog('system', 'Connection failed', error instanceof Error ? error.message : String(error));
     }
+  }, [addLog, bootstrapSession, refreshAgents, refreshBoard, wsURL]);
+
+  useEffect(() => {
+    if (!initialToken || autoConnectStartedRef.current) {
+      return;
+    }
+    autoConnectStartedRef.current = true;
+    void connectWithToken(initialToken, 'auto');
+  }, [connectWithToken, initialToken]);
+
+  async function handleConnect(event?: FormEvent) {
+    event?.preventDefault();
+    await connectWithToken(token, 'manual');
   }
 
   function handleDisconnect() {
@@ -230,20 +293,21 @@ export function App() {
     event.preventDefault();
     const title = issueTitle.trim();
     if (!title) {
-      setFeedback({ tone: 'error', message: 'Issue title is required.' });
+      setFeedback({ tone: 'error', message: '请输入任务标题' });
       return;
     }
     setBusyAction('create-issue');
     try {
       await request('d', 'issue.create', {
         title,
-        status: 'backlog',
+        status: issueStatus,
         priority: issuePriority,
         syncToCloud: false
       });
       setIssueTitle('');
-      setFeedback({ tone: 'success', message: 'Issue created.' });
+      setFeedback({ tone: 'success', message: '任务已创建' });
       await refreshBoard();
+      setMobileStatus(issueStatus);
     } catch (error) {
       showError(setFeedback, error);
     } finally {
@@ -257,31 +321,34 @@ export function App() {
     if (!nextStatus || nextStatus === issue.status) {
       return;
     }
-    setBusyAction(`move-${issue.id}`);
-    try {
-      await request('d', 'issue.move', { issueId: issue.id, status: nextStatus });
-      setSnapshot((current) => ({
-        ...current,
-        issues: current.issues.map((item) => item.id === issue.id ? { ...item, status: nextStatus } : item)
-      }));
-      setFeedback({ tone: 'success', message: 'Issue moved.' });
-    } catch (error) {
-      showError(setFeedback, error);
-      await refreshBoard();
-    } finally {
-      setBusyAction('');
+    await setIssueStatusOnDesktop(issue, nextStatus, `move-${issue.id}`, '任务已移动');
+  }
+
+  async function updateIssueStatus(issue: TaskBoardIssue, status: TaskBoardStatus) {
+    if (status === issue.status) {
+      return;
     }
+    await setIssueStatusOnDesktop(issue, status, `status-${issue.id}`, '状态已更新');
   }
 
   async function completeIssue(issue: TaskBoardIssue) {
-    setBusyAction(`complete-${issue.id}`);
+    await setIssueStatusOnDesktop(issue, 'completed', `complete-${issue.id}`, '任务已完成');
+  }
+
+  async function setIssueStatusOnDesktop(issue: TaskBoardIssue, status: TaskBoardStatus, actionKey: string, message: string) {
+    setBusyAction(actionKey);
     try {
-      await request('d', 'issue.update', { issueId: issue.id, input: { status: 'completed' } });
+      if (actionKey.startsWith('move-')) {
+        await request('d', 'issue.move', { issueId: issue.id, status });
+      } else {
+        await request('d', 'issue.update', { issueId: issue.id, input: { status } });
+      }
       setSnapshot((current) => ({
         ...current,
-        issues: current.issues.map((item) => item.id === issue.id ? { ...item, status: 'completed' } : item)
+        issues: current.issues.map((item) => item.id === issue.id ? { ...item, status } : item)
       }));
-      setFeedback({ tone: 'success', message: 'Issue completed.' });
+      setMobileStatus(status);
+      setFeedback({ tone: 'success', message });
     } catch (error) {
       showError(setFeedback, error);
       await refreshBoard();
@@ -294,203 +361,547 @@ export function App() {
     event.preventDefault();
     const message = agentQuery.trim();
     if (!message) {
-      setFeedback({ tone: 'error', message: 'Message is required.' });
+      setFeedback({ tone: 'error', message: '请输入消息' });
       return;
     }
+    setActiveView('copilot');
     setBusyAction('agent-query');
-    setQueryResult('');
+    addMessage({ role: 'user', content: message, agentKey: selectedAgent, status: 'done' });
+    const pendingId = addMessage({
+      role: 'assistant',
+      content: '正在思考...',
+      agentKey: selectedAgent,
+      status: 'pending'
+    });
+    setAgentQuery('');
     try {
       const data = await request('ap', '/api/query', {
         agentKey: selectedAgent,
         message,
         stream: false,
-        includeUsage: true
+        includeUsage: true,
+        context: {
+          board: boardSummary
+        }
       });
-      setQueryResult(readAgentAnswer(data));
-      setFeedback({ tone: 'success', message: 'Agent replied.' });
+      updateMessage(pendingId, {
+        content: readAgentAnswer(data),
+        status: 'done'
+      });
+      setFeedback({ tone: 'success', message: '智能体已回复' });
     } catch (error) {
+      const text = error instanceof Error ? error.message : String(error);
+      updateMessage(pendingId, {
+        content: text,
+        status: 'error'
+      });
       showError(setFeedback, error);
     } finally {
       setBusyAction('');
     }
   }
 
+  function handleComposerKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
+    if (event.key !== 'Enter' || event.shiftKey || event.nativeEvent.isComposing) {
+      return;
+    }
+    event.preventDefault();
+    event.currentTarget.form?.requestSubmit();
+  }
+
+  function fillPrompt(prompt: string) {
+    setAgentQuery(prompt);
+    setActiveView('copilot');
+  }
+
+  const hostLabel = window.location.host || 'Desktop public host';
+
   return (
-    <main className="app-shell">
-      <section className="topbar">
+    <main className="desktop-public-app">
+      <header className="topbar">
         <div className="brand">
-          <div className="brand-icon"><PlugZap size={22} /></div>
+          <div className="brand-icon"><Sparkles size={21} /></div>
           <div>
             <h1>ZenMind Desktop</h1>
-            <p>{window.location.host}</p>
+            <p>{hostLabel}</p>
           </div>
         </div>
-        <StatusPill state={connectionState} />
-      </section>
+        <div className="topbar-actions">
+          <StatusPill state={connectionState} />
+          <button className="icon-button" type="button" onClick={() => void refreshBoard()} disabled={!isConnected || busyAction === 'refresh-board'} aria-label="刷新看板">
+            <RefreshCcw size={17} className={busyAction === 'refresh-board' ? 'spin' : ''} />
+          </button>
+        </div>
+      </header>
 
-      <section className="connect-panel" aria-label="Desktop connection">
-        <form className="connect-form" onSubmit={handleConnect}>
-          <label>
-            <span>Desktop token</span>
-            <div className="token-field">
-              <KeyRound size={16} />
-              <input
-                aria-label="Desktop token"
-                autoComplete="off"
-                value={token}
-                onChange={(event) => setToken(event.target.value)}
-                placeholder="Paste app token"
-                type="password"
-              />
-            </div>
-          </label>
-          <div className="connect-actions">
-            <button className="primary" type="submit" disabled={connectionState === 'connecting'}>
-              {connectionState === 'connecting' ? <Loader2 className="spin" size={16} /> : <Wifi size={16} />}
-              Connect
-            </button>
-            <button type="button" className="secondary" onClick={handleDisconnect} disabled={!isConnected}>
-              <Unplug size={16} />
-              Disconnect
-            </button>
-          </div>
-        </form>
-        {feedback ? <FeedbackLine feedback={feedback} onDismiss={() => setFeedback(null)} /> : null}
-      </section>
+      <ConnectionPanel
+        connectionState={connectionState}
+        feedback={feedback}
+        isConnected={isConnected}
+        token={token}
+        onConnect={handleConnect}
+        onDisconnect={handleDisconnect}
+        onDismissFeedback={() => setFeedback(null)}
+        setToken={setToken}
+      />
 
-      <nav className="tabs" aria-label="Views">
-        <TabButton active={activeView === 'board'} onClick={() => setActiveView('board')} icon={<ClipboardList size={16} />} label="Board" />
-        <TabButton active={activeView === 'agents'} onClick={() => setActiveView('agents')} icon={<Bot size={16} />} label="Agents" />
-        <TabButton active={activeView === 'logs'} onClick={() => setActiveView('logs')} icon={<Activity size={16} />} label="Logs" />
+      <nav className="mobile-tabs" aria-label="工作区">
+        <TabButton active={activeView === 'copilot'} onClick={() => setActiveView('copilot')} icon={<MessageCircle size={16} />} label="对话" />
+        <TabButton active={activeView === 'board'} onClick={() => setActiveView('board')} icon={<ClipboardList size={16} />} label="看板" />
+        <TabButton active={activeView === 'logs'} onClick={() => setActiveView('logs')} icon={<Activity size={16} />} label="诊断" />
       </nav>
 
-      {activeView === 'board' ? (
-        <BoardView
+      <section className="workspace-grid" data-view={activeView}>
+        <SidePanel
+          agents={allAgents}
+          boardSummary={boardSummary}
           busyAction={busyAction}
-          issueCountByStatus={issueCountByStatus}
-          issuePriority={issuePriority}
-          issueTitle={issueTitle}
+          issueTotals={issueTotals}
           isConnected={isConnected}
-          onComplete={completeIssue}
-          onCreateIssue={handleCreateIssue}
-          onMove={moveIssue}
-          onRefresh={refreshBoard}
-          setIssuePriority={setIssuePriority}
-          setIssueTitle={setIssueTitle}
+          selectedAgent={selectedAgent}
+          onRefreshAgents={refreshAgents}
+          setSelectedAgentKey={setSelectedAgentKey}
         />
-      ) : null}
 
-      {activeView === 'agents' ? (
-        <AgentsView
+        <CopilotPanel
           agentQuery={agentQuery}
           agents={allAgents}
+          boardSummary={boardSummary}
           busyAction={busyAction}
           isConnected={isConnected}
-          queryResult={queryResult}
+          messages={messages}
           selectedAgent={selectedAgent}
-          onRefresh={refreshAgents}
+          selectedAgentSummary={selectedAgentSummary}
+          onClearMessages={() => setMessages([])}
+          onFillPrompt={fillPrompt}
+          onKeyDown={handleComposerKeyDown}
+          onRefreshAgents={refreshAgents}
           onRunQuery={runAgentQuery}
           setAgentQuery={setAgentQuery}
           setSelectedAgentKey={setSelectedAgentKey}
         />
-      ) : null}
 
-      {activeView === 'logs' ? <LogsView logs={logs} onClear={() => setLogs([])} /> : null}
+        <BoardPanel
+          boardPriorityFilter={boardPriorityFilter}
+          boardQuery={boardQuery}
+          busyAction={busyAction}
+          groupedIssues={groupedIssues}
+          isConnected={isConnected}
+          issuePriority={issuePriority}
+          issueStatus={issueStatus}
+          issueTitle={issueTitle}
+          mobileStatus={mobileStatus}
+          totalFiltered={filteredIssues.length}
+          totalIssues={snapshot.issues.length}
+          onComplete={completeIssue}
+          onCreateIssue={handleCreateIssue}
+          onMove={moveIssue}
+          onRefresh={refreshBoard}
+          onStatusChange={updateIssueStatus}
+          setBoardPriorityFilter={setBoardPriorityFilter}
+          setBoardQuery={setBoardQuery}
+          setIssuePriority={setIssuePriority}
+          setIssueStatus={setIssueStatus}
+          setIssueTitle={setIssueTitle}
+          setMobileStatus={setMobileStatus}
+        />
+
+        <LogsPanel logs={logs} onClear={() => setLogs([])} />
+      </section>
     </main>
   );
 }
 
-function BoardView({
-  busyAction,
-  issueCountByStatus,
-  issuePriority,
-  issueTitle,
+function ConnectionPanel({
+  connectionState,
+  feedback,
   isConnected,
+  token,
+  onConnect,
+  onDisconnect,
+  onDismissFeedback,
+  setToken
+}: {
+  connectionState: ConnectionState;
+  feedback: Feedback | null;
+  isConnected: boolean;
+  token: string;
+  onConnect: (event: FormEvent) => void;
+  onDisconnect: () => void;
+  onDismissFeedback: () => void;
+  setToken: (token: string) => void;
+}) {
+  return (
+    <section className="connection-card" aria-label="Desktop 连接">
+      <form className="connect-form" onSubmit={onConnect}>
+        <label>
+          <span>Desktop token</span>
+          <div className="token-field">
+            <KeyRound size={16} />
+            <input
+              aria-label="Desktop token"
+              autoComplete="off"
+              value={token}
+              onChange={(event) => setToken(event.target.value)}
+              placeholder="Paste app token"
+              type="password"
+            />
+          </div>
+        </label>
+        <div className="connect-actions">
+          <button className="primary" type="submit" disabled={connectionState === 'connecting'}>
+            {connectionState === 'connecting' ? <Loader2 className="spin" size={16} /> : <Wifi size={16} />}
+            连接
+          </button>
+          <button type="button" className="secondary" onClick={onDisconnect} disabled={!isConnected}>
+            <Unplug size={16} />
+            断开
+          </button>
+        </div>
+      </form>
+      {feedback ? <FeedbackLine feedback={feedback} onDismiss={onDismissFeedback} /> : null}
+    </section>
+  );
+}
+
+function SidePanel({
+  agents,
+  boardSummary,
+  busyAction,
+  issueTotals,
+  isConnected,
+  selectedAgent,
+  onRefreshAgents,
+  setSelectedAgentKey
+}: {
+  agents: AgentSummary[];
+  boardSummary: BoardSummary;
+  busyAction: string;
+  issueTotals: Map<TaskBoardStatus, number>;
+  isConnected: boolean;
+  selectedAgent: string;
+  onRefreshAgents: () => void;
+  setSelectedAgentKey: (key: string) => void;
+}) {
+  return (
+    <aside className="workspace-card side-card" aria-label="智能体和看板概览">
+      <section className="side-section">
+        <div className="section-head compact-head">
+          <div>
+            <h2>智能体</h2>
+            <p>{agents.length} available</p>
+          </div>
+          <button className="icon-button" onClick={onRefreshAgents} disabled={!isConnected || busyAction === 'refresh-agents'} aria-label="刷新智能体">
+            <RefreshCcw size={17} className={busyAction === 'refresh-agents' ? 'spin' : ''} />
+          </button>
+        </div>
+        <div className="agent-list">
+          {agents.length === 0 ? <div className="empty-panel"><Bot size={18} /> No agents loaded</div> : null}
+          {agents.map((agent) => (
+            <button
+              className={`agent-row ${selectedAgent === agent.agentKey ? 'selected' : ''}`}
+              key={`${agent.source}:${agent.agentKey}`}
+              onClick={() => setSelectedAgentKey(agent.agentKey)}
+              type="button"
+            >
+              <span className="agent-avatar"><Bot size={16} /></span>
+              <span>
+                <strong>{agent.displayName}</strong>
+                <small>{agent.role || agent.agentKey}</small>
+              </span>
+              {agent.unreadCount ? <em>{agent.unreadCount}</em> : null}
+            </button>
+          ))}
+        </div>
+      </section>
+
+      <section className="side-section">
+        <div className="section-head compact-head">
+          <div>
+            <h2>看板概览</h2>
+            <p>{boardSummary.total} issues</p>
+          </div>
+          <LayoutDashboard size={18} />
+        </div>
+        <div className="summary-grid">
+          <SummaryMetric label="进行中" value={boardSummary.running} tone="progress" />
+          <SummaryMetric label="高优先" value={boardSummary.highPriority} tone="danger" />
+          <SummaryMetric label="已完成" value={boardSummary.completed} tone="good" />
+          <SummaryMetric label="未分配" value={boardSummary.unassigned} tone="neutral" />
+        </div>
+        <div className="status-stack">
+          {visibleStatuses.map((status) => (
+            <div className={`status-row is-${status}`} key={status}>
+              <span>{statusLabel[status]}</span>
+              <strong>{issueTotals.get(status) ?? 0}</strong>
+            </div>
+          ))}
+        </div>
+      </section>
+    </aside>
+  );
+}
+
+function CopilotPanel({
+  agentQuery,
+  agents,
+  boardSummary,
+  busyAction,
+  isConnected,
+  messages,
+  selectedAgent,
+  selectedAgentSummary,
+  onClearMessages,
+  onFillPrompt,
+  onKeyDown,
+  onRefreshAgents,
+  onRunQuery,
+  setAgentQuery,
+  setSelectedAgentKey
+}: {
+  agentQuery: string;
+  agents: AgentSummary[];
+  boardSummary: BoardSummary;
+  busyAction: string;
+  isConnected: boolean;
+  messages: ChatMessage[];
+  selectedAgent: string;
+  selectedAgentSummary?: AgentSummary;
+  onClearMessages: () => void;
+  onFillPrompt: (prompt: string) => void;
+  onKeyDown: (event: KeyboardEvent<HTMLTextAreaElement>) => void;
+  onRefreshAgents: () => void;
+  onRunQuery: (event: FormEvent) => void;
+  setAgentQuery: (value: string) => void;
+  setSelectedAgentKey: (key: string) => void;
+}) {
+  const messagesEndRef = useRef<HTMLDivElement | null>(null);
+  const promptChips = useMemo(() => [
+    '总结当前看板状态，并指出最值得先处理的任务',
+    '根据看板，把今天适合推进的任务排个优先级',
+    '帮我把高优先级任务拆成可执行的下一步',
+    '用中文给团队写一段当前进展说明'
+  ], []);
+
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView?.({ block: 'end' });
+  }, [messages, busyAction]);
+
+  return (
+    <section className="workspace-card copilot-card" aria-label="智能体对话">
+      <div className="copilot-header">
+        <div className="copilot-title">
+          <span className="panel-icon"><MessageCircle size={18} /></span>
+          <div>
+            <h2>{selectedAgentSummary?.displayName || selectedAgent}</h2>
+            <p>{selectedAgentSummary?.role || 'Agent platform'}</p>
+          </div>
+        </div>
+        <div className="copilot-tools">
+          <select value={selectedAgent} onChange={(event) => setSelectedAgentKey(event.target.value)} aria-label="选择智能体">
+            {agents.length === 0 ? <option value="zenmi">zenmi</option> : null}
+            {agents.map((agent) => (
+              <option key={`${agent.source}:${agent.agentKey}`} value={agent.agentKey}>
+                {agent.displayName}
+              </option>
+            ))}
+          </select>
+          <button className="icon-button" type="button" onClick={onRefreshAgents} disabled={!isConnected || busyAction === 'refresh-agents'} aria-label="刷新智能体">
+            <RefreshCcw size={17} className={busyAction === 'refresh-agents' ? 'spin' : ''} />
+          </button>
+          <button className="icon-button" type="button" onClick={onClearMessages} disabled={messages.length === 0} aria-label="清空对话">
+            <Trash2 size={17} />
+          </button>
+        </div>
+      </div>
+
+      <div className="copilot-metrics" aria-label="看板摘要">
+        <SummaryMetric label="任务" value={boardSummary.total} tone="neutral" />
+        <SummaryMetric label="运行中" value={boardSummary.running} tone="progress" />
+        <SummaryMetric label="待审查" value={boardSummary.reviewing} tone="violet" />
+        <SummaryMetric label="已完成" value={boardSummary.completed} tone="good" />
+      </div>
+
+      <div className="message-stream" aria-live="polite">
+        {messages.length === 0 ? (
+          <div className="empty-chat">
+            <MessageSquareText size={24} />
+            <strong>Desktop Copilot</strong>
+            <div className="prompt-grid">
+              {promptChips.map((prompt) => (
+                <button key={prompt} type="button" onClick={() => onFillPrompt(prompt)}>
+                  {prompt}
+                </button>
+              ))}
+            </div>
+          </div>
+        ) : null}
+        {messages.map((message) => (
+          <article className={`chat-message ${message.role} ${message.status || ''}`} key={message.id}>
+            <div className="message-avatar">
+              {message.role === 'user' ? <Circle size={15} /> : <Bot size={15} />}
+            </div>
+            <div className="message-bubble">
+              <header>
+                <strong>{message.role === 'user' ? 'You' : message.agentKey || 'Agent'}</strong>
+                <time>{message.at}</time>
+              </header>
+              <p>{message.content}</p>
+            </div>
+          </article>
+        ))}
+        <div ref={messagesEndRef} />
+      </div>
+
+      <form className="composer" onSubmit={onRunQuery}>
+        <textarea
+          aria-label="Agent message"
+          value={agentQuery}
+          onChange={(event) => setAgentQuery(event.target.value)}
+          onKeyDown={onKeyDown}
+          placeholder="向智能体发送消息"
+        />
+        <div className="composer-footer">
+          <span>{isConnected ? 'Enter 发送，Shift+Enter 换行' : '等待 Desktop 连接'}</span>
+          <button className="primary" type="submit" disabled={!isConnected || busyAction === 'agent-query'}>
+            {busyAction === 'agent-query' ? <Loader2 className="spin" size={16} /> : <Send size={16} />}
+            发送
+          </button>
+        </div>
+      </form>
+    </section>
+  );
+}
+
+function BoardPanel({
+  boardPriorityFilter,
+  boardQuery,
+  busyAction,
+  groupedIssues,
+  isConnected,
+  issuePriority,
+  issueStatus,
+  issueTitle,
+  mobileStatus,
+  totalFiltered,
+  totalIssues,
   onComplete,
   onCreateIssue,
   onMove,
   onRefresh,
+  onStatusChange,
+  setBoardPriorityFilter,
+  setBoardQuery,
   setIssuePriority,
-  setIssueTitle
+  setIssueStatus,
+  setIssueTitle,
+  setMobileStatus
 }: {
+  boardPriorityFilter: BoardPriorityFilter;
+  boardQuery: string;
   busyAction: string;
-  issueCountByStatus: Map<TaskBoardStatus, TaskBoardIssue[]>;
-  issuePriority: TaskBoardPriority;
-  issueTitle: string;
+  groupedIssues: Map<TaskBoardStatus, TaskBoardIssue[]>;
   isConnected: boolean;
+  issuePriority: TaskBoardPriority;
+  issueStatus: TaskBoardStatus;
+  issueTitle: string;
+  mobileStatus: TaskBoardStatus;
+  totalFiltered: number;
+  totalIssues: number;
   onComplete: (issue: TaskBoardIssue) => void;
   onCreateIssue: (event: FormEvent) => void;
   onMove: (issue: TaskBoardIssue, direction: -1 | 1) => void;
   onRefresh: () => void;
+  onStatusChange: (issue: TaskBoardIssue, status: TaskBoardStatus) => void;
+  setBoardPriorityFilter: (priority: BoardPriorityFilter) => void;
+  setBoardQuery: (value: string) => void;
   setIssuePriority: (priority: TaskBoardPriority) => void;
+  setIssueStatus: (status: TaskBoardStatus) => void;
   setIssueTitle: (title: string) => void;
+  setMobileStatus: (status: TaskBoardStatus) => void;
 }) {
   return (
-    <section className="workspace board-workspace">
+    <section className="workspace-card board-card" aria-label="Desktop 看板">
       <div className="section-head">
         <div>
-          <h2>Task board</h2>
-          <p>{totalIssues(issueCountByStatus)} issues</p>
+          <h2>Desktop 看板</h2>
+          <p>{totalFiltered}/{totalIssues} issues</p>
         </div>
-        <button className="icon-button" onClick={onRefresh} disabled={!isConnected || busyAction === 'refresh-board'} aria-label="Refresh board">
+        <button className="icon-button" onClick={onRefresh} disabled={!isConnected || busyAction === 'refresh-board'} aria-label="刷新看板">
           <RefreshCcw size={17} className={busyAction === 'refresh-board' ? 'spin' : ''} />
         </button>
       </div>
+
       <form className="create-issue" onSubmit={onCreateIssue}>
         <input
           aria-label="New issue title"
           value={issueTitle}
           onChange={(event) => setIssueTitle(event.target.value)}
-          placeholder="New issue"
+          placeholder="新任务"
         />
+        <select aria-label="New issue status" value={issueStatus} onChange={(event) => setIssueStatus(event.target.value as TaskBoardStatus)}>
+          {visibleStatuses.map((status) => <option key={status} value={status}>{statusLabel[status]}</option>)}
+        </select>
         <select
           aria-label="Issue priority"
           value={issuePriority}
           onChange={(event) => setIssuePriority(event.target.value as TaskBoardPriority)}
         >
-          <option value="low">Low</option>
-          <option value="medium">Medium</option>
-          <option value="high">High</option>
+          <option value="low">低</option>
+          <option value="medium">中</option>
+          <option value="high">高</option>
         </select>
         <button className="primary compact" type="submit" disabled={!isConnected || busyAction === 'create-issue'}>
           {busyAction === 'create-issue' ? <Loader2 className="spin" size={16} /> : <Plus size={16} />}
-          Add
+          新增
         </button>
       </form>
+
+      <div className="board-toolbar">
+        <label className="search-field">
+          <Search size={15} />
+          <input aria-label="Search issues" value={boardQuery} onChange={(event) => setBoardQuery(event.target.value)} placeholder="搜索任务" />
+        </label>
+        <select aria-label="Filter by priority" value={boardPriorityFilter} onChange={(event) => setBoardPriorityFilter(event.target.value as BoardPriorityFilter)}>
+          <option value="all">全部优先级</option>
+          <option value="high">高优先</option>
+          <option value="medium">中优先</option>
+          <option value="low">低优先</option>
+        </select>
+      </div>
+
+      <div className="board-status-switcher" aria-label="移动端看板列">
+        {visibleStatuses.map((status) => (
+          <button key={status} type="button" className={mobileStatus === status ? 'active' : ''} onClick={() => setMobileStatus(status)}>
+            <span>{statusLabel[status]}</span>
+            <strong>{groupedIssues.get(status)?.length ?? 0}</strong>
+          </button>
+        ))}
+      </div>
+
       <div className="board-columns">
         {visibleStatuses.map((status) => {
-          const issues = issueCountByStatus.get(status) ?? [];
+          const issues = groupedIssues.get(status) ?? [];
           return (
-            <section className="board-column" key={status}>
+            <section className={`board-column is-${status} ${mobileStatus === status ? 'mobile-active' : ''}`} key={status}>
               <header>
-                <span>{statusLabel[status]}</span>
-                <strong>{issues.length}</strong>
+                <span>
+                  <strong>{statusLabel[status]}</strong>
+                  <small>{statusCaption[status]}</small>
+                </span>
+                <em>{issues.length}</em>
               </header>
               <div className="issue-list">
-                {issues.length === 0 ? <div className="empty-column"><Circle size={14} /> Empty</div> : null}
+                {issues.length === 0 ? <div className="empty-column"><Circle size={14} /> 暂无任务</div> : null}
                 {issues.map((issue) => (
-                  <article className="issue-card" key={issue.id}>
-                    <div className="issue-card-head">
-                      <strong>{issue.title}</strong>
-                      <PriorityBadge priority={issue.priority ?? 'medium'} />
-                    </div>
-                    {issue.description ? <p>{issue.description}</p> : null}
-                    <div className="issue-meta">
-                      <span>{issue.assigneeAgentName || issue.assigneeAgentKey || 'Unassigned'}</span>
-                      {issue.runState ? <span>{issue.runState}</span> : null}
-                    </div>
-                    <div className="issue-actions">
-                      <button aria-label={`Move ${issue.title} left`} onClick={() => onMove(issue, -1)} disabled={status === 'backlog' || busyAction === `move-${issue.id}`}>
-                        <ChevronLeft size={15} />
-                      </button>
-                      <button aria-label={`Move ${issue.title} right`} onClick={() => onMove(issue, 1)} disabled={status === 'completed' || busyAction === `move-${issue.id}`}>
-                        <ChevronRight size={15} />
-                      </button>
-                      <button aria-label={`Complete ${issue.title}`} onClick={() => onComplete(issue)} disabled={status === 'completed' || busyAction === `complete-${issue.id}`}>
-                        <CheckCircle2 size={15} />
-                      </button>
-                    </div>
-                  </article>
+                  <IssueCard
+                    busyAction={busyAction}
+                    issue={issue}
+                    key={issue.id}
+                    onComplete={onComplete}
+                    onMove={onMove}
+                    onStatusChange={onStatusChange}
+                  />
                 ))}
               </div>
             </section>
@@ -501,94 +912,65 @@ function BoardView({
   );
 }
 
-function AgentsView({
-  agentQuery,
-  agents,
+function IssueCard({
   busyAction,
-  isConnected,
-  queryResult,
-  selectedAgent,
-  onRefresh,
-  onRunQuery,
-  setAgentQuery,
-  setSelectedAgentKey
+  issue,
+  onComplete,
+  onMove,
+  onStatusChange
 }: {
-  agentQuery: string;
-  agents: AgentSummary[];
   busyAction: string;
-  isConnected: boolean;
-  queryResult: string;
-  selectedAgent: string;
-  onRefresh: () => void;
-  onRunQuery: (event: FormEvent) => void;
-  setAgentQuery: (value: string) => void;
-  setSelectedAgentKey: (key: string) => void;
+  issue: TaskBoardIssue;
+  onComplete: (issue: TaskBoardIssue) => void;
+  onMove: (issue: TaskBoardIssue, direction: -1 | 1) => void;
+  onStatusChange: (issue: TaskBoardIssue, status: TaskBoardStatus) => void;
 }) {
+  const isMoving = busyAction === `move-${issue.id}`;
+  const isCompleting = busyAction === `complete-${issue.id}`;
+  const isUpdatingStatus = busyAction === `status-${issue.id}`;
   return (
-    <section className="workspace agents-workspace">
-      <div className="section-head">
-        <div>
-          <h2>Agents</h2>
-          <p>{agents.length} available</p>
-        </div>
-        <button className="icon-button" onClick={onRefresh} disabled={!isConnected || busyAction === 'refresh-agents'} aria-label="Refresh agents">
-          <RefreshCcw size={17} className={busyAction === 'refresh-agents' ? 'spin' : ''} />
-        </button>
+    <article className={`issue-card is-priority-${issue.priority ?? 'medium'}`}>
+      <div className="issue-card-top">
+        <span className="issue-origin">Desktop</span>
+        <PriorityBadge priority={issue.priority ?? 'medium'} />
       </div>
-      <div className="agent-grid">
-        {agents.length === 0 ? <div className="empty-panel"><Bot size={18} /> No agents loaded</div> : null}
-        {agents.map((agent) => (
-          <button
-            className={`agent-card ${selectedAgent === agent.agentKey ? 'selected' : ''}`}
-            key={`${agent.source}:${agent.agentKey}`}
-            onClick={() => setSelectedAgentKey(agent.agentKey)}
-          >
-            <Bot size={18} />
-            <span>
-              <strong>{agent.displayName}</strong>
-              <small>{agent.role || agent.agentKey}</small>
-            </span>
-            {agent.unreadCount ? <em>{agent.unreadCount}</em> : null}
+      <strong className="issue-title">{issue.title}</strong>
+      {issue.description ? <p>{issue.description}</p> : null}
+      <div className="issue-meta">
+        <span>{issue.assigneeAgentName || issue.assigneeAgentKey || '未分配'}</span>
+        {issue.runState ? <span>{issue.runState}</span> : null}
+      </div>
+      <div className="issue-controls">
+        <select
+          aria-label={`更新 ${issue.title} 状态`}
+          value={issue.status}
+          onChange={(event) => onStatusChange(issue, event.target.value as TaskBoardStatus)}
+          disabled={isUpdatingStatus}
+        >
+          {visibleStatuses.map((status) => <option key={status} value={status}>{statusLabel[status]}</option>)}
+        </select>
+        <div className="issue-actions">
+          <button aria-label={`左移 ${issue.title}`} onClick={() => onMove(issue, -1)} disabled={issue.status === 'backlog' || isMoving}>
+            <ArrowLeft size={15} />
           </button>
-        ))}
-      </div>
-      <form className="agent-query" onSubmit={onRunQuery}>
-        <label>
-          <span>Agent</span>
-          <select value={selectedAgent} onChange={(event) => setSelectedAgentKey(event.target.value)} aria-label="Agent">
-            {agents.length === 0 ? <option value="zenmi">zenmi</option> : null}
-            {agents.map((agent) => (
-              <option key={`${agent.source}:${agent.agentKey}`} value={agent.agentKey}>
-                {agent.displayName}
-              </option>
-            ))}
-          </select>
-        </label>
-        <label>
-          <span>Message</span>
-          <textarea value={agentQuery} onChange={(event) => setAgentQuery(event.target.value)} aria-label="Agent message" />
-        </label>
-        <button className="primary" type="submit" disabled={!isConnected || busyAction === 'agent-query'}>
-          {busyAction === 'agent-query' ? <Loader2 className="spin" size={16} /> : <Send size={16} />}
-          Send
-        </button>
-      </form>
-      {queryResult ? (
-        <div className="query-result">
-          <MessageSquareText size={18} />
-          <p>{queryResult}</p>
+          <button aria-label={`右移 ${issue.title}`} onClick={() => onMove(issue, 1)} disabled={issue.status === 'completed' || isMoving}>
+            <ArrowRight size={15} />
+          </button>
+          <button aria-label={`完成 ${issue.title}`} onClick={() => onComplete(issue)} disabled={issue.status === 'completed' || isCompleting}>
+            <CheckCircle2 size={15} />
+          </button>
         </div>
-      ) : null}
-    </section>
+      </div>
+    </article>
   );
 }
 
-function LogsView({ logs, onClear }: { logs: LogEntry[]; onClear: () => void }) {
+function LogsPanel({ logs, onClear }: { logs: LogEntry[]; onClear: () => void }) {
   return (
-    <section className="workspace logs-workspace">
-      <div className="section-head">
+    <section className="workspace-card logs-card" aria-label="诊断日志">
+      <div className="section-head compact-head">
         <div>
-          <h2>Diagnostics</h2>
+          <h2>诊断</h2>
           <p>{logs.length} entries</p>
         </div>
         <button className="secondary compact" onClick={onClear} disabled={logs.length === 0}>
@@ -609,6 +991,15 @@ function LogsView({ logs, onClear }: { logs: LogEntry[]; onClear: () => void }) 
         ))}
       </div>
     </section>
+  );
+}
+
+function SummaryMetric({ label, value, tone }: { label: string; value: number; tone: 'neutral' | 'good' | 'progress' | 'danger' | 'violet' }) {
+  return (
+    <div className={`summary-metric ${tone}`}>
+      <strong>{value}</strong>
+      <span>{label}</span>
+    </div>
   );
 }
 
@@ -649,7 +1040,7 @@ function FeedbackLine({ feedback, onDismiss }: { feedback: Feedback; onDismiss: 
     <div className={`feedback ${feedback.tone}`}>
       {icon}
       <span>{feedback.message}</span>
-      <button onClick={onDismiss} aria-label="Dismiss" type="button">×</button>
+      <button onClick={onDismiss} aria-label="Dismiss" type="button"><X size={15} /></button>
     </div>
   );
 }
@@ -666,6 +1057,26 @@ function consumeInitialToken() {
   return result.token;
 }
 
+function filterIssues(issues: TaskBoardIssue[], query: string, priority: BoardPriorityFilter) {
+  const normalizedQuery = query.trim().toLocaleLowerCase();
+  return issues.filter((issue) => {
+    if (priority !== 'all' && (issue.priority ?? 'medium') !== priority) {
+      return false;
+    }
+    if (!normalizedQuery) {
+      return true;
+    }
+    return [
+      issue.id,
+      issue.title,
+      issue.description,
+      issue.assigneeAgentName,
+      issue.assigneeAgentKey,
+      issue.runState
+    ].some((value) => String(value || '').toLocaleLowerCase().includes(normalizedQuery));
+  });
+}
+
 function groupIssues(issues: TaskBoardIssue[]) {
   const grouped = new Map<TaskBoardStatus, TaskBoardIssue[]>();
   for (const status of visibleStatuses) {
@@ -674,11 +1085,61 @@ function groupIssues(issues: TaskBoardIssue[]) {
   for (const issue of issues) {
     grouped.get(issue.status)?.push(issue);
   }
+  for (const status of visibleStatuses) {
+    grouped.set(status, sortIssues(grouped.get(status) ?? []));
+  }
   return grouped;
 }
 
-function totalIssues(grouped: Map<TaskBoardStatus, TaskBoardIssue[]>) {
-  return [...grouped.values()].reduce((total, issues) => total + issues.length, 0);
+function sortIssues(issues: TaskBoardIssue[]) {
+  return [...issues].sort((left, right) => {
+    const priorityDelta = priorityWeight(right.priority) - priorityWeight(left.priority);
+    if (priorityDelta !== 0) {
+      return priorityDelta;
+    }
+    return String(right.updatedAt || right.createdAt || '').localeCompare(String(left.updatedAt || left.createdAt || ''));
+  });
+}
+
+function priorityWeight(priority?: TaskBoardPriority) {
+  if (priority === 'high') {
+    return 3;
+  }
+  if (priority === 'low') {
+    return 1;
+  }
+  return 2;
+}
+
+function buildIssueTotals(issues: TaskBoardIssue[]) {
+  const totals = new Map<TaskBoardStatus, number>();
+  for (const status of visibleStatuses) {
+    totals.set(status, 0);
+  }
+  for (const issue of issues) {
+    totals.set(issue.status, (totals.get(issue.status) ?? 0) + 1);
+  }
+  return totals;
+}
+
+type BoardSummary = {
+  total: number;
+  running: number;
+  reviewing: number;
+  completed: number;
+  highPriority: number;
+  unassigned: number;
+};
+
+function summarizeBoard(issues: TaskBoardIssue[]): BoardSummary {
+  return {
+    total: issues.length,
+    running: issues.filter((issue) => issue.status === 'in_progress' || issue.runState === 'running').length,
+    reviewing: issues.filter((issue) => issue.status === 'in_review').length,
+    completed: issues.filter((issue) => issue.status === 'completed').length,
+    highPriority: issues.filter((issue) => issue.priority === 'high').length,
+    unassigned: issues.filter((issue) => !issue.assigneeAgentKey && !issue.assigneeAgentName).length
+  };
 }
 
 function mergeAgents(desktop: AgentSummary[], platform: AgentSummary[]) {
@@ -714,4 +1175,12 @@ function readAgentAnswer(value: unknown) {
     }
   }
   return JSON.stringify(value, null, 2);
+}
+
+function formatClock() {
+  return new Date().toLocaleTimeString([], { hour12: false });
+}
+
+function createLocalId(prefix: string) {
+  return `${prefix}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
 }

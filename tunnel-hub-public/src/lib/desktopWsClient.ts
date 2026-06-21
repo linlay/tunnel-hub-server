@@ -80,6 +80,7 @@ export type DesktopWsSessionOptions = {
   token: string;
   WebSocketCtor?: WebSocketConstructorLike;
   requestTimeoutMs?: number;
+  connectTimeoutMs?: number;
 };
 
 type PendingRequest = {
@@ -89,6 +90,7 @@ type PendingRequest = {
 };
 
 const DEFAULT_REQUEST_TIMEOUT_MS = 12_000;
+const DEFAULT_CONNECT_TIMEOUT_MS = 12_000;
 let nextRequestCounter = 0;
 
 export function createRequestId(prefix = 'web') {
@@ -239,6 +241,7 @@ export class DesktopWsSession {
 
     return new Promise<void>((resolve, reject) => {
       let settled = false;
+      let connectTimer: ReturnType<typeof setTimeout> | undefined;
       try {
         const socket = new WebSocketCtor(socketURL);
         this.socket = socket;
@@ -248,26 +251,40 @@ export class DesktopWsSession {
             return;
           }
           settled = true;
+          if (connectTimer) {
+            clearTimeout(connectTimer);
+          }
           this.setState('open');
           resolve();
         };
-        const fail = () => {
+        const fail = (message = 'WebSocket connection failed') => {
           if (settled) {
             return;
           }
           settled = true;
+          if (connectTimer) {
+            clearTimeout(connectTimer);
+          }
           this.setState('error');
-          reject(new Error('WebSocket connection failed'));
+          reject(new Error(message));
         };
 
+        connectTimer = setTimeout(() => {
+          socket.close(1000, 'connect timeout');
+          fail('WebSocket connection timed out');
+        }, this.options.connectTimeoutMs ?? DEFAULT_CONNECT_TIMEOUT_MS);
+
         socket.addEventListener('open', finish);
-        socket.addEventListener('error', fail);
+        socket.addEventListener('error', () => fail());
         socket.addEventListener('message', (event) => this.handleMessage((event as MessageEvent).data));
         socket.addEventListener('close', () => {
           this.rejectPending(new Error('WebSocket closed'));
           this.setState(this.state === 'error' ? 'error' : 'closed');
         });
       } catch (error) {
+        if (connectTimer) {
+          clearTimeout(connectTimer);
+        }
         this.setState('error');
         reject(error instanceof Error ? error : new Error(String(error)));
       }

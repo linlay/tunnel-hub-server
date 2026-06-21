@@ -64,23 +64,25 @@ describe('App', () => {
   it('asks for a token before connecting', async () => {
     const user = userEvent.setup();
     render(<App />);
-    await user.click(screen.getByRole('button', { name: /^connect$/i }));
-    expect(screen.getByText('Token is required.')).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: '连接' }));
+    expect(screen.getByText('需要 Desktop token')).toBeInTheDocument();
     expect(FakeWebSocket.instances).toHaveLength(0);
   });
 
-  it('consumes token from the URL without leaving it in history', () => {
+  it('consumes token from the URL without leaving it in history', async () => {
     window.history.replaceState(null, '', 'https://zm123.m.zenmind.cc/?token=secret&view=board');
     render(<App />);
     expect(screen.getByLabelText('Desktop token')).toHaveValue('secret');
     expect(window.location.href).toBe('https://zm123.m.zenmind.cc/?view=board');
+    await waitFor(() => expect(FakeWebSocket.instances).toHaveLength(1));
+    expect(String(FakeWebSocket.instances[0].url)).toBe('wss://zm123.m.zenmind.cc/ws?token=secret');
   });
 
-  it('connects, loads board issues, and renders agents', async () => {
+  it('connects, loads board issues, renders agents, and moves an issue', async () => {
     const user = userEvent.setup();
     render(<App />);
     await user.type(screen.getByLabelText('Desktop token'), 'secret');
-    await user.click(screen.getByRole('button', { name: /^connect$/i }));
+    await user.click(screen.getByRole('button', { name: '连接' }));
 
     const socket = FakeWebSocket.instances[0];
     expect(String(socket.url)).toBe('wss://zm123.m.zenmind.cc/ws?token=secret');
@@ -88,84 +90,112 @@ describe('App', () => {
       socket.open();
     });
 
-    await waitFor(() => expect(socket.sent[0]?.type).toBe('session.hello'));
-    await act(async () => {
-      socket.reply(0, { protocolVersion: 1 });
+    await replyBootstrap(socket, {
+      issues: [{ id: 'ISS-1', title: 'Ship mobile board', status: 'todo', priority: 'high' }],
+      desktopAgents: [{ agentKey: 'zenmi', displayName: '小宅', role: '平台总管' }],
+      platformAgents: [{ key: 'coder', name: 'Coder', role: 'Engineering' }]
     });
-    await waitFor(() => expect(socket.sent[1]?.type).toBe('event.subscribe'));
-    await act(async () => {
-      socket.reply(1, { types: ['snapshot.updated'] });
-    });
-
-    await waitFor(() => expect(socket.sent.some((frame) => frame.type === 'snapshot.get')).toBe(true));
-    for (let index = 2; index < socket.sent.length; index += 1) {
-      if (socket.sent[index].type === 'snapshot.get') {
-        await act(async () => {
-          socket.reply(index, {
-            revision: 3,
-            issues: [{ id: 'ISS-1', title: 'Ship mobile board', status: 'todo', priority: 'high' }]
-          });
-        });
-      } else if (socket.sent[index].type === 'agent.list') {
-        await act(async () => {
-          socket.reply(index, { agents: [{ agentKey: 'zenmi', displayName: '小宅', role: '平台总管' }] });
-        });
-      } else if (socket.sent[index].type === '/api/agents') {
-        await act(async () => {
-          socket.reply(index, { agents: [{ key: 'coder', name: 'Coder', role: 'Engineering' }] });
-        });
-      }
-    }
 
     expect(await screen.findByText('Ship mobile board')).toBeInTheDocument();
-    await user.click(screen.getByRole('button', { name: /agents/i }));
-    const agentPanel = screen.getByRole('heading', { name: 'Agents' }).closest('section')!;
-    expect(await within(agentPanel).findByRole('option', { name: '小宅' })).toBeInTheDocument();
-    expect(within(agentPanel).getByRole('option', { name: 'Coder' })).toBeInTheDocument();
+    const agentSelect = screen.getByRole('combobox', { name: '选择智能体' });
+    expect(within(agentSelect).getByRole('option', { name: '小宅' })).toBeInTheDocument();
+    expect(within(agentSelect).getByRole('option', { name: 'Coder' })).toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: '右移 Ship mobile board' }));
+    await waitFor(() => expect(socket.sent.some((frame) => frame.type === 'issue.move')).toBe(true));
+    const moveIndex = socket.sent.findIndex((frame) => frame.type === 'issue.move');
+    expect(socket.sent[moveIndex].payload).toMatchObject({ issueId: 'ISS-1', status: 'in_progress' });
+    await act(async () => {
+      socket.reply(moveIndex, { issue: { id: 'ISS-1', title: 'Ship mobile board', status: 'in_progress', priority: 'high' } });
+    });
   });
 
-  it('shows agent query failures', async () => {
+  it('appends agent replies and shows agent query failures', async () => {
     const user = userEvent.setup();
     render(<App />);
-    await user.click(screen.getByRole('button', { name: /agents/i }));
     await user.type(screen.getByLabelText('Desktop token'), 'secret');
-    await user.click(screen.getByRole('button', { name: /^connect$/i }));
+    await user.click(screen.getByRole('button', { name: '连接' }));
     const socket = FakeWebSocket.instances[0];
     await act(async () => {
       socket.open();
     });
 
-    await waitFor(() => expect(socket.sent[0]?.type).toBe('session.hello'));
-    await act(async () => {
-      socket.reply(0, {});
+    await replyBootstrap(socket, {
+      issues: [],
+      desktopAgents: [{ agentKey: 'zenmi', displayName: '小宅', role: '平台总管' }],
+      platformAgents: []
     });
-    await waitFor(() => expect(socket.sent[1]?.type).toBe('event.subscribe'));
-    await act(async () => {
-      socket.reply(1, {});
-    });
-    await waitFor(() => expect(socket.sent.length).toBeGreaterThanOrEqual(5));
-    for (let index = 2; index < socket.sent.length; index += 1) {
-      await act(async () => {
-        socket.reply(index, socket.sent[index].type === 'snapshot.get' ? { issues: [] } : { agents: [] });
-      });
-    }
 
-    const agentPanel = screen.getByRole('heading', { name: 'Agents' }).closest('section')!;
-    await user.click(within(agentPanel).getByRole('button', { name: /send/i }));
+    await user.clear(screen.getByLabelText('Agent message'));
+    await user.type(screen.getByLabelText('Agent message'), '你好');
+    await user.click(screen.getByRole('button', { name: '发送' }));
     await waitFor(() => expect(socket.sent.some((frame) => frame.type === '/api/query')).toBe(true));
     const queryIndex = socket.sent.findIndex((frame) => frame.type === '/api/query');
-    const queryFrame = socket.sent[queryIndex];
+    expect(socket.sent[queryIndex].payload).toMatchObject({ agentKey: 'zenmi', message: '你好', stream: false });
+    await act(async () => {
+      socket.reply(queryIndex, { answer: '你好，我在。' });
+    });
+
+    expect(await screen.findByText('你好，我在。')).toBeInTheDocument();
+
+    await user.type(screen.getByLabelText('Agent message'), '再试一次');
+    await user.click(screen.getByRole('button', { name: '发送' }));
+    const failureIndex = lastFrameIndex(socket.sent, '/api/query');
     await act(async () => {
       socket.message({
         ns: 'ap',
         frame: 'error',
         type: '/api/query',
-        id: queryFrame.id,
+        id: socket.sent[failureIndex].id,
         code: 503,
         msg: 'agent-platform is not running'
       });
     });
 
-    expect(await screen.findByText('agent-platform is not running')).toBeInTheDocument();
+    expect(await screen.findAllByText('agent-platform is not running')).not.toHaveLength(0);
   });
 });
+
+async function replyBootstrap(
+  socket: FakeWebSocket,
+  data: {
+    issues: unknown[];
+    desktopAgents: unknown[];
+    platformAgents: unknown[];
+  }
+) {
+  await waitFor(() => expect(socket.sent[0]?.type).toBe('session.hello'));
+  await act(async () => {
+    socket.reply(0, { protocolVersion: 1 });
+  });
+  await waitFor(() => expect(socket.sent[1]?.type).toBe('event.subscribe'));
+  await act(async () => {
+    socket.reply(1, { types: ['snapshot.updated'] });
+  });
+
+  await waitFor(() => expect(socket.sent.some((frame) => frame.type === 'snapshot.get')).toBe(true));
+  for (let index = 2; index < socket.sent.length; index += 1) {
+    if (socket.sent[index].type === 'snapshot.get') {
+      await act(async () => {
+        socket.reply(index, { revision: 3, issues: data.issues });
+      });
+    } else if (socket.sent[index].type === 'agent.list') {
+      await act(async () => {
+        socket.reply(index, { agents: data.desktopAgents });
+      });
+    } else if (socket.sent[index].type === '/api/agents') {
+      await act(async () => {
+        socket.reply(index, { agents: data.platformAgents });
+      });
+    }
+  }
+}
+
+function lastFrameIndex(frames: Array<Record<string, unknown>>, type: string) {
+  for (let index = frames.length - 1; index >= 0; index -= 1) {
+    if (frames[index].type === type) {
+      return index;
+    }
+  }
+  return -1;
+}
