@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"strings"
 	"sync/atomic"
@@ -24,6 +25,7 @@ type Relay struct {
 	MaxRequestBodyBytes int64
 	DesktopBaseDomain   string
 	WebAppBaseDomain    string
+	trustedProxyCIDRs   []*net.IPNet
 }
 
 func NewRelay(db *store.DB, manager *Manager, logger *slog.Logger, maxRequestBodyBytes int64) *Relay {
@@ -52,7 +54,12 @@ func (r *Relay) SetPublicBaseDomains(desktopBaseDomain, webAppBaseDomain string)
 	}
 }
 
+func (r *Relay) SetTrustedProxyCIDRs(value string) {
+	r.trustedProxyCIDRs = parseTrustedProxyCIDRs(value)
+}
+
 func (r *Relay) HandleTunnel(w http.ResponseWriter, req *http.Request) {
+	clientRemoteAddr := r.clientRemoteAddr(req)
 	rawToken := bearerToken(req.Header.Get("Authorization"))
 	if rawToken != "" {
 		token, err := r.DB.FindActiveTokenBySecret(req.Context(), rawToken)
@@ -66,7 +73,7 @@ func (r *Relay) HandleTunnel(w http.ResponseWriter, req *http.Request) {
 			r.Logger.Error("upgrade tunnel websocket", "error", err)
 			return
 		}
-		r.serveTunnelSession(req, ws, token.ID, nil)
+		r.serveTunnelSession(req, ws, token.ID, clientRemoteAddr, nil)
 		return
 	}
 
@@ -92,7 +99,7 @@ func (r *Relay) HandleTunnel(w http.ResponseWriter, req *http.Request) {
 		_ = ws.WriteJSON(tunnel.NewErrorResponse(tunnel.NamespaceDesktop, tunnel.TypeTunnelOpen, open.ID, http.StatusUnauthorized, "invalid agent token"))
 		return
 	}
-	dbSession, err := r.DB.CreateAgentSession(req.Context(), token.ID, req.RemoteAddr)
+	dbSession, err := r.DB.CreateAgentSession(req.Context(), token.ID, clientRemoteAddr)
 	if err != nil {
 		r.Logger.Error("create agent session", "error", err)
 		_ = ws.WriteJSON(tunnel.NewErrorResponse(tunnel.NamespaceDesktop, tunnel.TypeTunnelOpen, open.ID, http.StatusInternalServerError, "create agent session failed"))
@@ -107,10 +114,10 @@ func (r *Relay) HandleTunnel(w http.ResponseWriter, req *http.Request) {
 		r.Logger.Error("write tunnel.open response", "error", err)
 		return
 	}
-	r.serveTunnelSession(req, ws, token.ID, &dbSession)
+	r.serveTunnelSession(req, ws, token.ID, clientRemoteAddr, &dbSession)
 }
 
-func (r *Relay) serveTunnelSession(req *http.Request, ws *websocket.Conn, tokenID string, dbSession *store.AgentSession) {
+func (r *Relay) serveTunnelSession(req *http.Request, ws *websocket.Conn, tokenID, clientRemoteAddr string, dbSession *store.AgentSession) {
 	conn := tunnel.NewWebSocketNetConn(ws)
 	config := yamux.DefaultConfig()
 	config.EnableKeepAlive = true
@@ -126,7 +133,7 @@ func (r *Relay) serveTunnelSession(req *http.Request, ws *websocket.Conn, tokenI
 	}
 
 	if dbSession == nil {
-		nextSession, err := r.DB.CreateAgentSession(req.Context(), tokenID, req.RemoteAddr)
+		nextSession, err := r.DB.CreateAgentSession(req.Context(), tokenID, clientRemoteAddr)
 		if err != nil {
 			_ = session.Close()
 			r.Logger.Error("create agent session", "error", err)
@@ -139,11 +146,11 @@ func (r *Relay) serveTunnelSession(req *http.Request, ws *websocket.Conn, tokenI
 	r.Manager.SetActive(&ActiveAgent{
 		SessionID:   dbSession.ID,
 		TokenID:     tokenID,
-		RemoteAddr:  req.RemoteAddr,
+		RemoteAddr:  clientRemoteAddr,
 		ConnectedAt: dbSession.ConnectedAt,
 		Yamux:       session,
 	})
-	r.Logger.Info("agent connected", "session", dbSession.ID, "remote", req.RemoteAddr)
+	r.Logger.Info("agent connected", "session", dbSession.ID, "remote", clientRemoteAddr)
 
 	<-session.CloseChan()
 
@@ -578,6 +585,86 @@ func bearerToken(header string) string {
 		return ""
 	}
 	return strings.TrimSpace(strings.TrimPrefix(header, prefix))
+}
+
+func parseTrustedProxyCIDRs(value string) []*net.IPNet {
+	parts := strings.Split(value, ",")
+	networks := make([]*net.IPNet, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		_, network, err := net.ParseCIDR(part)
+		if err != nil {
+			continue
+		}
+		networks = append(networks, network)
+	}
+	return networks
+}
+
+func (r *Relay) clientRemoteAddr(req *http.Request) string {
+	remoteAddr := strings.TrimSpace(req.RemoteAddr)
+	if !r.isTrustedProxyRemoteAddr(remoteAddr) {
+		return remoteAddr
+	}
+	if ip := parseHeaderIP(req.Header.Get("X-Real-IP")); ip != "" {
+		return ip
+	}
+	if ip := parseLastForwardedForIP(req.Header.Get("X-Forwarded-For")); ip != "" {
+		return ip
+	}
+	return remoteAddr
+}
+
+func (r *Relay) isTrustedProxyRemoteAddr(remoteAddr string) bool {
+	if len(r.trustedProxyCIDRs) == 0 {
+		return false
+	}
+	ip := parseRemoteAddrIP(remoteAddr)
+	if ip == nil {
+		return false
+	}
+	for _, network := range r.trustedProxyCIDRs {
+		if network.Contains(ip) {
+			return true
+		}
+	}
+	return false
+}
+
+func parseRemoteAddrIP(remoteAddr string) net.IP {
+	host, _, err := net.SplitHostPort(strings.TrimSpace(remoteAddr))
+	if err != nil {
+		host = remoteAddr
+	}
+	return net.ParseIP(strings.Trim(strings.TrimSpace(host), "[]"))
+}
+
+func parseLastForwardedForIP(value string) string {
+	parts := strings.Split(value, ",")
+	for i := len(parts) - 1; i >= 0; i-- {
+		if ip := parseHeaderIP(parts[i]); ip != "" {
+			return ip
+		}
+	}
+	return ""
+}
+
+func parseHeaderIP(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	if host, _, err := net.SplitHostPort(value); err == nil {
+		value = host
+	}
+	ip := net.ParseIP(strings.Trim(value, "[]"))
+	if ip == nil {
+		return ""
+	}
+	return ip.String()
 }
 
 func normalizeBaseDomain(host string) string {

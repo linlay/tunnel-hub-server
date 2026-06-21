@@ -29,3 +29,12 @@ func TestLoadRelayConfigSupportsDesktopPublicBaseDomain(t *testing.T) {
 		t.Fatalf("WebAppPublicBaseDomain = %q, want wa.example.test", cfg.WebAppPublicBaseDomain)
 	}
 }
+
+func TestLoadRelayConfigSupportsTrustedProxyCIDRs(t *testing.T) {
+	t.Setenv("TRUSTED_PROXY_CIDRS", "172.23.0.1/32,127.0.0.1/32,::1/128")
+
+	cfg := LoadRelayConfig()
+	if cfg.TrustedProxyCIDRs != "172.23.0.1/32,127.0.0.1/32,::1/128" {
+		t.Fatalf("TrustedProxyCIDRs = %q", cfg.TrustedProxyCIDRs)
+	}
+}

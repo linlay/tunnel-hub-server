@@ -140,6 +140,60 @@ func TestRelayTunnelFirstFrameAuthStartsYamux(t *testing.T) {
 	waitForAgentToken(t, manager, token.ID)
 }
 
+func TestRelayTunnelTrustedProxyRemoteAddrPersistsToSessionAndManager(t *testing.T) {
+	db := openProxyTestDB(t)
+	manager := NewManager()
+	relay := NewRelay(db, manager, nil, 64<<20)
+	relay.SetTrustedProxyCIDRs("127.0.0.1/32")
+	server := httptest.NewServer(http.HandlerFunc(relay.HandleTunnel))
+	defer server.Close()
+
+	raw, token := createProxyToken(t, db, "desktop")
+	ws, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(server.URL, "http"), http.Header{
+		"X-Real-IP":       []string{"203.0.113.24"},
+		"X-Forwarded-For": []string{"198.51.100.99, 203.0.113.24"},
+	})
+	if err != nil {
+		t.Fatalf("dial tunnel: %v", err)
+	}
+	defer ws.Close()
+	if err := ws.WriteJSON(tunnel.NewStreamRequest(tunnel.NamespaceDesktop, tunnel.FrameRequest, tunnel.TypeTunnelOpen, "tun_1", &tunnel.StreamPayload{
+		AgentToken: raw,
+		DeviceID:   "desktop-1",
+		Client:     "zenmind-desktop",
+	})); err != nil {
+		t.Fatalf("write tunnel.open: %v", err)
+	}
+	var response tunnel.StreamResponse
+	if err := ws.ReadJSON(&response); err != nil {
+		t.Fatalf("read tunnel.open response: %v", err)
+	}
+	if response.Data == nil || response.Data.SessionID == "" {
+		t.Fatalf("tunnel.open response = %#v", response)
+	}
+	session, err := yamux.Client(tunnel.NewWebSocketNetConn(ws), yamux.DefaultConfig())
+	if err != nil {
+		t.Fatalf("start yamux client: %v", err)
+	}
+	defer session.Close()
+	waitForAgentToken(t, manager, token.ID)
+
+	stored, err := db.GetAgentSession(context.Background(), response.Data.SessionID)
+	if err != nil {
+		t.Fatalf("get agent session: %v", err)
+	}
+	if stored.RemoteAddr != "203.0.113.24" {
+		t.Fatalf("stored RemoteAddr = %q", stored.RemoteAddr)
+	}
+	active, ok := manager.ActiveAgentForToken(token.ID)
+	if !ok {
+		t.Fatal("active agent not found")
+	}
+	if active.RemoteAddr != "203.0.113.24" {
+		t.Fatalf("active RemoteAddr = %q", active.RemoteAddr)
+	}
+}
+
 func TestRelayTunnelFirstFrameInvalidTokenReturnsStandardError(t *testing.T) {
 	db := openProxyTestDB(t)
 	manager := NewManager()
