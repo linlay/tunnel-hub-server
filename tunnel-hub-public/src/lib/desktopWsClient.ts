@@ -65,10 +65,26 @@ export type TaskBoardSnapshot = {
   [key: string]: unknown;
 };
 
+export type PublicChatSummary = {
+  chatId: string;
+  chatName: string;
+  agentKey?: string;
+  updatedAt?: string;
+  lastRunContent?: string;
+  hasActiveRun?: boolean;
+  hasPendingAwaiting?: boolean;
+  [key: string]: unknown;
+};
+
 export type AgentSummary = {
   agentKey: string;
   displayName: string;
   role?: string;
+  wonders?: string[];
+  greetings?: string[];
+  recentChats?: PublicChatSummary[];
+  latestChatId?: string | null;
+  chatCount?: number;
   unreadCount?: number;
   source?: 'desktop' | 'agent-platform';
   [key: string]: unknown;
@@ -219,11 +235,21 @@ export function normalizeAgents(value: unknown, source: 'desktop' | 'agent-platf
         return null;
       }
       const role = readString(record.role);
+      const recentChats = normalizeChatSummaries(
+        record.recentChats ?? record.chats ?? record.relatedChats ?? record.chatList ?? record.conversations,
+        agentKey
+      );
+      const latestChatId = readString(record.latestChatId) || recentChats[0]?.chatId || null;
       return {
         ...record,
         agentKey,
         displayName,
         role: role || undefined,
+        wonders: normalizeTextList(record.wonders),
+        greetings: normalizeTextList(record.greetings),
+        recentChats,
+        latestChatId,
+        chatCount: readNumber(record.chatCount ?? nestedStats.totalCount),
         unreadCount: readNumber(record.unreadCount ?? nestedStats.unreadCount),
         source
       };
@@ -514,6 +540,74 @@ function normalizePriority(value: unknown): TaskBoardPriority {
   return 'medium';
 }
 
+function normalizeTextList(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value
+    .map((item) => readString(item))
+    .filter(Boolean);
+}
+
+export function normalizePublicChatSummaries(value: unknown, fallbackAgentKey = ''): PublicChatSummary[] {
+  const root = asRecord(value);
+  const candidates = Array.isArray(root.chats)
+    ? root.chats
+    : Array.isArray(root.items)
+      ? root.items
+      : Array.isArray(root.results)
+        ? root.results
+        : Array.isArray(value)
+          ? value
+          : [];
+  return normalizeChatSummaries(candidates, fallbackAgentKey);
+}
+
+function normalizeChatSummaries(value: unknown, fallbackAgentKey = ''): PublicChatSummary[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value
+    .map((item) => normalizeChatSummary(item, fallbackAgentKey))
+    .filter((item): item is PublicChatSummary => Boolean(item));
+}
+
+function normalizeChatSummary(value: unknown, fallbackAgentKey = ''): PublicChatSummary | null {
+  const record = asRecord(value);
+  const chatId = readString(record.chatId) || readString(record.id);
+  if (!chatId) {
+    return null;
+  }
+  const lastRunContent =
+    readString(record.lastRunContent) ||
+    readString(record.lastMessage) ||
+    readString(record.preview) ||
+    readString(record.message);
+  const chatName =
+    readString(record.chatName) ||
+    readString(record.name) ||
+    readString(record.title) ||
+    lastRunContent ||
+    '新对话';
+  return {
+    ...record,
+    chatId,
+    chatName,
+    agentKey: readString(record.agentKey) || readString(record.workerKey) || fallbackAgentKey || undefined,
+    updatedAt: normalizeDateText(record.updatedAt ?? record.createdAt),
+    lastRunContent,
+    hasActiveRun: readBoolean(record.hasActiveRun) || ['running', 'active', 'in_progress'].includes(readString(record.status).toLowerCase()),
+    hasPendingAwaiting: readBoolean(record.hasPendingAwaiting) || readBoolean(record.awaiting)
+  };
+}
+
+function normalizeDateText(value: unknown) {
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return new Date(value).toISOString();
+  }
+  return readString(value);
+}
+
 function asRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {};
 }
@@ -525,4 +619,8 @@ function readString(value: unknown) {
 function readNumber(value: unknown) {
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+function readBoolean(value: unknown) {
+  return value === true;
 }

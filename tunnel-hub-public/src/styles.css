@@ -221,7 +221,7 @@ label {
 .connect-actions,
 .copilot-tools,
 .issue-actions,
-.composer-footer {
+.drawer-actions {
   display: flex;
   align-items: center;
   gap: 8px;
@@ -445,7 +445,7 @@ label {
 .copilot-card {
   grid-area: copilot;
   display: grid;
-  grid-template-rows: auto auto minmax(0, 1fr) auto;
+  grid-template-rows: auto minmax(0, 1fr) auto;
 }
 
 .board-card {
@@ -481,21 +481,18 @@ label {
   align-items: flex-start;
 }
 
-.section-head h2,
-.copilot-title h2 {
+.section-head h2 {
   margin: 0;
   color: var(--text-strong);
   font-size: 18px;
   letter-spacing: 0;
 }
 
-.compact-head h2,
-.copilot-title h2 {
+.compact-head h2 {
   font-size: 16px;
 }
 
-.section-head p,
-.copilot-title p {
+.section-head p {
   margin: 3px 0 0;
   color: var(--muted);
   font-size: 12px;
@@ -681,39 +678,12 @@ label {
   padding: 12px;
 }
 
-.copilot-title {
-  display: flex;
-  min-width: 0;
-  align-items: center;
-  gap: 10px;
-}
-
-.panel-icon {
-  display: grid;
-  width: 34px;
-  height: 34px;
-  flex: 0 0 34px;
-  place-items: center;
-  border-radius: 8px;
-  background: var(--accent-soft);
-  color: var(--accent);
-}
-
 .copilot-tools {
   min-width: min(280px, 45%);
 }
 
 .copilot-tools select {
   min-width: 148px;
-}
-
-.copilot-metrics {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 8px;
-  border-bottom: 1px solid var(--border-soft);
-  padding: 10px 12px;
-  background: color-mix(in srgb, var(--panel-soft) 72%, transparent);
 }
 
 .message-stream {
@@ -854,16 +824,6 @@ label {
 .composer textarea {
   min-height: 86px;
   max-height: 220px;
-}
-
-.composer-footer {
-  justify-content: space-between;
-}
-
-.composer-footer span {
-  color: var(--muted);
-  font-size: 12px;
-  font-weight: 700;
 }
 
 .create-issue {
@@ -1265,8 +1225,7 @@ label {
 
   .connect-actions .primary,
   .connect-actions .secondary,
-  .create-issue .primary,
-  .composer-footer .primary {
+  .create-issue .primary {
     width: 100%;
   }
 
@@ -1295,7 +1254,7 @@ label {
   }
 
   .copilot-card {
-    grid-template-rows: auto auto minmax(360px, 1fr) auto;
+    grid-template-rows: auto minmax(360px, 1fr) auto;
   }
 
   .copilot-header {
@@ -1312,21 +1271,12 @@ label {
     min-width: 0;
   }
 
-  .copilot-metrics {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-
   .prompt-grid {
     grid-template-columns: 1fr;
   }
 
   .chat-message {
     max-width: 96%;
-  }
-
-  .composer-footer {
-    align-items: stretch;
-    flex-direction: column;
   }
 
   .board-status-switcher {
@@ -1520,7 +1470,7 @@ label {
 .copilot-tools {
   display: grid;
   min-width: 0;
-  grid-template-columns: auto minmax(150px, 230px) 38px 38px;
+  grid-template-columns: auto minmax(150px, 230px) 38px 38px 38px;
   gap: 7px;
   align-items: center;
 }
@@ -1540,52 +1490,18 @@ label {
   min-width: 0;
 }
 
-.summary-strip {
-  display: flex;
-  min-width: 0;
-  justify-content: flex-end;
-  gap: 6px;
-}
-
-.summary-chip {
+.chat-session-chip {
   display: inline-flex;
-  min-height: 26px;
+  min-height: 28px;
   align-items: center;
-  gap: 5px;
   border: 1px solid var(--border-soft);
   border-radius: 7px;
   background: var(--panel-soft);
   color: var(--muted);
   padding: 0 8px;
   font-size: 12px;
-  font-weight: 780;
+  font-weight: 820;
   white-space: nowrap;
-}
-
-.summary-chip strong {
-  color: var(--text-strong);
-  font-size: 13px;
-}
-
-.summary-chip.good {
-  background: var(--good-soft);
-  color: var(--good);
-}
-
-.summary-chip.progress {
-  background: var(--warn-soft);
-  color: var(--warn);
-}
-
-.summary-chip.violet {
-  background: var(--violet-soft);
-  color: var(--violet);
-}
-
-.summary-chip.good strong,
-.summary-chip.progress strong,
-.summary-chip.violet strong {
-  color: currentColor;
 }
 
 .message-stream {
@@ -1599,24 +1515,61 @@ label {
   min-height: 0;
   align-content: start;
   justify-items: stretch;
-  gap: 9px;
+  gap: 10px;
   margin: 0 auto;
-  padding: clamp(16px, 8vh, 56px) 8px 16px;
+  padding: clamp(12px, 5vh, 34px) 8px 16px;
 }
 
-.empty-chat-mark {
-  display: inline-flex;
+.wonder-header {
+  display: flex;
   align-items: center;
-  justify-self: center;
-  gap: 7px;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 0 2px;
+}
+
+.wonder-header span {
+  color: var(--accent);
+  font-size: 12px;
+  font-weight: 860;
+}
+
+.wonder-header button {
+  display: grid;
+  width: 28px;
+  height: 28px;
+  place-items: center;
+  border: 1px solid var(--border-soft);
+  border-radius: 7px;
+  background: var(--panel);
+  color: var(--muted);
+}
+
+.wonder-header button:hover {
+  border-color: color-mix(in srgb, var(--accent) 32%, var(--border));
+  color: var(--accent);
+}
+
+.empty-chat-hint {
+  margin: 0;
   color: var(--muted);
   font-size: 13px;
-  font-weight: 850;
+  font-weight: 760;
+  text-align: center;
 }
 
 .prompt-grid button {
   min-height: 38px;
   border-radius: 8px;
+  align-items: flex-start;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.prompt-grid button span {
+  color: var(--accent);
+  font-size: 11px;
+  font-weight: 860;
 }
 
 .message-bubble {
@@ -1648,9 +1601,26 @@ label {
   padding: 8px 10px 10px;
 }
 
-.composer textarea {
+.composer-box {
+  position: relative;
+}
+
+.composer-box textarea {
   min-height: 64px;
   max-height: 170px;
+  padding-right: 54px;
+  resize: none;
+}
+
+.composer-send {
+  position: absolute;
+  right: 8px;
+  bottom: 8px;
+  width: 38px;
+  min-width: 0;
+  height: 38px;
+  padding: 0;
+  border-radius: 8px;
 }
 
 .board-card {
@@ -1672,7 +1642,8 @@ label {
 }
 
 .auth-modal,
-.diagnostics-drawer {
+.diagnostics-drawer,
+.history-drawer {
   border: 1px solid var(--border);
   border-radius: 8px;
   background: var(--panel);
@@ -1686,8 +1657,7 @@ label {
   padding: 16px;
 }
 
-.auth-modal header,
-.diagnostics-drawer > header {
+.auth-modal header {
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
@@ -1695,14 +1665,16 @@ label {
 }
 
 .auth-modal h2,
-.diagnostics-drawer h2 {
+.diagnostics-drawer h2,
+.history-drawer h2 {
   margin: 0;
   color: var(--text-strong);
   font-size: 18px;
 }
 
 .auth-modal p,
-.diagnostics-drawer p {
+.diagnostics-drawer p,
+.history-drawer p {
   margin: 4px 0 0;
   color: var(--muted);
   font-size: 12px;
@@ -1723,14 +1695,84 @@ label {
   justify-content: flex-end;
 }
 
-.diagnostics-drawer {
+.diagnostics-drawer,
+.history-drawer {
   display: grid;
   width: min(440px, 100%);
   height: 100%;
-  grid-template-rows: auto auto minmax(0, 1fr);
   gap: 12px;
   border-radius: 8px 0 0 8px;
   padding: 14px;
+}
+
+.diagnostics-drawer {
+  grid-template-rows: auto auto minmax(0, 1fr);
+}
+
+.history-drawer {
+  grid-template-rows: auto minmax(0, 1fr);
+}
+
+.history-drawer > header,
+.diagnostics-drawer > header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.history-list {
+  display: grid;
+  min-height: 0;
+  align-content: start;
+  gap: 8px;
+  overflow-y: auto;
+}
+
+.history-row {
+  display: grid;
+  min-height: 62px;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: center;
+  border: 1px solid var(--border-soft);
+  border-radius: 8px;
+  background: var(--panel);
+  padding: 9px 10px;
+  color: var(--text);
+  text-align: left;
+}
+
+.history-row:hover:not(:disabled),
+.history-row.active {
+  border-color: color-mix(in srgb, var(--accent) 36%, var(--border));
+  background: var(--accent-soft);
+}
+
+.history-row span {
+  display: grid;
+  min-width: 0;
+  gap: 4px;
+}
+
+.history-row strong,
+.history-row small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.history-row strong {
+  color: var(--text-strong);
+  font-size: 13px;
+  font-weight: 860;
+}
+
+.history-row small,
+.history-row time {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 720;
 }
 
 .diagnostic-section {
@@ -1856,7 +1898,7 @@ label {
   }
 
   .copilot-header {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr) auto;
     align-items: stretch;
     gap: 5px;
     padding: 5px;
@@ -1864,27 +1906,18 @@ label {
 
   .copilot-tools {
     width: 100%;
-    grid-template-columns: minmax(0, 1fr) 36px 36px;
+    grid-template-columns: minmax(0, 1fr) 36px 36px 36px;
   }
 
   .agent-inline-label {
     display: none;
   }
 
-  .summary-strip {
-    justify-content: flex-start;
-    overflow-x: auto;
-    padding-bottom: 1px;
-  }
-
-  .summary-chip {
-    min-height: 22px;
-    padding: 0 6px;
+  .chat-session-chip {
+    min-height: 36px;
+    align-self: stretch;
+    padding: 0 7px;
     font-size: 11px;
-  }
-
-  .summary-chip strong {
-    font-size: 12px;
   }
 
   .message-stream {
@@ -1900,18 +1933,9 @@ label {
     padding: 7px;
   }
 
-  .composer textarea {
+  .composer-box textarea {
     min-height: 58px;
     max-height: 132px;
-  }
-
-  .composer-footer {
-    align-items: center;
-    flex-direction: row;
-  }
-
-  .composer-footer .primary {
-    width: auto;
   }
 
   .auth-modal {

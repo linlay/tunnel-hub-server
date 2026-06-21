@@ -130,10 +130,10 @@ describe('App', () => {
     await act(async () => {
       socket.reply(1, { types: ['snapshot.updated'] });
     });
-    await waitFor(() => expect(socket.sent.some((frame) => frame.type === '/api/agents')).toBe(true));
+    await waitFor(() => expect(socket.sent.some((frame) => isFrameType(frame, '/api/agents'))).toBe(true));
     const snapshotIndex = socket.sent.findIndex((frame) => frame.type === 'snapshot.get');
     const desktopAgentsIndex = socket.sent.findIndex((frame) => frame.type === 'agent.list');
-    const platformAgentsIndex = socket.sent.findIndex((frame) => frame.type === '/api/agents');
+    const platformAgentsIndex = socket.sent.findIndex((frame) => isFrameType(frame, '/api/agents'));
     await act(async () => {
       socket.reply(snapshotIndex, { revision: 1, issues: [] });
       socket.message({
@@ -195,6 +195,122 @@ describe('App', () => {
     });
 
     expect(await screen.findAllByText('agent-platform is not running')).not.toHaveLength(0);
+  });
+
+  it('keeps chatId for continuous conversations after chat creation', async () => {
+    const user = userEvent.setup();
+    render(<App />);
+    await user.type(screen.getByLabelText('Desktop token'), 'secret');
+    await user.click(screen.getByRole('button', { name: '连接' }));
+    const socket = FakeWebSocket.instances[0];
+    await act(async () => {
+      socket.open();
+    });
+
+    await replyBootstrap(socket, {
+      issues: [],
+      desktopAgents: [],
+      platformAgents: [{ key: 'zenmi', name: 'zenmi', role: 'Copilot' }]
+    });
+
+    await user.type(screen.getByLabelText('Agent message'), '第一条');
+    await user.click(screen.getByRole('button', { name: '发送' }));
+    const firstQueryIndex = lastFrameIndex(socket.sent, '/api/query');
+    expect(socket.sent[firstQueryIndex].payload).toMatchObject({ agentKey: 'zenmi', message: '第一条' });
+    expect(socket.sent[firstQueryIndex].payload).not.toHaveProperty('chatId');
+    const firstId = socket.sent[firstQueryIndex].id;
+    await act(async () => {
+      socket.message({
+        ns: 'ap',
+        frame: 'push',
+        type: 'chat.created',
+        data: { agentKey: 'zenmi', chatId: 'chat_keep', chatName: '第一条' }
+      });
+      socket.message({
+        ns: 'ap',
+        frame: 'stream',
+        type: '/api/query',
+        id: firstId,
+        event: { type: 'content.delta', chatId: 'chat_keep', delta: '收到。' }
+      });
+      socket.message({
+        ns: 'ap',
+        frame: 'stream',
+        type: '/api/query',
+        id: firstId,
+        reason: 'done',
+        lastSeq: 2
+      });
+    });
+    expect(await screen.findByText('#chat_keep')).toBeInTheDocument();
+
+    await user.type(screen.getByLabelText('Agent message'), '第二条');
+    await user.click(screen.getByRole('button', { name: '发送' }));
+    const secondQueryIndex = lastFrameIndex(socket.sent, '/api/query');
+    expect(socket.sent[secondQueryIndex].payload).toMatchObject({
+      agentKey: 'zenmi',
+      chatId: 'chat_keep',
+      message: '第二条'
+    });
+  });
+
+  it('renders agent wonders and loads current-agent chat history', async () => {
+    const user = userEvent.setup();
+    render(<App />);
+    await user.type(screen.getByLabelText('Desktop token'), 'secret');
+    await user.click(screen.getByRole('button', { name: '连接' }));
+    const socket = FakeWebSocket.instances[0];
+    await act(async () => {
+      socket.open();
+    });
+
+    await replyBootstrap(socket, {
+      issues: [],
+      desktopAgents: [],
+      platformAgents: [{
+        key: 'zenmi',
+        name: 'zenmi',
+        role: 'Copilot',
+        wonders: ['介绍你能做什么', '帮我整理今天的计划', '写一段团队进展'],
+        recentChats: [{
+          chatId: 'chat_1',
+          chatName: '昨天的计划',
+          agentKey: 'zenmi',
+          updatedAt: '2026-06-21T08:00:00.000Z',
+          lastRunContent: '昨天已经整理好了。'
+        }]
+      }]
+    });
+
+    expect(await screen.findByText('妙问')).toBeInTheDocument();
+    expect(screen.getByText('介绍你能做什么')).toBeInTheDocument();
+    expect(screen.queryByText('总结当前看板状态，并指出最值得先处理的任务')).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: '历史对话' }));
+    expect(await screen.findByText('昨天的计划')).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: /昨天的计划/ }));
+    await waitFor(() => expect(socket.sent.some((frame) => String(frame.type).startsWith('/api/chat?chatId=chat_1'))).toBe(true));
+    const detailIndex = socket.sent.findIndex((frame) => String(frame.type).startsWith('/api/chat?chatId=chat_1'));
+    await act(async () => {
+      socket.reply(detailIndex, {
+        chatId: 'chat_1',
+        chatName: '昨天的计划',
+        runs: [{
+          runId: 'run_1',
+          initialMessage: '昨天做了什么',
+          assistantText: '昨天完成了 public mini site 部署。',
+          startedAt: 1782040000000,
+          completedAt: 1782040005000
+        }]
+      });
+    });
+
+    expect(await screen.findByText('昨天做了什么')).toBeInTheDocument();
+    expect(screen.getByText('昨天完成了 public mini site 部署。')).toBeInTheDocument();
+    await user.type(screen.getByLabelText('Agent message'), '继续');
+    await user.click(screen.getByRole('button', { name: '发送' }));
+    const queryIndex = lastFrameIndex(socket.sent, '/api/query');
+    expect(socket.sent[queryIndex].payload).toMatchObject({ chatId: 'chat_1', message: '继续' });
   });
 
   it('renders agent stream reasoning and content before stream completion', async () => {
@@ -288,7 +404,7 @@ async function replyBootstrap(
       await act(async () => {
         socket.reply(index, { agents: data.desktopAgents });
       });
-    } else if (socket.sent[index].type === '/api/agents') {
+    } else if (isFrameType(socket.sent[index], '/api/agents')) {
       await act(async () => {
         socket.reply(index, { agents: data.platformAgents });
       });
@@ -303,4 +419,8 @@ function lastFrameIndex(frames: Array<Record<string, unknown>>, type: string) {
     }
   }
   return -1;
+}
+
+function isFrameType(frame: Record<string, unknown>, type: string) {
+  return String(frame.type || '').startsWith(type);
 }

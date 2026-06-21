@@ -7,19 +7,19 @@ import {
   CheckCircle2,
   Circle,
   ClipboardList,
+  History,
   KeyRound,
   LayoutDashboard,
   ListChecks,
   Loader2,
   MessageCircle,
-  MessageSquareText,
+  MessageSquarePlus,
   Plus,
   RefreshCcw,
   Search,
   Send,
   ShieldCheck,
   Sparkles,
-  Trash2,
   Unplug,
   Wifi,
   X,
@@ -31,6 +31,7 @@ import {
   DesktopFrame,
   DesktopStreamFrame,
   DesktopWsSession,
+  PublicChatSummary,
   TaskBoardIssue,
   TaskBoardPriority,
   TaskBoardSnapshot,
@@ -39,6 +40,7 @@ import {
   desktopWsUrlFromLocation,
   extractResponsePayload,
   normalizeAgents,
+  normalizePublicChatSummaries,
   normalizeTaskBoardSnapshot,
   redactSensitiveText
 } from './lib/desktopWsClient';
@@ -47,6 +49,7 @@ type View = 'copilot' | 'board';
 type LogDirection = 'in' | 'out' | 'system';
 type ChatRole = 'user' | 'assistant' | 'system';
 type BoardPriorityFilter = TaskBoardPriority | 'all';
+type HistoryStatus = 'idle' | 'loading' | 'error';
 
 type ChatMessage = {
   id: string;
@@ -120,9 +123,15 @@ export function App() {
   const [boardQuery, setBoardQuery] = useState('');
   const [boardPriorityFilter, setBoardPriorityFilter] = useState<BoardPriorityFilter>('all');
   const [mobileStatus, setMobileStatus] = useState<TaskBoardStatus>('todo');
-  const [agentQuery, setAgentQuery] = useState('总结当前看板状态，并给我三个下一步建议');
+  const [agentQuery, setAgentQuery] = useState('');
   const [selectedAgentKey, setSelectedAgentKey] = useState('');
   const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [activeChatId, setActiveChatId] = useState('');
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const [chatHistory, setChatHistory] = useState<PublicChatSummary[]>([]);
+  const [historyStatus, setHistoryStatus] = useState<HistoryStatus>('idle');
+  const [historyError, setHistoryError] = useState('');
+  const [wonderSeed, setWonderSeed] = useState(0);
   const [busyAction, setBusyAction] = useState('');
   const sessionRef = useRef<DesktopWsSession | null>(null);
   const tokenRef = useRef(initialToken);
@@ -133,6 +142,11 @@ export function App() {
   const allAgents = useMemo(() => mergeAgents(desktopAgents, platformAgents), [desktopAgents, platformAgents]);
   const selectedAgent = selectedAgentKey || allAgents[0]?.agentKey || 'zenmi';
   const selectedAgentSummary = allAgents.find((agent) => agent.agentKey === selectedAgent);
+  const selectedAgentRecentChats = selectedAgentSummary?.recentChats ?? [];
+  const selectedAgentWonders = useMemo(
+    () => pickSampledWonders(selectedAgentSummary?.wonders ?? [], wonderSeed),
+    [selectedAgentSummary?.wonders, wonderSeed]
+  );
   const filteredIssues = useMemo(
     () => filterIssues(snapshot.issues, boardQuery, boardPriorityFilter),
     [boardPriorityFilter, boardQuery, snapshot.issues]
@@ -149,6 +163,13 @@ export function App() {
       setSelectedAgentKey(allAgents[0].agentKey);
     }
   }, [allAgents, selectedAgentKey]);
+
+  function selectAgentKey(agentKey: string) {
+    setSelectedAgentKey(agentKey);
+    setActiveChatId('');
+    setMessages([]);
+    setWonderSeed(0);
+  }
 
   const addLog = useCallback((direction: LogDirection, title: string, detail?: unknown) => {
     setLogs((current) => [
@@ -226,23 +247,37 @@ export function App() {
   }, [request]);
 
   const refreshAgents = useCallback(async (options: RefreshAgentsOptions = {}) => {
-    setBusyAction('refresh-agents');
+    if (!options.quiet) {
+      setBusyAction('refresh-agents');
+    }
     try {
-      const [desktop, platform] = await Promise.allSettled([
+      const [desktop, platformNav] = await Promise.allSettled([
         request('d', 'agent.list', {}, { silent: true, timeoutMs: 3_500 }),
-        request('ap', '/api/agents', { includeChats: 3 }, { silent: false, timeoutMs: 16_000 })
+        request('ap', '/api/agents?includeChats=20&scope=nav', {}, { silent: false, timeoutMs: 16_000 })
       ]);
       if (desktop.status === 'fulfilled') {
         setDesktopAgents(normalizeAgents(desktop.value, 'desktop'));
       } else {
         addLog('system', 'Desktop agent.list skipped', desktop.reason instanceof Error ? desktop.reason.message : String(desktop.reason));
       }
-      if (platform.status === 'fulfilled') {
-        setPlatformAgents(normalizeAgents(platform.value, 'agent-platform'));
+      let platformResolved = false;
+      if (platformNav.status === 'fulfilled') {
+        setPlatformAgents(normalizeAgents(platformNav.value, 'agent-platform'));
+        platformResolved = true;
       } else {
-        addLog('system', 'Agent platform list failed', platform.reason instanceof Error ? platform.reason.message : String(platform.reason));
+        addLog('system', 'Agent platform nav list failed', platformNav.reason instanceof Error ? platformNav.reason.message : String(platformNav.reason));
+        const platformFallback = await request('ap', '/api/agents', {}, { silent: false, timeoutMs: 16_000 }).then(
+          (value) => ({ status: 'fulfilled' as const, value }),
+          (reason) => ({ status: 'rejected' as const, reason })
+        );
+        if (platformFallback.status === 'fulfilled') {
+          setPlatformAgents(normalizeAgents(platformFallback.value, 'agent-platform'));
+          platformResolved = true;
+        } else {
+          addLog('system', 'Agent platform list failed', platformFallback.reason instanceof Error ? platformFallback.reason.message : String(platformFallback.reason));
+        }
       }
-      if (desktop.status === 'rejected' && platform.status === 'rejected') {
+      if (desktop.status === 'rejected' && !platformResolved) {
         setPlatformAgents((current) => current.length ? current : [createFallbackAgent()]);
         if (!options.quiet) {
           setFeedback({ tone: 'info', message: '暂时使用默认智能体 zenmi' });
@@ -259,7 +294,9 @@ export function App() {
         setFeedback({ tone: 'info', message: '暂时使用默认智能体 zenmi' });
       }
     } finally {
-      setBusyAction('');
+      if (!options.quiet) {
+        setBusyAction('');
+      }
     }
   }, [addLog, request]);
 
@@ -286,11 +323,18 @@ export function App() {
       addLog(frame.frame === 'error' ? 'system' : 'in', frameTitle(frame), frame);
     });
     session.onPush((frame) => {
+      const pushedChatId = readChatIdFromFrame(frame);
+      if (frame.ns === 'ap' && pushedChatId) {
+        setActiveChatId(pushedChatId);
+      }
       if (frame.type?.startsWith('snapshot.') || frame.type?.startsWith('issue.')) {
         void refreshBoard();
       }
       if (frame.type === 'agent.catalog.updated') {
         void refreshAgents();
+      }
+      if (frame.ns === 'ap' && (frame.type === 'chat.created' || frame.type === 'run.complete')) {
+        void refreshAgents({ quiet: true });
       }
     });
 
@@ -419,10 +463,12 @@ export function App() {
       agentKey: selectedAgent,
       status: 'pending'
     });
+    const chatIdForRequest = activeChatId.trim();
     setAgentQuery('');
     try {
       const data = await request('ap', '/api/query', {
         agentKey: selectedAgent,
+        ...(chatIdForRequest ? { chatId: chatIdForRequest } : {}),
         message,
         stream: true,
         includeUsage: true,
@@ -433,9 +479,17 @@ export function App() {
         timeoutMs: 120_000,
         resolveOnStreamDone: true,
         onStream: (frame) => {
+          const nextChatId = readChatIdFromFrame(frame);
+          if (nextChatId) {
+            setActiveChatId(nextChatId);
+          }
           applyAgentStreamFrame(frame, pendingId, updateMessageWith);
         }
       });
+      const responseChatId = readChatIdFromPayload(data);
+      if (responseChatId) {
+        setActiveChatId(responseChatId);
+      }
       const answer = readAgentAnswer(data);
       updateMessageWith(pendingId, (current) => {
         const nextContent = answer || (current.content === '正在思考...' ? '' : current.content);
@@ -446,6 +500,7 @@ export function App() {
         };
       });
       setFeedback({ tone: 'success', message: '智能体已回复' });
+      void refreshAgents({ quiet: true });
     } catch (error) {
       const text = error instanceof Error ? error.message : String(error);
       updateMessage(pendingId, {
@@ -471,6 +526,77 @@ export function App() {
     setActiveView('copilot');
   }
 
+  function startNewConversation() {
+    setMessages([]);
+    setActiveChatId('');
+    setAgentQuery('');
+    setHistoryOpen(false);
+    setFeedback({ tone: 'info', message: '已新建对话' });
+  }
+
+  async function refreshChatHistory(force = false) {
+    const cached = selectedAgentRecentChats;
+    if (cached.length > 0) {
+      setChatHistory(cached);
+    }
+    if (!force && cached.length > 0) {
+      setHistoryStatus('idle');
+      setHistoryError('');
+      return;
+    }
+    if (!isConnected) {
+      setHistoryStatus('idle');
+      return;
+    }
+    setHistoryStatus('loading');
+    setHistoryError('');
+    try {
+      const data = await request(
+        'ap',
+        `/api/chats?agentKey=${encodeURIComponent(selectedAgent)}`,
+        {},
+        { timeoutMs: 18_000 }
+      );
+      setChatHistory(mergeChatSummaries(normalizePublicChatSummaries(data, selectedAgent), cached));
+      setHistoryStatus('idle');
+    } catch (error) {
+      if (cached.length > 0) {
+        setHistoryStatus('idle');
+        addLog('system', 'Chat history fallback used', error instanceof Error ? error.message : String(error));
+        return;
+      }
+      const messageText = error instanceof Error ? error.message : String(error);
+      setHistoryError(messageText);
+      setHistoryStatus('error');
+    }
+  }
+
+  function openHistory() {
+    setHistoryOpen(true);
+    void refreshChatHistory(false);
+  }
+
+  async function loadHistoryChat(chat: PublicChatSummary) {
+    setBusyAction(`load-chat-${chat.chatId}`);
+    try {
+      const data = await request(
+        'ap',
+        `/api/chat?chatId=${encodeURIComponent(chat.chatId)}&includeRawMessages=true`,
+        {},
+        { timeoutMs: 24_000 }
+      );
+      setMessages(createMessagesFromChatDetail(data, chat, selectedAgent));
+      setActiveChatId(chat.chatId);
+      setAgentQuery('');
+      setHistoryOpen(false);
+      setFeedback({ tone: 'success', message: '历史对话已打开' });
+    } catch (error) {
+      showError(setFeedback, error);
+    } finally {
+      setBusyAction('');
+    }
+  }
+
   const hostLabel = window.location.host || 'Desktop public host';
 
   return (
@@ -493,19 +619,22 @@ export function App() {
           <CopilotPanel
           agentQuery={agentQuery}
           agents={allAgents}
-          boardSummary={boardSummary}
+          activeChatId={activeChatId}
           busyAction={busyAction}
           isConnected={isConnected}
           messages={messages}
           selectedAgent={selectedAgent}
           selectedAgentSummary={selectedAgentSummary}
-          onClearMessages={() => setMessages([])}
+          sampledWonders={selectedAgentWonders}
           onFillPrompt={fillPrompt}
+          onHistoryOpen={openHistory}
           onKeyDown={handleComposerKeyDown}
+          onNewConversation={startNewConversation}
           onRefreshAgents={refreshAgents}
+          onShuffleWonders={() => setWonderSeed((current) => current + 1)}
           onRunQuery={runAgentQuery}
           setAgentQuery={setAgentQuery}
-          setSelectedAgentKey={setSelectedAgentKey}
+          setSelectedAgentKey={selectAgentKey}
           />
         ) : (
           <BoardPanel
@@ -559,6 +688,20 @@ export function App() {
           onConnect={() => void connectWithToken(token, 'manual')}
           onDisconnect={handleDisconnect}
           onOpenAuth={() => setAuthModalOpen(true)}
+        />
+      ) : null}
+
+      {historyOpen ? (
+        <HistoryPanel
+          activeChatId={activeChatId}
+          busyAction={busyAction}
+          chats={chatHistory}
+          historyError={historyError}
+          historyStatus={historyStatus}
+          selectedAgentLabel={selectedAgentSummary?.displayName || selectedAgent}
+          onClose={() => setHistoryOpen(false)}
+          onLoadChat={loadHistoryChat}
+          onRefresh={() => void refreshChatHistory(true)}
         />
       ) : null}
     </main>
@@ -698,43 +841,43 @@ function SidePanel({
 function CopilotPanel({
   agentQuery,
   agents,
-  boardSummary,
+  activeChatId,
   busyAction,
   isConnected,
   messages,
   selectedAgent,
   selectedAgentSummary,
-  onClearMessages,
+  sampledWonders,
   onFillPrompt,
+  onHistoryOpen,
   onKeyDown,
+  onNewConversation,
   onRefreshAgents,
+  onShuffleWonders,
   onRunQuery,
   setAgentQuery,
   setSelectedAgentKey
 }: {
   agentQuery: string;
   agents: AgentSummary[];
-  boardSummary: BoardSummary;
+  activeChatId: string;
   busyAction: string;
   isConnected: boolean;
   messages: ChatMessage[];
   selectedAgent: string;
   selectedAgentSummary?: AgentSummary;
-  onClearMessages: () => void;
+  sampledWonders: string[];
   onFillPrompt: (prompt: string) => void;
+  onHistoryOpen: () => void;
   onKeyDown: (event: KeyboardEvent<HTMLTextAreaElement>) => void;
+  onNewConversation: () => void;
   onRefreshAgents: () => void;
+  onShuffleWonders: () => void;
   onRunQuery: (event: FormEvent) => void;
   setAgentQuery: (value: string) => void;
   setSelectedAgentKey: (key: string) => void;
 }) {
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
-  const promptChips = useMemo(() => [
-    '总结当前看板状态，并指出最值得先处理的任务',
-    '根据看板，把今天适合推进的任务排个优先级',
-    '帮我把高优先级任务拆成可执行的下一步',
-    '用中文给团队写一段当前进展说明'
-  ], []);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView?.({ block: 'end' });
@@ -756,32 +899,39 @@ function CopilotPanel({
           <button className="icon-button" type="button" onClick={onRefreshAgents} disabled={!isConnected || busyAction === 'refresh-agents'} aria-label="刷新智能体">
             <RefreshCcw size={17} className={busyAction === 'refresh-agents' ? 'spin' : ''} />
           </button>
-          <button className="icon-button" type="button" onClick={onClearMessages} disabled={messages.length === 0} aria-label="清空对话">
-            <Trash2 size={17} />
+          <button className="icon-button" type="button" onClick={onNewConversation} aria-label="新建对话">
+            <MessageSquarePlus size={17} />
+          </button>
+          <button className="icon-button" type="button" onClick={onHistoryOpen} disabled={!isConnected} aria-label="历史对话">
+            <History size={17} />
           </button>
         </div>
-        <div className="summary-strip" aria-label="看板摘要">
-          <SummaryChip label="任务" value={boardSummary.total} />
-          <SummaryChip label="运行中" value={boardSummary.running} tone="progress" />
-          <SummaryChip label="待审查" value={boardSummary.reviewing} tone="violet" />
-          <SummaryChip label="已完成" value={boardSummary.completed} tone="good" />
-        </div>
+        {activeChatId ? <span className="chat-session-chip">#{compactChatId(activeChatId)}</span> : null}
       </div>
 
       <div className="message-stream" aria-live="polite">
         {messages.length === 0 ? (
           <div className="empty-chat">
-            <div className="empty-chat-mark">
-              <MessageSquareText size={18} />
-              Desktop Copilot
-            </div>
-            <div className="prompt-grid">
-              {promptChips.map((prompt) => (
+            {sampledWonders.length > 0 ? (
+              <div className="wonder-header">
+                <span>妙问</span>
+                <button type="button" onClick={onShuffleWonders} aria-label="换一批妙问">
+                  <RefreshCcw size={15} />
+                </button>
+              </div>
+            ) : null}
+            {sampledWonders.length > 0 ? (
+              <div className="prompt-grid">
+                {sampledWonders.map((prompt, index) => (
                 <button key={prompt} type="button" onClick={() => onFillPrompt(prompt)}>
+                  <span>推荐问题 {index + 1}</span>
                   {prompt}
                 </button>
-              ))}
-            </div>
+                ))}
+              </div>
+            ) : (
+              <p className="empty-chat-hint">向 {selectedAgentSummary?.displayName || selectedAgent} 发送第一条消息。</p>
+            )}
           </div>
         ) : null}
         {messages.map((message) => (
@@ -808,22 +958,93 @@ function CopilotPanel({
       </div>
 
       <form className="composer" onSubmit={onRunQuery}>
-        <textarea
-          aria-label="Agent message"
-          value={agentQuery}
-          onChange={(event) => setAgentQuery(event.target.value)}
-          onKeyDown={onKeyDown}
-          placeholder="向智能体发送消息"
-        />
-        <div className="composer-footer">
-          <span>{isConnected ? 'Enter 发送，Shift+Enter 换行' : '等待 Desktop 连接'}</span>
-          <button className="primary" type="submit" disabled={!isConnected || busyAction === 'agent-query'}>
+        <div className="composer-box">
+          <textarea
+            aria-label="Agent message"
+            value={agentQuery}
+            onChange={(event) => setAgentQuery(event.target.value)}
+            onKeyDown={onKeyDown}
+            placeholder={isConnected ? '向智能体发送消息' : '等待 Desktop 连接'}
+          />
+          <button className="primary composer-send" type="submit" disabled={!isConnected || busyAction === 'agent-query'} aria-label="发送">
             {busyAction === 'agent-query' ? <Loader2 className="spin" size={16} /> : <Send size={16} />}
-            发送
           </button>
         </div>
       </form>
     </section>
+  );
+}
+
+function HistoryPanel({
+  activeChatId,
+  busyAction,
+  chats,
+  historyError,
+  historyStatus,
+  selectedAgentLabel,
+  onClose,
+  onLoadChat,
+  onRefresh
+}: {
+  activeChatId: string;
+  busyAction: string;
+  chats: PublicChatSummary[];
+  historyError: string;
+  historyStatus: HistoryStatus;
+  selectedAgentLabel: string;
+  onClose: () => void;
+  onLoadChat: (chat: PublicChatSummary) => void;
+  onRefresh: () => void;
+}) {
+  return (
+    <div className="drawer-layer" role="presentation">
+      <aside className="history-drawer" aria-label="历史对话">
+        <header>
+          <div>
+            <h2>历史对话</h2>
+            <p>{selectedAgentLabel}</p>
+          </div>
+          <div className="drawer-actions">
+            <button className="icon-button" type="button" onClick={onRefresh} disabled={historyStatus === 'loading'} aria-label="刷新历史对话">
+              <RefreshCcw size={17} className={historyStatus === 'loading' ? 'spin' : ''} />
+            </button>
+            <button className="icon-button" type="button" onClick={onClose} aria-label="关闭历史对话">
+              <X size={17} />
+            </button>
+          </div>
+        </header>
+        <div className="history-list">
+          {historyStatus === 'loading' && chats.length === 0 ? (
+            <div className="empty-panel"><Loader2 className="spin" size={18} /> 正在加载历史</div>
+          ) : null}
+          {historyStatus === 'error' ? (
+            <div className="empty-panel error"><XCircle size={18} /> {historyError || '历史对话加载失败'}</div>
+          ) : null}
+          {historyStatus !== 'loading' && historyStatus !== 'error' && chats.length === 0 ? (
+            <div className="empty-panel"><History size={18} /> 暂无历史对话</div>
+          ) : null}
+          {chats.map((chat) => {
+            const isActive = activeChatId === chat.chatId;
+            const isLoading = busyAction === `load-chat-${chat.chatId}`;
+            return (
+              <button
+                className={`history-row ${isActive ? 'active' : ''}`}
+                disabled={isLoading}
+                key={chat.chatId}
+                onClick={() => onLoadChat(chat)}
+                type="button"
+              >
+                <span>
+                  <strong>{chat.chatName || chat.chatId}</strong>
+                  <small>{chat.lastRunContent || compactChatId(chat.chatId)}</small>
+                </span>
+                {isLoading ? <Loader2 className="spin" size={16} /> : <time>{formatChatTime(chat.updatedAt)}</time>}
+              </button>
+            );
+          })}
+        </div>
+      </aside>
+    </div>
   );
 }
 
@@ -1214,15 +1435,6 @@ function Toast({ feedback, onDismiss }: { feedback: Feedback; onDismiss: () => v
   );
 }
 
-function SummaryChip({ label, value, tone = 'neutral' }: { label: string; value: number; tone?: 'neutral' | 'good' | 'progress' | 'danger' | 'violet' }) {
-  return (
-    <span className={`summary-chip ${tone}`}>
-      <strong>{value}</strong>
-      {label}
-    </span>
-  );
-}
-
 function SummaryMetric({ label, value, tone }: { label: string; value: number; tone: 'neutral' | 'good' | 'progress' | 'danger' | 'violet' }) {
   return (
     <div className={`summary-metric ${tone}`}>
@@ -1479,6 +1691,179 @@ function applyAgentStreamFrame(
   }
 }
 
+function pickSampledWonders(wonders: string[], seed: number) {
+  const unique = Array.from(new Set(wonders.map((item) => item.trim()).filter(Boolean)));
+  if (unique.length <= 3) {
+    return unique;
+  }
+  const start = Math.abs(seed) % unique.length;
+  return Array.from({ length: 3 }, (_item, index) => unique[(start + index) % unique.length]);
+}
+
+function mergeChatSummaries(primary: PublicChatSummary[], fallback: PublicChatSummary[]) {
+  const byId = new Map<string, PublicChatSummary>();
+  for (const chat of [...fallback, ...primary]) {
+    byId.set(chat.chatId, { ...byId.get(chat.chatId), ...chat });
+  }
+  return [...byId.values()].sort((left, right) => toChatTimestamp(right.updatedAt) - toChatTimestamp(left.updatedAt));
+}
+
+function createMessagesFromChatDetail(value: unknown, summary: PublicChatSummary, agentKey: string): ChatMessage[] {
+  const record = readObject(value);
+  const runs = Array.isArray(record.runs) ? record.runs : [];
+  const runMessages = runs.flatMap((run, index) => createMessagesFromRun(run, index, agentKey));
+  if (runMessages.length > 0) {
+    return runMessages;
+  }
+  const events = Array.isArray(record.events)
+    ? record.events
+    : Array.isArray(record.rawMessages)
+      ? record.rawMessages
+      : [];
+  const eventMessages = createMessagesFromEvents(events, agentKey);
+  if (eventMessages.length > 0) {
+    return eventMessages;
+  }
+  if (summary.lastRunContent) {
+    return [{
+      id: createLocalId('msg'),
+      role: 'assistant',
+      content: summary.lastRunContent,
+      at: formatChatTime(summary.updatedAt),
+      agentKey,
+      status: 'done'
+    }];
+  }
+  return [];
+}
+
+function createMessagesFromRun(value: unknown, index: number, agentKey: string): ChatMessage[] {
+  const run = readObject(value);
+  const runId = readText(run.runId) || `run_${index + 1}`;
+  const userContent = readText(run.initialMessage) || readText(run.message) || readText(run.query);
+  const assistantContent =
+    readText(run.assistantText) ||
+    readText(run.finalMessage) ||
+    readText(run.answer) ||
+    readText(run.content);
+  const messages: ChatMessage[] = [];
+  if (userContent) {
+    messages.push({
+      id: `history_user_${runId}`,
+      role: 'user',
+      content: userContent,
+      at: formatEventTime(run.startedAt),
+      agentKey,
+      status: 'done'
+    });
+  }
+  if (assistantContent) {
+    messages.push({
+      id: `history_assistant_${runId}`,
+      role: 'assistant',
+      content: assistantContent,
+      at: formatEventTime(run.completedAt ?? run.startedAt),
+      agentKey,
+      status: 'done'
+    });
+  }
+  return messages;
+}
+
+function createMessagesFromEvents(events: unknown[], agentKey: string): ChatMessage[] {
+  const messages: ChatMessage[] = [];
+  let assistantId = '';
+  for (const rawEvent of events) {
+    const event = readObject(rawEvent);
+    const type = readText(event.type);
+    const runId = readText(event.runId) || String(messages.length + 1);
+    if (type === 'request.query') {
+      const content = readText(event.message) || readText(event.query) || readText(event.text);
+      if (content) {
+        messages.push({
+          id: `history_user_${runId}_${messages.length}`,
+          role: 'user',
+          content,
+          at: formatEventTime(event.timestamp),
+          agentKey,
+          status: 'done'
+        });
+        assistantId = '';
+      }
+      continue;
+    }
+    if (type === 'content.start' || type === 'content.snapshot' || type === 'content.end') {
+      const content = readText(event.text) || readText(event.message) || readText(event.delta);
+      if (!content) {
+        continue;
+      }
+      assistantId = upsertHistoryAssistantMessage(messages, assistantId, runId, agentKey, content, false, event.timestamp);
+      continue;
+    }
+    if (type === 'content.delta') {
+      const delta = readText(event.delta) || readText(event.text) || readText(event.message);
+      if (!delta) {
+        continue;
+      }
+      assistantId = upsertHistoryAssistantMessage(messages, assistantId, runId, agentKey, delta, true, event.timestamp);
+      continue;
+    }
+    if (type === 'run.complete') {
+      const content = readText(event.message);
+      if (content) {
+        assistantId = upsertHistoryAssistantMessage(messages, assistantId, runId, agentKey, content, false, event.timestamp);
+      }
+    }
+  }
+  return messages;
+}
+
+function upsertHistoryAssistantMessage(
+  messages: ChatMessage[],
+  currentId: string,
+  runId: string,
+  agentKey: string,
+  content: string,
+  append: boolean,
+  timestamp: unknown
+) {
+  const existingIndex = currentId ? messages.findIndex((message) => message.id === currentId) : -1;
+  if (existingIndex >= 0) {
+    messages[existingIndex] = {
+      ...messages[existingIndex],
+      content: append ? `${messages[existingIndex].content}${content}` : content,
+      status: 'done'
+    };
+    return currentId;
+  }
+  const nextId = `history_assistant_${runId}_${messages.length}`;
+  messages.push({
+    id: nextId,
+    role: 'assistant',
+    content,
+    at: formatEventTime(timestamp),
+    agentKey,
+    status: 'done'
+  });
+  return nextId;
+}
+
+function readChatIdFromFrame(frame: DesktopFrame) {
+  return readChatIdFromPayload(frame.event) ||
+    readChatIdFromPayload(frame.data) ||
+    readChatIdFromPayload(frame.payload) ||
+    readText(frame.chatId);
+}
+
+function readChatIdFromPayload(value: unknown): string {
+  const record = readObject(value);
+  const result = readObject(record.result);
+  return readText(record.chatId) ||
+    readText(record.latestChatId) ||
+    readText(result.chatId) ||
+    readText(result.latestChatId);
+}
+
 function readAgentAnswer(value: unknown) {
   const record = readObject(value);
   const result = readObject(record.result);
@@ -1509,8 +1894,55 @@ function readText(value: unknown) {
   return typeof value === 'string' ? value : '';
 }
 
+function readNumber(value: unknown) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
 function formatClock() {
   return new Date().toLocaleTimeString([], { hour12: false });
+}
+
+function formatEventTime(value: unknown) {
+  const timestamp = readNumber(value);
+  if (timestamp > 0) {
+    return new Date(timestamp).toLocaleTimeString([], { hour12: false });
+  }
+  const text = readText(value);
+  if (text) {
+    const parsed = Date.parse(text);
+    if (Number.isFinite(parsed)) {
+      return new Date(parsed).toLocaleTimeString([], { hour12: false });
+    }
+  }
+  return formatClock();
+}
+
+function formatChatTime(value: unknown) {
+  const text = readText(value);
+  if (!text) {
+    return '';
+  }
+  const parsed = Date.parse(text);
+  if (!Number.isFinite(parsed)) {
+    return '';
+  }
+  const date = new Date(parsed);
+  return date.toLocaleDateString([], { month: '2-digit', day: '2-digit' });
+}
+
+function toChatTimestamp(value: unknown) {
+  const text = readText(value);
+  const parsed = text ? Date.parse(text) : 0;
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function compactChatId(chatId: string) {
+  const normalized = chatId.trim();
+  if (normalized.length <= 10) {
+    return normalized;
+  }
+  return normalized.slice(0, 4) + '...' + normalized.slice(-4);
 }
 
 function createLocalId(prefix: string) {
