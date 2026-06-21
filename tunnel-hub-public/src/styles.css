@@ -81,6 +81,7 @@
 html,
 body,
 #root {
+  height: 100%;
   min-height: 100%;
 }
 
@@ -1402,15 +1403,18 @@ label {
 .desktop-public-app {
   display: grid;
   width: min(1480px, 100%);
-  min-height: 100vh;
+  height: 100vh;
+  height: 100dvh;
+  min-height: 0;
   grid-template-rows: auto minmax(0, 1fr);
-  gap: 10px;
-  padding: 10px;
+  gap: 8px;
+  overflow: hidden;
+  padding: 8px;
 }
 
 .app-tabs-shell {
   display: flex;
-  min-height: 48px;
+  min-height: 46px;
   align-items: center;
   justify-content: space-between;
   gap: 10px;
@@ -1418,7 +1422,7 @@ label {
   border-radius: 8px;
   background: color-mix(in srgb, var(--panel) 96%, transparent);
   box-shadow: var(--shadow-soft);
-  padding: 5px;
+  padding: 4px;
 }
 
 .primary-tabs {
@@ -1431,7 +1435,7 @@ label {
 .primary-tabs button,
 .diagnostics-trigger {
   display: inline-flex;
-  height: 38px;
+  height: 36px;
   align-items: center;
   justify-content: center;
   gap: 7px;
@@ -1486,12 +1490,18 @@ label {
 
 .main-stage {
   display: grid;
-  min-height: calc(100vh - 68px);
+  min-height: 0;
+  overflow: hidden;
 }
 
 .main-stage > .workspace-card {
   display: grid;
+  width: 100%;
+  height: 100%;
   min-height: 0;
+  grid-area: auto;
+  align-self: stretch;
+  justify-self: stretch;
 }
 
 .copilot-card {
@@ -1579,20 +1589,34 @@ label {
 }
 
 .message-stream {
+  min-height: 0;
+  overflow-y: auto;
   padding: 12px;
 }
 
 .empty-chat {
-  min-height: min(430px, 100%);
-  gap: 10px;
+  width: min(720px, 100%);
+  min-height: 0;
+  align-content: start;
+  justify-items: stretch;
+  gap: 9px;
+  margin: 0 auto;
+  padding: clamp(16px, 8vh, 56px) 8px 16px;
 }
 
-.empty-chat strong {
-  font-size: 16px;
+.empty-chat-mark {
+  display: inline-flex;
+  align-items: center;
+  justify-self: center;
+  gap: 7px;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 850;
 }
 
 .prompt-grid button {
-  min-height: 40px;
+  min-height: 38px;
+  border-radius: 8px;
 }
 
 .message-bubble {
@@ -1625,11 +1649,12 @@ label {
 }
 
 .composer textarea {
-  min-height: 70px;
+  min-height: 64px;
+  max-height: 170px;
 }
 
 .board-card {
-  min-height: calc(100vh - 68px);
+  min-height: 0;
 }
 
 .modal-layer,
@@ -1803,8 +1828,8 @@ label {
 
 @media (max-width: 780px) {
   .desktop-public-app {
-    gap: 8px;
-    padding: 8px;
+    gap: 6px;
+    padding: 6px;
   }
 
   .app-tabs-shell {
@@ -1823,8 +1848,7 @@ label {
 
   .main-stage,
   .board-card {
-    min-height: calc(100vh - 62px);
-    min-height: calc(100dvh - 62px);
+    min-height: 0;
   }
 
   .copilot-card {
@@ -1834,7 +1858,8 @@ label {
   .copilot-header {
     grid-template-columns: 1fr;
     align-items: stretch;
-    padding: 7px;
+    gap: 5px;
+    padding: 5px;
   }
 
   .copilot-tools {
@@ -1852,8 +1877,23 @@ label {
     padding-bottom: 1px;
   }
 
+  .summary-chip {
+    min-height: 22px;
+    padding: 0 6px;
+    font-size: 11px;
+  }
+
+  .summary-chip strong {
+    font-size: 12px;
+  }
+
   .message-stream {
-    padding: 10px;
+    padding: 8px;
+  }
+
+  .empty-chat {
+    width: 100%;
+    padding-top: 12px;
   }
 
   .composer {
@@ -1861,7 +1901,8 @@ label {
   }
 
   .composer textarea {
-    min-height: 62px;
+    min-height: 58px;
+    max-height: 132px;
   }
 
   .composer-footer {

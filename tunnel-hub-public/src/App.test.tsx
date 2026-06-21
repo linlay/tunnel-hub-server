@@ -58,6 +58,7 @@ describe('App', () => {
   });
 
   afterEach(() => {
+    vi.useRealTimers();
     vi.unstubAllGlobals();
   });
 
@@ -109,6 +110,46 @@ describe('App', () => {
     await act(async () => {
       socket.reply(moveIndex, { issue: { id: 'ISS-1', title: 'Ship mobile board', status: 'in_progress', priority: 'high' } });
     });
+  });
+
+  it('keeps the chat usable when desktop agent.list times out', async () => {
+    const user = userEvent.setup();
+    render(<App />);
+    await user.type(screen.getByLabelText('Desktop token'), 'secret');
+    await user.click(screen.getByRole('button', { name: '连接' }));
+    const socket = FakeWebSocket.instances[0];
+    await act(async () => {
+      socket.open();
+    });
+
+    await waitFor(() => expect(socket.sent[0]?.type).toBe('session.hello'));
+    await act(async () => {
+      socket.reply(0, { protocolVersion: 1 });
+    });
+    await waitFor(() => expect(socket.sent[1]?.type).toBe('event.subscribe'));
+    await act(async () => {
+      socket.reply(1, { types: ['snapshot.updated'] });
+    });
+    await waitFor(() => expect(socket.sent.some((frame) => frame.type === '/api/agents')).toBe(true));
+    const snapshotIndex = socket.sent.findIndex((frame) => frame.type === 'snapshot.get');
+    const desktopAgentsIndex = socket.sent.findIndex((frame) => frame.type === 'agent.list');
+    const platformAgentsIndex = socket.sent.findIndex((frame) => frame.type === '/api/agents');
+    await act(async () => {
+      socket.reply(snapshotIndex, { revision: 1, issues: [] });
+      socket.message({
+        ns: 'd',
+        frame: 'error',
+        type: 'agent.list',
+        id: socket.sent[desktopAgentsIndex].id,
+        code: 504,
+        msg: 'agent.list timed out'
+      });
+      socket.reply(platformAgentsIndex, { agents: [{ key: 'coder', name: 'Coder', role: 'Engineering' }] });
+    });
+
+    const agentSelect = screen.getByRole('combobox', { name: '选择智能体' });
+    expect(within(agentSelect).getByRole('option', { name: 'Coder' })).toBeInTheDocument();
+    expect(screen.queryByText('agent.list timed out')).not.toBeInTheDocument();
   });
 
   it('appends agent replies and shows agent query failures', async () => {

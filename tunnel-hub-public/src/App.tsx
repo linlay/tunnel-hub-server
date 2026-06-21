@@ -72,6 +72,10 @@ type Feedback = {
   message: string;
 };
 
+type RefreshAgentsOptions = {
+  quiet?: boolean;
+};
+
 const visibleStatuses: TaskBoardStatus[] = ['backlog', 'todo', 'in_progress', 'in_review', 'completed'];
 
 const statusLabel: Record<TaskBoardStatus, string> = {
@@ -134,7 +138,6 @@ export function App() {
     [boardPriorityFilter, boardQuery, snapshot.issues]
   );
   const groupedIssues = useMemo(() => groupIssues(filteredIssues), [filteredIssues]);
-  const issueTotals = useMemo(() => buildIssueTotals(snapshot.issues), [snapshot.issues]);
   const boardSummary = useMemo(() => summarizeBoard(snapshot.issues), [snapshot.issues]);
 
   useEffect(() => {
@@ -222,36 +225,50 @@ export function App() {
     }
   }, [request]);
 
-  const refreshAgents = useCallback(async () => {
+  const refreshAgents = useCallback(async (options: RefreshAgentsOptions = {}) => {
     setBusyAction('refresh-agents');
     try {
       const [desktop, platform] = await Promise.allSettled([
-        request('d', 'agent.list', {}, { silent: false }),
-        request('ap', '/api/agents', { includeChats: 3 }, { silent: false })
+        request('d', 'agent.list', {}, { silent: true, timeoutMs: 3_500 }),
+        request('ap', '/api/agents', { includeChats: 3 }, { silent: false, timeoutMs: 16_000 })
       ]);
       if (desktop.status === 'fulfilled') {
         setDesktopAgents(normalizeAgents(desktop.value, 'desktop'));
+      } else {
+        addLog('system', 'Desktop agent.list skipped', desktop.reason instanceof Error ? desktop.reason.message : String(desktop.reason));
       }
       if (platform.status === 'fulfilled') {
         setPlatformAgents(normalizeAgents(platform.value, 'agent-platform'));
+      } else {
+        addLog('system', 'Agent platform list failed', platform.reason instanceof Error ? platform.reason.message : String(platform.reason));
       }
       if (desktop.status === 'rejected' && platform.status === 'rejected') {
-        throw desktop.reason;
+        setPlatformAgents((current) => current.length ? current : [createFallbackAgent()]);
+        if (!options.quiet) {
+          setFeedback({ tone: 'info', message: '暂时使用默认智能体 zenmi' });
+        }
+        return;
       }
-      setFeedback({ tone: 'success', message: '智能体已刷新' });
+      if (!options.quiet) {
+        setFeedback({ tone: 'success', message: '智能体已刷新' });
+      }
     } catch (error) {
-      showError(setFeedback, error);
+      setPlatformAgents((current) => current.length ? current : [createFallbackAgent()]);
+      addLog('system', 'Agent refresh failed', error instanceof Error ? error.message : String(error));
+      if (!options.quiet) {
+        setFeedback({ tone: 'info', message: '暂时使用默认智能体 zenmi' });
+      }
     } finally {
       setBusyAction('');
     }
-  }, [request]);
+  }, [addLog, request]);
 
   const bootstrapSession = useCallback(async () => {
     await request('d', 'session.hello', {}, { silent: true });
     await request('d', 'event.subscribe', {
       types: ['snapshot.updated', 'issue.created', 'issue.updated', 'issue.deleted', 'issue.moved', 'agent.catalog.updated']
     }, { silent: true });
-    await Promise.allSettled([refreshBoard(), refreshAgents()]);
+    await Promise.allSettled([refreshBoard(), refreshAgents({ quiet: true })]);
   }, [refreshAgents, refreshBoard, request]);
 
   const connectWithToken = useCallback(async (rawToken: string, mode: 'manual' | 'auto' = 'manual') => {
@@ -731,7 +748,7 @@ function CopilotPanel({
           <select value={selectedAgent} onChange={(event) => setSelectedAgentKey(event.target.value)} aria-label="选择智能体">
             {agents.length === 0 ? <option value="zenmi">zenmi</option> : null}
             {agents.map((agent) => (
-              <option key={`${agent.source}:${agent.agentKey}`} value={agent.agentKey}>
+              <option key={`${agent.source || 'default'}:${agent.agentKey}`} value={agent.agentKey}>
                 {agent.displayName}
               </option>
             ))}
@@ -754,8 +771,10 @@ function CopilotPanel({
       <div className="message-stream" aria-live="polite">
         {messages.length === 0 ? (
           <div className="empty-chat">
-            <MessageSquareText size={24} />
-            <strong>Desktop Copilot</strong>
+            <div className="empty-chat-mark">
+              <MessageSquareText size={18} />
+              Desktop Copilot
+            </div>
             <div className="prompt-grid">
               {promptChips.map((prompt) => (
                 <button key={prompt} type="button" onClick={() => onFillPrompt(prompt)}>
@@ -1354,10 +1373,19 @@ function summarizeBoard(issues: TaskBoardIssue[]): BoardSummary {
 
 function mergeAgents(desktop: AgentSummary[], platform: AgentSummary[]) {
   const byKey = new Map<string, AgentSummary>();
-  for (const agent of [...desktop, ...platform]) {
+  for (const agent of [createFallbackAgent(), ...desktop, ...platform]) {
     byKey.set(agent.agentKey, { ...byKey.get(agent.agentKey), ...agent });
   }
   return [...byKey.values()].sort((left, right) => left.displayName.localeCompare(right.displayName));
+}
+
+function createFallbackAgent(): AgentSummary {
+  return {
+    agentKey: 'zenmi',
+    displayName: 'zenmi',
+    role: 'Desktop Copilot',
+    source: 'agent-platform'
+  };
 }
 
 function frameTitle(frame: DesktopFrame) {
@@ -1381,7 +1409,7 @@ function applyAgentStreamFrame(
   }
 
   if (type === 'content.start' || type === 'content.snapshot' || type === 'content.end') {
-    const text = readText(event.text);
+    const text = readText(event.text) || readText(event.message) || readText(event.delta);
     if (!text) {
       return;
     }
@@ -1394,7 +1422,7 @@ function applyAgentStreamFrame(
   }
 
   if (type === 'content.delta') {
-    const delta = readText(event.delta) || readText(event.text);
+    const delta = readText(event.delta) || readText(event.text) || readText(event.message);
     if (!delta) {
       return;
     }
