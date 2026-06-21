@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -17,27 +18,71 @@ import (
 )
 
 const (
-	KindHTTP             = "http"
-	KindWebSocket        = "websocket"
-	KindDesktopWebSocket = "desktop.websocket"
+	KindHTTP      = "http"
+	KindWebSocket = "websocket"
+
+	ProtocolVersion = 1
+
+	NamespaceDesktop = "d"
+	NamespaceWebApp  = "wa"
+
+	TypeDesktopWebSocket   = "websocket"
+	TypeWebAppHTTPRequest  = "http.request"
+	TypeWebAppHTTPResponse = "http.response"
+	TypeWebSocketConnect   = "websocket.connect"
+	TypeWebSocketAccept    = "websocket.accept"
+	TypeError              = "error"
 
 	maxJSONFrameBytes = 1 << 20
 )
 
+type PublicRequest struct {
+	Method  string      `json:"method"`
+	Host    string      `json:"host"`
+	Path    string      `json:"path"`
+	Headers http.Header `json:"headers,omitempty"`
+}
+
+type UpstreamTarget struct {
+	Scheme   string `json:"scheme"`
+	Host     string `json:"host"`
+	Port     int    `json:"port"`
+	BasePath string `json:"basePath"`
+}
+
+type RouteMetadata struct {
+	ID         string `json:"id,omitempty"`
+	Name       string `json:"name,omitempty"`
+	PublicHost string `json:"publicHost,omitempty"`
+}
+
 type StreamRequest struct {
-	Kind       string      `json:"kind"`
-	RequestID  string      `json:"requestId"`
-	Method     string      `json:"method"`
-	Path       string      `json:"path"`
-	Host       string      `json:"host"`
-	Target     string      `json:"target"`
-	Header     http.Header `json:"header"`
-	BodyLength int64       `json:"bodyLength"`
+	V          int             `json:"v,omitempty"`
+	NS         string          `json:"ns,omitempty"`
+	Type       string          `json:"type,omitempty"`
+	ID         string          `json:"id,omitempty"`
+	Public     *PublicRequest  `json:"public,omitempty"`
+	Upstream   *UpstreamTarget `json:"upstream,omitempty"`
+	Route      *RouteMetadata  `json:"route,omitempty"`
+	BodyLength int64           `json:"bodyLength"`
+
+	Kind      string      `json:"kind,omitempty"`
+	RequestID string      `json:"requestId,omitempty"`
+	Method    string      `json:"method,omitempty"`
+	Path      string      `json:"path,omitempty"`
+	Host      string      `json:"host,omitempty"`
+	Target    string      `json:"target,omitempty"`
+	Header    http.Header `json:"header,omitempty"`
 }
 
 type StreamResponse struct {
+	V          int         `json:"v,omitempty"`
+	NS         string      `json:"ns,omitempty"`
+	Type       string      `json:"type,omitempty"`
+	ID         string      `json:"id,omitempty"`
 	OK         bool        `json:"ok"`
 	StatusCode int         `json:"statusCode"`
+	Headers    http.Header `json:"headers,omitempty"`
 	Header     http.Header `json:"header,omitempty"`
 	BodyLength int64       `json:"bodyLength"`
 	Error      string      `json:"error,omitempty"`
@@ -79,6 +124,64 @@ func ReadJSON(r io.Reader, value any) error {
 		return err
 	}
 	return json.Unmarshal(data, value)
+}
+
+func NewPublicRequest(req *http.Request, headers http.Header) PublicRequest {
+	return PublicRequest{
+		Method:  req.Method,
+		Host:    NormalizeHost(req.Host),
+		Path:    requestURI(req),
+		Headers: headers,
+	}
+}
+
+func StreamResponseHeaders(response StreamResponse) http.Header {
+	if len(response.Headers) > 0 {
+		return response.Headers
+	}
+	return response.Header
+}
+
+func ParseUpstreamTarget(target string, websocket bool) (UpstreamTarget, error) {
+	base, err := url.Parse(target)
+	if err != nil {
+		return UpstreamTarget{}, err
+	}
+	if base.Scheme == "" || base.Host == "" {
+		return UpstreamTarget{}, fmt.Errorf("target must include scheme and host: %s", target)
+	}
+	scheme := base.Scheme
+	if websocket {
+		switch scheme {
+		case "http":
+			scheme = "ws"
+		case "https":
+			scheme = "wss"
+		case "ws", "wss":
+		default:
+			return UpstreamTarget{}, fmt.Errorf("unsupported websocket target scheme: %s", base.Scheme)
+		}
+	} else if scheme != "http" && scheme != "https" {
+		return UpstreamTarget{}, fmt.Errorf("unsupported http target scheme: %s", base.Scheme)
+	}
+	port := defaultPortForScheme(scheme)
+	if rawPort := base.Port(); rawPort != "" {
+		nextPort, err := strconv.Atoi(rawPort)
+		if err != nil || nextPort <= 0 || nextPort > 65535 {
+			return UpstreamTarget{}, fmt.Errorf("invalid target port: %s", rawPort)
+		}
+		port = nextPort
+	}
+	basePath := base.EscapedPath()
+	if basePath == "/" {
+		basePath = ""
+	}
+	return UpstreamTarget{
+		Scheme:   scheme,
+		Host:     base.Hostname(),
+		Port:     port,
+		BasePath: basePath,
+	}, nil
 }
 
 func WriteWSFrame(w io.Writer, messageType int, payload []byte) error {
@@ -201,6 +304,27 @@ func NormalizeHost(host string) string {
 		return parsedHost
 	}
 	return strings.TrimSuffix(host, ".")
+}
+
+func requestURI(req *http.Request) string {
+	if req.URL == nil {
+		return "/"
+	}
+	if uri := req.URL.RequestURI(); uri != "" {
+		return uri
+	}
+	return "/"
+}
+
+func defaultPortForScheme(scheme string) int {
+	switch scheme {
+	case "http", "ws":
+		return 80
+	case "https", "wss":
+		return 443
+	default:
+		return 0
+	}
 }
 
 func joinURLPath(base, request string) string {

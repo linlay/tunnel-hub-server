@@ -86,7 +86,24 @@ curl -X POST https://tunnel-hub.zenmind.cc/api/desktop/devices/register \
 
 The first successful registration creates a tunnel token and a random Desktop broker host such as `zmabc123def4.m.zenmind.cc`; the public host never uses `deviceId` and no `routes.target_url` is created for `*.m.zenmind.cc`. Re-registering the same `(user_id, deviceId)` reuses the existing public host and token. Different users may register the same `deviceId` and receive independent random public hosts. Set `rotateToken` to `true` to invalidate the old tunnel token and receive a new `agentToken`. Legacy `deviceSecret` and `targetUrl` request fields are ignored for Desktop registration.
 
-Browsers and testers can then connect to the Desktop remote WebSocket through `wss://<random>.m.zenmind.cc/ws`. The hub opens a `desktop.websocket` tunnel stream to the connected Desktop App and forwards WebSocket metadata and frames transparently; Desktop still validates its own access token before accepting control messages. Only WebSocket requests are accepted on `*.m.zenmind.cc`.
+Browsers and testers can then connect to the Desktop remote WebSocket through `wss://<random>.m.zenmind.cc/ws`. Only WebSocket requests are accepted on `*.m.zenmind.cc`. The hub opens a tunnel stream to the connected Desktop App and sends a first-frame metadata object such as:
+
+```json
+{
+  "v": 1,
+  "ns": "d",
+  "type": "websocket",
+  "id": "req_...",
+  "public": {
+    "method": "GET",
+    "host": "zmabc123def4.m.zenmind.cc",
+    "path": "/ws?token=...",
+    "headers": {}
+  }
+}
+```
+
+After Desktop accepts the stream, the hub forwards WebSocket frames transparently with the existing 9-byte frame envelope. The hub does not validate the Desktop/platform access token and does not inspect `ns=d` or `ns=ap` business JSON frames; Desktop still owns those auth and protocol decisions.
 
 ## Desktop WebApp Registration API
 
@@ -100,6 +117,36 @@ curl -X PUT https://tunnel-hub.zenmind.cc/api/desktop/devices/mac-mini/webapps/n
 ```
 
 This creates or updates a random public host such as `zwaabc123def4.wa.zenmind.cc`, owned by the Desktop device and bound to that Desktop tunnel token. `targetUrl` is required for webapps because the connected Desktop tunnel client dials the configured local service port.
+
+Public `*.wa.zenmind.cc` requests remain normal browser-facing HTTP or WebSocket traffic. Internally, the hub derives an upstream target from the registered `targetUrl` and sends `ns=wa` stream metadata to the Desktop tunnel client:
+
+```json
+{
+  "v": 1,
+  "ns": "wa",
+  "type": "http.request",
+  "id": "req_...",
+  "public": {
+    "method": "GET",
+    "host": "zwaabc123def4.wa.zenmind.cc",
+    "path": "/api/items?limit=20",
+    "headers": {}
+  },
+  "upstream": {
+    "scheme": "http",
+    "host": "127.0.0.1",
+    "port": 5173,
+    "basePath": ""
+  },
+  "route": {
+    "id": "route_...",
+    "publicHost": "zwaabc123def4.wa.zenmind.cc"
+  },
+  "bodyLength": 0
+}
+```
+
+For WebSocket webapps the metadata uses `"type":"websocket.connect"` and the upstream scheme is converted from `http`/`https` to `ws`/`wss`. HTTP bodies are sent as raw bytes after metadata; accepted WebSocket streams continue with the existing 9-byte WebSocket frame envelope. The `route` object is optional debug metadata only and must not be treated as a Desktop-side routing or security authority.
 
 ## Public Component List API
 

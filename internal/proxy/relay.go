@@ -120,6 +120,14 @@ func (r *Relay) HandlePublic(w http.ResponseWriter, req *http.Request) {
 		r.writeGatewayError(w, "route lookup failed", err)
 		return
 	}
+	if isHostUnderBaseDomain(req.Host, r.WebAppBaseDomain) {
+		if isWebSocketRequest(req) {
+			r.handleWebAppPublicWebSocket(w, req, route)
+			return
+		}
+		r.handleWebAppPublicHTTP(w, req, route)
+		return
+	}
 	if isWebSocketRequest(req) {
 		r.handlePublicWebSocket(w, req, route)
 		return
@@ -155,13 +163,13 @@ func (r *Relay) handleDesktopPublic(w http.ResponseWriter, req *http.Request) {
 		r.Manager.StreamClosed()
 	}()
 
+	id := requestID()
 	request := tunnel.StreamRequest{
-		Kind:      tunnel.KindDesktopWebSocket,
-		RequestID: requestID(),
-		Method:    req.Method,
-		Path:      requestURI(req),
-		Host:      req.Host,
-		Header:    tunnel.StripHopHeaders(req.Header),
+		V:      tunnel.ProtocolVersion,
+		NS:     tunnel.NamespaceDesktop,
+		Type:   tunnel.TypeDesktopWebSocket,
+		ID:     id,
+		Public: publicRequest(req, tunnel.StripHopHeaders(req.Header)),
 	}
 	if err := tunnel.WriteJSON(stream, request); err != nil {
 		r.writeGatewayError(w, "write desktop request metadata failed", err)
@@ -177,7 +185,7 @@ func (r *Relay) handleDesktopPublic(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
-	clientWS, err := upgrader.Upgrade(w, req, response.Header)
+	clientWS, err := upgrader.Upgrade(w, req, tunnel.StreamResponseHeaders(response))
 	if err != nil {
 		r.Logger.Error("upgrade desktop public websocket", "error", err)
 		return
@@ -189,6 +197,131 @@ func (r *Relay) handleDesktopPublic(w http.ResponseWriter, req *http.Request) {
 	go func() { errs <- tunnel.CopyFramesToWebSocket(stream, clientWS) }()
 	err = <-errs
 	r.Logger.Debug("desktop websocket stream closed", "error", err)
+}
+
+func (r *Relay) handleWebAppPublicHTTP(w http.ResponseWriter, req *http.Request, route store.Route) {
+	upstream, err := tunnel.ParseUpstreamTarget(route.TargetURL, false)
+	if err != nil {
+		r.writeGatewayError(w, "parse webapp upstream failed", err)
+		return
+	}
+	stream, err := r.Manager.OpenStream(req.Context(), route.TokenID)
+	if errors.Is(err, ErrNoAgent) {
+		http.Error(w, "assigned desktop is offline", http.StatusBadGateway)
+		return
+	}
+	if err != nil {
+		r.writeGatewayError(w, "open webapp stream failed", err)
+		return
+	}
+	defer func() {
+		_ = stream.Close()
+		r.Manager.StreamClosed()
+	}()
+
+	body, err := io.ReadAll(http.MaxBytesReader(w, req.Body, r.MaxRequestBodyBytes))
+	if err != nil {
+		http.Error(w, "request body too large", http.StatusRequestEntityTooLarge)
+		return
+	}
+
+	id := requestID()
+	request := tunnel.StreamRequest{
+		V:          tunnel.ProtocolVersion,
+		NS:         tunnel.NamespaceWebApp,
+		Type:       tunnel.TypeWebAppHTTPRequest,
+		ID:         id,
+		Public:     publicRequest(req, tunnel.StripHopHeaders(req.Header)),
+		Upstream:   &upstream,
+		Route:      routeMetadata(route),
+		BodyLength: int64(len(body)),
+	}
+	if err := tunnel.WriteJSON(stream, request); err != nil {
+		r.writeGatewayError(w, "write webapp request metadata failed", err)
+		return
+	}
+	if len(body) > 0 {
+		if _, err := stream.Write(body); err != nil {
+			r.writeGatewayError(w, "write webapp request body failed", err)
+			return
+		}
+	}
+
+	var response tunnel.StreamResponse
+	if err := tunnel.ReadJSON(stream, &response); err != nil {
+		r.writeGatewayError(w, "read webapp response metadata failed", err)
+		return
+	}
+	if !response.OK {
+		http.Error(w, response.Error, statusOr(response.StatusCode, http.StatusBadGateway))
+		return
+	}
+	copyHeaders(w.Header(), tunnel.StripHopHeaders(tunnel.StreamResponseHeaders(response)))
+	w.WriteHeader(statusOr(response.StatusCode, http.StatusOK))
+	if response.BodyLength > 0 {
+		if _, err := io.CopyN(w, stream, response.BodyLength); err != nil {
+			r.Logger.Error("copy webapp response body", "error", err)
+		}
+	}
+}
+
+func (r *Relay) handleWebAppPublicWebSocket(w http.ResponseWriter, req *http.Request, route store.Route) {
+	upstream, err := tunnel.ParseUpstreamTarget(route.TargetURL, true)
+	if err != nil {
+		r.writeGatewayError(w, "parse webapp websocket upstream failed", err)
+		return
+	}
+	stream, err := r.Manager.OpenStream(req.Context(), route.TokenID)
+	if errors.Is(err, ErrNoAgent) {
+		http.Error(w, "assigned desktop is offline", http.StatusBadGateway)
+		return
+	}
+	if err != nil {
+		r.writeGatewayError(w, "open webapp websocket stream failed", err)
+		return
+	}
+	defer func() {
+		_ = stream.Close()
+		r.Manager.StreamClosed()
+	}()
+
+	id := requestID()
+	request := tunnel.StreamRequest{
+		V:        tunnel.ProtocolVersion,
+		NS:       tunnel.NamespaceWebApp,
+		Type:     tunnel.TypeWebSocketConnect,
+		ID:       id,
+		Public:   publicRequest(req, tunnel.StripWebSocketDialHeaders(req.Header)),
+		Upstream: &upstream,
+		Route:    routeMetadata(route),
+	}
+	if err := tunnel.WriteJSON(stream, request); err != nil {
+		r.writeGatewayError(w, "write webapp websocket request metadata failed", err)
+		return
+	}
+	var response tunnel.StreamResponse
+	if err := tunnel.ReadJSON(stream, &response); err != nil {
+		r.writeGatewayError(w, "read webapp websocket response metadata failed", err)
+		return
+	}
+	if !response.OK {
+		http.Error(w, response.Error, statusOr(response.StatusCode, http.StatusBadGateway))
+		return
+	}
+
+	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+	clientWS, err := upgrader.Upgrade(w, req, tunnel.StreamResponseHeaders(response))
+	if err != nil {
+		r.Logger.Error("upgrade webapp public websocket", "error", err)
+		return
+	}
+	defer clientWS.Close()
+
+	errs := make(chan error, 2)
+	go func() { errs <- tunnel.CopyWebSocketToFrames(clientWS, stream) }()
+	go func() { errs <- tunnel.CopyFramesToWebSocket(stream, clientWS) }()
+	err = <-errs
+	r.Logger.Debug("webapp websocket stream closed", "error", err)
 }
 
 func (r *Relay) handlePublicHTTP(w http.ResponseWriter, req *http.Request, route store.Route) {
@@ -242,7 +375,7 @@ func (r *Relay) handlePublicHTTP(w http.ResponseWriter, req *http.Request, route
 		http.Error(w, response.Error, statusOr(response.StatusCode, http.StatusBadGateway))
 		return
 	}
-	copyHeaders(w.Header(), tunnel.StripHopHeaders(response.Header))
+	copyHeaders(w.Header(), tunnel.StripHopHeaders(tunnel.StreamResponseHeaders(response)))
 	w.WriteHeader(statusOr(response.StatusCode, http.StatusOK))
 	if response.BodyLength > 0 {
 		if _, err := io.CopyN(w, stream, response.BodyLength); err != nil {
@@ -292,7 +425,7 @@ func (r *Relay) handlePublicWebSocket(w http.ResponseWriter, req *http.Request, 
 	upgrader := websocket.Upgrader{
 		CheckOrigin: func(*http.Request) bool { return true },
 	}
-	clientWS, err := upgrader.Upgrade(w, req, response.Header)
+	clientWS, err := upgrader.Upgrade(w, req, tunnel.StreamResponseHeaders(response))
 	if err != nil {
 		r.Logger.Error("upgrade public websocket", "error", err)
 		return
@@ -339,6 +472,18 @@ func copyHeaders(dst, src http.Header) {
 		for _, value := range values {
 			dst.Add(key, value)
 		}
+	}
+}
+
+func publicRequest(req *http.Request, headers http.Header) *tunnel.PublicRequest {
+	next := tunnel.NewPublicRequest(req, headers)
+	return &next
+}
+
+func routeMetadata(route store.Route) *tunnel.RouteMetadata {
+	return &tunnel.RouteMetadata{
+		ID:         route.ID,
+		PublicHost: route.PublicHost,
 	}
 }
 
