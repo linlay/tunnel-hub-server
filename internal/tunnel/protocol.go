@@ -26,12 +26,18 @@ const (
 	NamespaceDesktop = "d"
 	NamespaceWebApp  = "wa"
 
-	TypeDesktopWebSocket   = "websocket"
-	TypeWebAppHTTPRequest  = "http.request"
-	TypeWebAppHTTPResponse = "http.response"
-	TypeWebSocketConnect   = "websocket.connect"
-	TypeWebSocketAccept    = "websocket.accept"
-	TypeError              = "error"
+	FrameRequest  = "request"
+	FrameResponse = "response"
+	FrameError    = "error"
+
+	TypeTunnelOpen           = "tunnel.open"
+	TypeDesktopWebSocket     = "websocket"
+	TypeDesktopWebSocketOpen = "desktop.websocket.open"
+	TypeWebAppHTTPRequest    = "http.request"
+	TypeWebAppHTTPResponse   = "http.response"
+	TypeWebSocketConnect     = "websocket.connect"
+	TypeWebSocketAccept      = "websocket.accept"
+	TypeError                = "error"
 
 	maxJSONFrameBytes = 1 << 20
 )
@@ -56,15 +62,40 @@ type RouteMetadata struct {
 	PublicHost string `json:"publicHost,omitempty"`
 }
 
+type StreamPayload struct {
+	AgentToken     string          `json:"agentToken,omitempty"`
+	DeviceID       string          `json:"deviceId,omitempty"`
+	Client         string          `json:"client,omitempty"`
+	Capabilities   []string        `json:"capabilities,omitempty"`
+	AuthToken      string          `json:"authToken,omitempty"`
+	Subprotocol    string          `json:"subprotocol,omitempty"`
+	Source         string          `json:"source,omitempty"`
+	ClientDeviceID string          `json:"clientDeviceId,omitempty"`
+	Public         *PublicRequest  `json:"public,omitempty"`
+	Upstream       *UpstreamTarget `json:"upstream,omitempty"`
+	Route          *RouteMetadata  `json:"route,omitempty"`
+	BodyLength     *int64          `json:"bodyLength,omitempty"`
+}
+
+type StreamResponseData struct {
+	SessionID  string      `json:"sessionId,omitempty"`
+	Multiplex  string      `json:"multiplex,omitempty"`
+	StatusCode int         `json:"statusCode,omitempty"`
+	Headers    http.Header `json:"headers,omitempty"`
+	BodyLength *int64      `json:"bodyLength,omitempty"`
+}
+
 type StreamRequest struct {
 	V          int             `json:"v,omitempty"`
 	NS         string          `json:"ns,omitempty"`
+	Frame      string          `json:"frame,omitempty"`
 	Type       string          `json:"type,omitempty"`
 	ID         string          `json:"id,omitempty"`
+	Payload    *StreamPayload  `json:"payload,omitempty"`
 	Public     *PublicRequest  `json:"public,omitempty"`
 	Upstream   *UpstreamTarget `json:"upstream,omitempty"`
 	Route      *RouteMetadata  `json:"route,omitempty"`
-	BodyLength int64           `json:"bodyLength"`
+	BodyLength int64           `json:"bodyLength,omitempty"`
 
 	Kind      string      `json:"kind,omitempty"`
 	RequestID string      `json:"requestId,omitempty"`
@@ -76,16 +107,59 @@ type StreamRequest struct {
 }
 
 type StreamResponse struct {
-	V          int         `json:"v,omitempty"`
-	NS         string      `json:"ns,omitempty"`
-	Type       string      `json:"type,omitempty"`
-	ID         string      `json:"id,omitempty"`
-	OK         bool        `json:"ok"`
-	StatusCode int         `json:"statusCode"`
-	Headers    http.Header `json:"headers,omitempty"`
-	Header     http.Header `json:"header,omitempty"`
-	BodyLength int64       `json:"bodyLength"`
-	Error      string      `json:"error,omitempty"`
+	V          int                 `json:"v,omitempty"`
+	NS         string              `json:"ns,omitempty"`
+	Frame      string              `json:"frame,omitempty"`
+	Type       string              `json:"type,omitempty"`
+	ID         string              `json:"id,omitempty"`
+	Code       int                 `json:"code"`
+	Msg        string              `json:"msg,omitempty"`
+	Data       *StreamResponseData `json:"data,omitempty"`
+	OK         bool                `json:"ok,omitempty"`
+	StatusCode int                 `json:"statusCode,omitempty"`
+	Headers    http.Header         `json:"headers,omitempty"`
+	Header     http.Header         `json:"header,omitempty"`
+	BodyLength int64               `json:"bodyLength,omitempty"`
+	Error      string              `json:"error,omitempty"`
+}
+
+func NewStreamRequest(ns, frame, typ, id string, payload *StreamPayload) StreamRequest {
+	return StreamRequest{
+		V:       ProtocolVersion,
+		NS:      ns,
+		Frame:   frame,
+		Type:    typ,
+		ID:      id,
+		Payload: payload,
+	}
+}
+
+func NewStreamResponse(ns, frame, typ, id string, code int, msg string, data *StreamResponseData) StreamResponse {
+	return StreamResponse{
+		V:     ProtocolVersion,
+		NS:    ns,
+		Frame: frame,
+		Type:  typ,
+		ID:    id,
+		Code:  code,
+		Msg:   msg,
+		Data:  data,
+	}
+}
+
+func NewSuccessResponse(ns, typ, id string, data *StreamResponseData) StreamResponse {
+	return NewStreamResponse(ns, FrameResponse, typ, id, 0, "success", data)
+}
+
+func NewErrorResponse(ns, typ, id string, code int, msg string) StreamResponse {
+	if msg == "" {
+		msg = "error"
+	}
+	return NewStreamResponse(ns, FrameError, typ, id, code, msg, nil)
+}
+
+func Int64Ptr(value int64) *int64 {
+	return &value
 }
 
 type WSFrameHeader struct {
@@ -136,10 +210,27 @@ func NewPublicRequest(req *http.Request, headers http.Header) PublicRequest {
 }
 
 func StreamResponseHeaders(response StreamResponse) http.Header {
+	if response.Data != nil && len(response.Data.Headers) > 0 {
+		return response.Data.Headers
+	}
 	if len(response.Headers) > 0 {
 		return response.Headers
 	}
 	return response.Header
+}
+
+func StreamResponseStatusCode(response StreamResponse) int {
+	if response.Data != nil && response.Data.StatusCode > 0 {
+		return response.Data.StatusCode
+	}
+	return response.StatusCode
+}
+
+func StreamResponseBodyLength(response StreamResponse) int64 {
+	if response.Data != nil && response.Data.BodyLength != nil {
+		return *response.Data.BodyLength
+	}
+	return response.BodyLength
 }
 
 func ParseUpstreamTarget(target string, websocket bool) (UpstreamTarget, error) {

@@ -53,13 +53,19 @@ func (r *Relay) SetPublicBaseDomains(desktopBaseDomain, webAppBaseDomain string)
 
 func (r *Relay) HandleTunnel(w http.ResponseWriter, req *http.Request) {
 	rawToken := bearerToken(req.Header.Get("Authorization"))
-	if rawToken == "" {
-		http.Error(w, "missing bearer token", http.StatusUnauthorized)
-		return
-	}
-	token, err := r.DB.FindActiveTokenBySecret(req.Context(), rawToken)
-	if err != nil {
-		http.Error(w, "invalid token", http.StatusUnauthorized)
+	if rawToken != "" {
+		token, err := r.DB.FindActiveTokenBySecret(req.Context(), rawToken)
+		if err != nil {
+			http.Error(w, "invalid token", http.StatusUnauthorized)
+			return
+		}
+		upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+		ws, err := upgrader.Upgrade(w, req, nil)
+		if err != nil {
+			r.Logger.Error("upgrade tunnel websocket", "error", err)
+			return
+		}
+		r.serveTunnelSession(req, ws, token.ID, nil)
 		return
 	}
 
@@ -69,7 +75,41 @@ func (r *Relay) HandleTunnel(w http.ResponseWriter, req *http.Request) {
 		r.Logger.Error("upgrade tunnel websocket", "error", err)
 		return
 	}
+	defer ws.Close()
 
+	var open tunnel.StreamRequest
+	if err := ws.ReadJSON(&open); err != nil {
+		_ = ws.WriteJSON(tunnel.NewErrorResponse(tunnel.NamespaceDesktop, tunnel.TypeTunnelOpen, "", http.StatusBadRequest, "invalid tunnel.open frame"))
+		return
+	}
+	if open.V != tunnel.ProtocolVersion || open.NS != tunnel.NamespaceDesktop || open.Frame != tunnel.FrameRequest || open.Type != tunnel.TypeTunnelOpen || open.Payload == nil {
+		_ = ws.WriteJSON(tunnel.NewErrorResponse(tunnel.NamespaceDesktop, tunnel.TypeTunnelOpen, open.ID, http.StatusBadRequest, "expected tunnel.open request"))
+		return
+	}
+	token, err := r.DB.FindActiveTokenBySecret(req.Context(), open.Payload.AgentToken)
+	if err != nil {
+		_ = ws.WriteJSON(tunnel.NewErrorResponse(tunnel.NamespaceDesktop, tunnel.TypeTunnelOpen, open.ID, http.StatusUnauthorized, "invalid agent token"))
+		return
+	}
+	dbSession, err := r.DB.CreateAgentSession(req.Context(), token.ID, req.RemoteAddr)
+	if err != nil {
+		r.Logger.Error("create agent session", "error", err)
+		_ = ws.WriteJSON(tunnel.NewErrorResponse(tunnel.NamespaceDesktop, tunnel.TypeTunnelOpen, open.ID, http.StatusInternalServerError, "create agent session failed"))
+		return
+	}
+	success := tunnel.NewSuccessResponse(tunnel.NamespaceDesktop, tunnel.TypeTunnelOpen, open.ID, &tunnel.StreamResponseData{
+		SessionID: dbSession.ID,
+		Multiplex: "yamux",
+	})
+	if err := ws.WriteJSON(success); err != nil {
+		_ = r.DB.EndAgentSession(context.Background(), dbSession.ID)
+		r.Logger.Error("write tunnel.open response", "error", err)
+		return
+	}
+	r.serveTunnelSession(req, ws, token.ID, &dbSession)
+}
+
+func (r *Relay) serveTunnelSession(req *http.Request, ws *websocket.Conn, tokenID string, dbSession *store.AgentSession) {
 	conn := tunnel.NewWebSocketNetConn(ws)
 	config := yamux.DefaultConfig()
 	config.EnableKeepAlive = true
@@ -77,21 +117,27 @@ func (r *Relay) HandleTunnel(w http.ResponseWriter, req *http.Request) {
 	session, err := yamux.Server(conn, config)
 	if err != nil {
 		_ = conn.Close()
+		if dbSession != nil {
+			_ = r.DB.EndAgentSession(context.Background(), dbSession.ID)
+		}
 		r.Logger.Error("start yamux server", "error", err)
 		return
 	}
 
-	dbSession, err := r.DB.CreateAgentSession(req.Context(), token.ID, req.RemoteAddr)
-	if err != nil {
-		_ = session.Close()
-		r.Logger.Error("create agent session", "error", err)
-		return
+	if dbSession == nil {
+		nextSession, err := r.DB.CreateAgentSession(req.Context(), tokenID, req.RemoteAddr)
+		if err != nil {
+			_ = session.Close()
+			r.Logger.Error("create agent session", "error", err)
+			return
+		}
+		dbSession = &nextSession
 	}
-	_ = r.DB.TouchToken(context.Background(), token.ID)
+	_ = r.DB.TouchToken(context.Background(), tokenID)
 	_ = r.DB.AddEvent(context.Background(), "agent.connected", "Agent connected", dbSession.ID)
 	r.Manager.SetActive(&ActiveAgent{
 		SessionID:   dbSession.ID,
-		TokenID:     token.ID,
+		TokenID:     tokenID,
 		RemoteAddr:  req.RemoteAddr,
 		ConnectedAt: dbSession.ConnectedAt,
 		Yamux:       session,
@@ -164,13 +210,14 @@ func (r *Relay) handleDesktopPublic(w http.ResponseWriter, req *http.Request) {
 	}()
 
 	id := requestID()
-	request := tunnel.StreamRequest{
-		V:      tunnel.ProtocolVersion,
-		NS:     tunnel.NamespaceDesktop,
-		Type:   tunnel.TypeDesktopWebSocket,
-		ID:     id,
-		Public: publicRequest(req, tunnel.StripHopHeaders(req.Header)),
-	}
+	authToken, subprotocol := desktopWebSocketAuth(req)
+	request := tunnel.NewStreamRequest(tunnel.NamespaceDesktop, tunnel.FrameRequest, tunnel.TypeDesktopWebSocketOpen, id, &tunnel.StreamPayload{
+		AuthToken:      authToken,
+		Subprotocol:    subprotocol,
+		Source:         "tunnel-hub",
+		ClientDeviceID: "",
+		Public:         desktopPublicRequest(req, tunnel.StripWebSocketDialHeaders(req.Header)),
+	})
 	if err := tunnel.WriteJSON(stream, request); err != nil {
 		r.writeGatewayError(w, "write desktop request metadata failed", err)
 		return
@@ -180,8 +227,8 @@ func (r *Relay) handleDesktopPublic(w http.ResponseWriter, req *http.Request) {
 		r.writeGatewayError(w, "read desktop response metadata failed", err)
 		return
 	}
-	if !response.OK {
-		http.Error(w, response.Error, statusOr(response.StatusCode, http.StatusBadGateway))
+	if !standardResponseOK(response, tunnel.NamespaceDesktop, tunnel.TypeDesktopWebSocketOpen) {
+		writeStandardStreamError(w, response, http.StatusBadGateway)
 		return
 	}
 	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
@@ -226,16 +273,12 @@ func (r *Relay) handleWebAppPublicHTTP(w http.ResponseWriter, req *http.Request,
 	}
 
 	id := requestID()
-	request := tunnel.StreamRequest{
-		V:          tunnel.ProtocolVersion,
-		NS:         tunnel.NamespaceWebApp,
-		Type:       tunnel.TypeWebAppHTTPRequest,
-		ID:         id,
+	request := tunnel.NewStreamRequest(tunnel.NamespaceWebApp, tunnel.FrameRequest, tunnel.TypeWebAppHTTPRequest, id, &tunnel.StreamPayload{
 		Public:     publicRequest(req, tunnel.StripHopHeaders(req.Header)),
 		Upstream:   &upstream,
 		Route:      routeMetadata(route),
-		BodyLength: int64(len(body)),
-	}
+		BodyLength: tunnel.Int64Ptr(int64(len(body))),
+	})
 	if err := tunnel.WriteJSON(stream, request); err != nil {
 		r.writeGatewayError(w, "write webapp request metadata failed", err)
 		return
@@ -252,14 +295,15 @@ func (r *Relay) handleWebAppPublicHTTP(w http.ResponseWriter, req *http.Request,
 		r.writeGatewayError(w, "read webapp response metadata failed", err)
 		return
 	}
-	if !response.OK {
-		http.Error(w, response.Error, statusOr(response.StatusCode, http.StatusBadGateway))
+	if !standardResponseOK(response, tunnel.NamespaceWebApp, tunnel.TypeWebAppHTTPRequest) {
+		writeStandardStreamError(w, response, http.StatusBadGateway)
 		return
 	}
 	copyHeaders(w.Header(), tunnel.StripHopHeaders(tunnel.StreamResponseHeaders(response)))
-	w.WriteHeader(statusOr(response.StatusCode, http.StatusOK))
-	if response.BodyLength > 0 {
-		if _, err := io.CopyN(w, stream, response.BodyLength); err != nil {
+	w.WriteHeader(statusOr(tunnel.StreamResponseStatusCode(response), http.StatusOK))
+	bodyLength := tunnel.StreamResponseBodyLength(response)
+	if bodyLength > 0 {
+		if _, err := io.CopyN(w, stream, bodyLength); err != nil {
 			r.Logger.Error("copy webapp response body", "error", err)
 		}
 	}
@@ -286,15 +330,11 @@ func (r *Relay) handleWebAppPublicWebSocket(w http.ResponseWriter, req *http.Req
 	}()
 
 	id := requestID()
-	request := tunnel.StreamRequest{
-		V:        tunnel.ProtocolVersion,
-		NS:       tunnel.NamespaceWebApp,
-		Type:     tunnel.TypeWebSocketConnect,
-		ID:       id,
+	request := tunnel.NewStreamRequest(tunnel.NamespaceWebApp, tunnel.FrameRequest, tunnel.TypeWebSocketConnect, id, &tunnel.StreamPayload{
 		Public:   publicRequest(req, tunnel.StripWebSocketDialHeaders(req.Header)),
 		Upstream: &upstream,
 		Route:    routeMetadata(route),
-	}
+	})
 	if err := tunnel.WriteJSON(stream, request); err != nil {
 		r.writeGatewayError(w, "write webapp websocket request metadata failed", err)
 		return
@@ -304,8 +344,8 @@ func (r *Relay) handleWebAppPublicWebSocket(w http.ResponseWriter, req *http.Req
 		r.writeGatewayError(w, "read webapp websocket response metadata failed", err)
 		return
 	}
-	if !response.OK {
-		http.Error(w, response.Error, statusOr(response.StatusCode, http.StatusBadGateway))
+	if !standardResponseOK(response, tunnel.NamespaceWebApp, tunnel.TypeWebSocketConnect) {
+		writeStandardStreamError(w, response, http.StatusBadGateway)
 		return
 	}
 
@@ -480,6 +520,62 @@ func publicRequest(req *http.Request, headers http.Header) *tunnel.PublicRequest
 	return &next
 }
 
+func desktopPublicRequest(req *http.Request, headers http.Header) *tunnel.PublicRequest {
+	next := tunnel.NewPublicRequest(req, headers)
+	next.Path = requestURIWithoutQueryParam(req, "token")
+	return &next
+}
+
+func desktopWebSocketAuth(req *http.Request) (string, string) {
+	authToken := ""
+	if req.URL != nil {
+		authToken = strings.TrimSpace(req.URL.Query().Get("token"))
+	}
+	subprotocol := bearerSubprotocol(req.Header)
+	if authToken == "" && subprotocol != "" {
+		authToken = strings.TrimSpace(subprotocol[len("bearer."):])
+	}
+	return authToken, subprotocol
+}
+
+func bearerSubprotocol(header http.Header) string {
+	for _, value := range header.Values("Sec-WebSocket-Protocol") {
+		for _, candidate := range strings.Split(value, ",") {
+			candidate = strings.TrimSpace(candidate)
+			if strings.HasPrefix(strings.ToLower(candidate), "bearer.") {
+				return candidate
+			}
+		}
+	}
+	return ""
+}
+
+func standardResponseOK(response tunnel.StreamResponse, ns, typ string) bool {
+	return response.V == tunnel.ProtocolVersion &&
+		response.NS == ns &&
+		response.Frame == tunnel.FrameResponse &&
+		response.Type == typ &&
+		response.Code == 0
+}
+
+func writeStandardStreamError(w http.ResponseWriter, response tunnel.StreamResponse, fallbackStatus int) {
+	status := tunnel.StreamResponseStatusCode(response)
+	if status == 0 && response.Code >= http.StatusBadRequest && response.Code <= 599 {
+		status = response.Code
+	}
+	if status == 0 {
+		status = fallbackStatus
+	}
+	msg := response.Msg
+	if msg == "" {
+		msg = response.Error
+	}
+	if msg == "" {
+		msg = http.StatusText(status)
+	}
+	http.Error(w, msg, status)
+}
+
 func routeMetadata(route store.Route) *tunnel.RouteMetadata {
 	return &tunnel.RouteMetadata{
 		ID:         route.ID,
@@ -495,6 +591,23 @@ func requestURI(req *http.Request) string {
 		return "/"
 	}
 	return req.URL.RequestURI()
+}
+
+func requestURIWithoutQueryParam(req *http.Request, key string) string {
+	if req.URL == nil {
+		return "/"
+	}
+	next := *req.URL
+	query := next.Query()
+	query.Del(key)
+	next.RawQuery = query.Encode()
+	if next.Path == "" {
+		next.Path = "/"
+	}
+	if uri := next.RequestURI(); uri != "" {
+		return uri
+	}
+	return "/"
 }
 
 func statusOr(status, fallback int) int {

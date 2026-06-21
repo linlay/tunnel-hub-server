@@ -86,19 +86,46 @@ curl -X POST https://tunnel-hub.zenmind.cc/api/desktop/devices/register \
 
 The first successful registration creates a tunnel token and a random Desktop broker host such as `zmabc123def4.m.zenmind.cc`; the public host never uses `deviceId` and no `routes.target_url` is created for `*.m.zenmind.cc`. Re-registering the same `(user_id, deviceId)` reuses the existing public host and token. Different users may register the same `deviceId` and receive independent random public hosts. Set `rotateToken` to `true` to invalidate the old tunnel token and receive a new `agentToken`. Legacy `deviceSecret` and `targetUrl` request fields are ignored for Desktop registration.
 
-Browsers and testers can then connect to the Desktop remote WebSocket through `wss://<random>.m.zenmind.cc/ws`. Only WebSocket requests are accepted on `*.m.zenmind.cc`. The hub opens a tunnel stream to the connected Desktop App and sends a first-frame metadata object such as:
+Desktop connects to `wss://tunnel-hub.zenmind.cc/tunnel` and authenticates with the first WebSocket JSON frame before yamux starts:
 
 ```json
 {
   "v": 1,
   "ns": "d",
-  "type": "websocket",
+  "frame": "request",
+  "type": "tunnel.open",
+  "id": "tun_...",
+  "payload": {
+    "agentToken": "za_...",
+    "deviceId": "mac-mini",
+    "client": "zenmind-desktop",
+    "capabilities": ["desktop.websocket", "webapp.http", "webapp.websocket"]
+  }
+}
+```
+
+On success the hub replies with `frame:"response"`, `type:"tunnel.open"`, `code:0`, and `data.multiplex:"yamux"`. Legacy `Authorization: Bearer` tunnel auth is still accepted for the generic agent while Desktop should use `tunnel.open`.
+
+Browsers and testers can then connect to the Desktop remote WebSocket through `wss://<random>.m.zenmind.cc/ws?token=<DesktopToken>` or `Sec-WebSocket-Protocol: bearer.<DesktopToken>`. Only WebSocket requests are accepted on `*.m.zenmind.cc`. The hub opens a tunnel stream to the connected Desktop App and sends a first-frame metadata object such as:
+
+```json
+{
+  "v": 1,
+  "ns": "d",
+  "frame": "request",
+  "type": "desktop.websocket.open",
   "id": "req_...",
-  "public": {
-    "method": "GET",
-    "host": "zmabc123def4.m.zenmind.cc",
-    "path": "/ws?token=...",
-    "headers": {}
+  "payload": {
+    "authToken": "<DesktopToken>",
+    "subprotocol": "bearer.<DesktopToken>",
+    "source": "tunnel-hub",
+    "clientDeviceId": "",
+    "public": {
+      "method": "GET",
+      "host": "zmabc123def4.m.zenmind.cc",
+      "path": "/ws",
+      "headers": {}
+    }
   }
 }
 ```
@@ -124,29 +151,32 @@ Public `*.wa.zenmind.cc` requests remain normal browser-facing HTTP or WebSocket
 {
   "v": 1,
   "ns": "wa",
+  "frame": "request",
   "type": "http.request",
   "id": "req_...",
-  "public": {
-    "method": "GET",
-    "host": "zwaabc123def4.wa.zenmind.cc",
-    "path": "/api/items?limit=20",
-    "headers": {}
-  },
-  "upstream": {
-    "scheme": "http",
-    "host": "127.0.0.1",
-    "port": 5173,
-    "basePath": ""
-  },
-  "route": {
-    "id": "route_...",
-    "publicHost": "zwaabc123def4.wa.zenmind.cc"
-  },
-  "bodyLength": 0
+  "payload": {
+    "public": {
+      "method": "GET",
+      "host": "zwaabc123def4.wa.zenmind.cc",
+      "path": "/api/items?limit=20",
+      "headers": {}
+    },
+    "upstream": {
+      "scheme": "http",
+      "host": "127.0.0.1",
+      "port": 5173,
+      "basePath": ""
+    },
+    "route": {
+      "id": "route_...",
+      "publicHost": "zwaabc123def4.wa.zenmind.cc"
+    },
+    "bodyLength": 0
+  }
 }
 ```
 
-For WebSocket webapps the metadata uses `"type":"websocket.connect"` and the upstream scheme is converted from `http`/`https` to `ws`/`wss`. HTTP bodies are sent as raw bytes after metadata; accepted WebSocket streams continue with the existing 9-byte WebSocket frame envelope. The `route` object is optional debug metadata only and must not be treated as a Desktop-side routing or security authority.
+For WebSocket webapps the metadata uses `"type":"websocket.connect"` and the upstream scheme is converted from `http`/`https` to `ws`/`wss`. Desktop replies with `frame:"response"`, `code:0`, and response metadata under `data.statusCode`, `data.headers`, and `data.bodyLength`. HTTP bodies are sent as raw bytes after metadata; accepted WebSocket streams continue with the existing 9-byte WebSocket frame envelope. The `route` object is optional debug metadata only and must not be treated as a Desktop-side routing or security authority.
 
 ## Public Component List API
 

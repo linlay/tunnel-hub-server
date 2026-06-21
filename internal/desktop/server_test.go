@@ -403,6 +403,94 @@ func TestDesktopRegistrationTunnelWebSocketIntegration(t *testing.T) {
 	}
 }
 
+func TestDesktopPublicWebSocketQueryTokenMetadata(t *testing.T) {
+	manager, server, registration := newDesktopRelayIntegrationServer(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go runFakeDesktopBrokerWithHandler(t, ctx, server.URL, registration.AgentToken, func(t *testing.T, stream *yamux.Stream, request tunnel.StreamRequest) {
+		t.Helper()
+		if request.Payload == nil || request.Payload.AuthToken != "query-token" || request.Payload.Subprotocol != "" {
+			t.Errorf("desktop auth metadata = %#v", request.Payload)
+			return
+		}
+		if request.Payload.Public == nil || request.Payload.Public.Path != "/ws?room=1" {
+			t.Errorf("desktop public metadata = %#v", request.Payload.Public)
+			return
+		}
+		if request.Payload.Public.Headers.Get("Sec-WebSocket-Protocol") != "" {
+			t.Errorf("subprotocol header should be stripped: %q", request.Payload.Public.Headers.Get("Sec-WebSocket-Protocol"))
+			return
+		}
+		_ = tunnel.WriteJSON(stream, tunnel.NewSuccessResponse(tunnel.NamespaceDesktop, tunnel.TypeDesktopWebSocketOpen, request.ID, &tunnel.StreamResponseData{
+			StatusCode: http.StatusSwitchingProtocols,
+		}))
+	})
+	waitForDesktopAgentToken(t, manager, registration.TokenID)
+
+	client, _, err := dialDesktopPublicWebSocket(t, ctx, server.URL, registration.PublicHost, "/ws?room=1&token=query-token", nil)
+	if err != nil {
+		t.Fatalf("dial query-token desktop ws: %v", err)
+	}
+	defer client.Close()
+}
+
+func TestDesktopPublicWebSocketBearerSubprotocolMetadata(t *testing.T) {
+	manager, server, registration := newDesktopRelayIntegrationServer(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go runFakeDesktopBrokerWithHandler(t, ctx, server.URL, registration.AgentToken, func(t *testing.T, stream *yamux.Stream, request tunnel.StreamRequest) {
+		t.Helper()
+		if request.Payload == nil || request.Payload.AuthToken != "protocol-token" || request.Payload.Subprotocol != "bearer.protocol-token" {
+			t.Errorf("desktop auth metadata = %#v", request.Payload)
+			return
+		}
+		if request.Payload.Public == nil || request.Payload.Public.Path != "/ws" {
+			t.Errorf("desktop public metadata = %#v", request.Payload.Public)
+			return
+		}
+		_ = tunnel.WriteJSON(stream, tunnel.NewSuccessResponse(tunnel.NamespaceDesktop, tunnel.TypeDesktopWebSocketOpen, request.ID, &tunnel.StreamResponseData{
+			StatusCode: http.StatusSwitchingProtocols,
+			Headers:    http.Header{"Sec-WebSocket-Protocol": []string{"bearer.protocol-token"}},
+		}))
+	})
+	waitForDesktopAgentToken(t, manager, registration.TokenID)
+
+	client, resp, err := dialDesktopPublicWebSocket(t, ctx, server.URL, registration.PublicHost, "/ws", http.Header{
+		"Sec-WebSocket-Protocol": []string{"bearer.protocol-token"},
+	})
+	if err != nil {
+		t.Fatalf("dial subprotocol desktop ws: %v", err)
+	}
+	defer client.Close()
+	if resp == nil || resp.Header.Get("Sec-WebSocket-Protocol") != "bearer.protocol-token" {
+		t.Fatalf("subprotocol response = %#v", resp)
+	}
+}
+
+func TestDesktopPublicWebSocketNoTokenMapsDesktopError(t *testing.T) {
+	manager, server, registration := newDesktopRelayIntegrationServer(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go runFakeDesktopBrokerWithHandler(t, ctx, server.URL, registration.AgentToken, func(t *testing.T, stream *yamux.Stream, request tunnel.StreamRequest) {
+		t.Helper()
+		if request.Payload == nil || request.Payload.AuthToken != "" {
+			t.Errorf("desktop auth metadata = %#v", request.Payload)
+			return
+		}
+		_ = tunnel.WriteJSON(stream, tunnel.NewErrorResponse(tunnel.NamespaceDesktop, tunnel.TypeDesktopWebSocketOpen, request.ID, http.StatusUnauthorized, "auth failed"))
+	})
+	waitForDesktopAgentToken(t, manager, registration.TokenID)
+
+	client, resp, err := dialDesktopPublicWebSocket(t, ctx, server.URL, registration.PublicHost, "/ws", nil)
+	if err == nil {
+		_ = client.Close()
+		t.Fatal("expected no-token desktop ws dial to fail")
+	}
+	if resp == nil || resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("no-token status = %#v, err = %v", resp, err)
+	}
+}
+
 func TestDesktopRegistrationWebAppHTTPIntegration(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.RequestURI() != "/hello?source=wa" {
@@ -544,14 +632,35 @@ func TestDesktopRegistrationWebAppWebSocketIntegration(t *testing.T) {
 
 func runFakeDesktopBroker(t *testing.T, ctx context.Context, relayURL, token string) {
 	t.Helper()
-	ws, _, err := websocket.DefaultDialer.DialContext(ctx, "ws"+strings.TrimPrefix(relayURL, "http")+"/tunnel", http.Header{
-		"Authorization": []string{"Bearer " + token},
-	})
+	ws, _, err := websocket.DefaultDialer.DialContext(ctx, "ws"+strings.TrimPrefix(relayURL, "http")+"/tunnel", nil)
 	if err != nil {
 		t.Errorf("fake desktop dial: %v", err)
 		return
 	}
 	defer ws.Close()
+	open := tunnel.NewStreamRequest(tunnel.NamespaceDesktop, tunnel.FrameRequest, tunnel.TypeTunnelOpen, "tun_test", &tunnel.StreamPayload{
+		AgentToken: token,
+		DeviceID:   "mac-mini",
+		Client:     "zenmind-desktop",
+		Capabilities: []string{
+			"desktop.websocket",
+			"webapp.http",
+			"webapp.websocket",
+		},
+	})
+	if err := ws.WriteJSON(open); err != nil {
+		t.Errorf("fake desktop write tunnel.open: %v", err)
+		return
+	}
+	var openResponse tunnel.StreamResponse
+	if err := ws.ReadJSON(&openResponse); err != nil {
+		t.Errorf("fake desktop read tunnel.open response: %v", err)
+		return
+	}
+	if openResponse.Frame != tunnel.FrameResponse || openResponse.Type != tunnel.TypeTunnelOpen || openResponse.Code != 0 || openResponse.Data == nil || openResponse.Data.Multiplex != "yamux" {
+		t.Errorf("fake desktop tunnel.open response = %#v", openResponse)
+		return
+	}
 	session, err := yamux.Client(tunnel.NewWebSocketNetConn(ws), yamux.DefaultConfig())
 	if err != nil {
 		t.Errorf("fake desktop yamux: %v", err)
@@ -569,27 +678,26 @@ func runFakeDesktopBroker(t *testing.T, ctx context.Context, relayURL, token str
 		t.Errorf("fake desktop read request: %v", err)
 		return
 	}
-	if request.V != tunnel.ProtocolVersion || request.NS != tunnel.NamespaceDesktop || request.Type != tunnel.TypeDesktopWebSocket {
+	if request.V != tunnel.ProtocolVersion || request.NS != tunnel.NamespaceDesktop || request.Frame != tunnel.FrameRequest || request.Type != tunnel.TypeDesktopWebSocketOpen || request.Payload == nil {
 		t.Errorf("desktop request metadata = %#v", request)
 		return
 	}
-	if request.Public == nil || request.Public.Path != "/ws?token=desktop-token" {
-		t.Errorf("request public path = %#v", request.Public)
+	if request.Payload.AuthToken != "desktop-token" || request.Payload.Subprotocol != "bearer.desktop-token" {
+		t.Errorf("desktop auth metadata = %#v", request.Payload)
 		return
 	}
-	if request.Public.Headers.Get("Sec-WebSocket-Protocol") != "bearer.desktop-token" {
-		t.Errorf("subprotocol metadata = %q", request.Public.Headers.Get("Sec-WebSocket-Protocol"))
+	if request.Payload.Public == nil || request.Payload.Public.Path != "/ws" {
+		t.Errorf("request public path = %#v", request.Payload.Public)
 		return
 	}
-	if err := tunnel.WriteJSON(stream, tunnel.StreamResponse{
-		V:          tunnel.ProtocolVersion,
-		NS:         tunnel.NamespaceDesktop,
-		Type:       tunnel.TypeWebSocketAccept,
-		ID:         request.ID,
-		OK:         true,
+	if request.Payload.Public.Headers.Get("Sec-WebSocket-Protocol") != "" {
+		t.Errorf("websocket subprotocol header should be stripped, got %q", request.Payload.Public.Headers.Get("Sec-WebSocket-Protocol"))
+		return
+	}
+	if err := tunnel.WriteJSON(stream, tunnel.NewSuccessResponse(tunnel.NamespaceDesktop, tunnel.TypeDesktopWebSocketOpen, request.ID, &tunnel.StreamResponseData{
 		StatusCode: http.StatusSwitchingProtocols,
 		Headers:    http.Header{"Sec-WebSocket-Protocol": []string{"bearer.desktop-token"}},
-	}); err != nil {
+	})); err != nil {
 		t.Errorf("fake desktop write response: %v", err)
 		return
 	}
@@ -603,16 +711,87 @@ func runFakeDesktopBroker(t *testing.T, ctx context.Context, relayURL, token str
 	}
 }
 
+func runFakeDesktopBrokerWithHandler(t *testing.T, ctx context.Context, relayURL, token string, handler func(*testing.T, *yamux.Stream, tunnel.StreamRequest)) {
+	t.Helper()
+	ws, _, err := websocket.DefaultDialer.DialContext(ctx, "ws"+strings.TrimPrefix(relayURL, "http")+"/tunnel", nil)
+	if err != nil {
+		t.Errorf("fake desktop dial: %v", err)
+		return
+	}
+	defer ws.Close()
+	open := tunnel.NewStreamRequest(tunnel.NamespaceDesktop, tunnel.FrameRequest, tunnel.TypeTunnelOpen, "tun_test", &tunnel.StreamPayload{
+		AgentToken: token,
+		Client:     "zenmind-desktop",
+		Capabilities: []string{
+			"desktop.websocket",
+		},
+	})
+	if err := ws.WriteJSON(open); err != nil {
+		t.Errorf("fake desktop write tunnel.open: %v", err)
+		return
+	}
+	var openResponse tunnel.StreamResponse
+	if err := ws.ReadJSON(&openResponse); err != nil {
+		t.Errorf("fake desktop read tunnel.open response: %v", err)
+		return
+	}
+	if openResponse.Frame != tunnel.FrameResponse || openResponse.Type != tunnel.TypeTunnelOpen || openResponse.Code != 0 {
+		t.Errorf("fake desktop tunnel.open response = %#v", openResponse)
+		return
+	}
+	session, err := yamux.Client(tunnel.NewWebSocketNetConn(ws), yamux.DefaultConfig())
+	if err != nil {
+		t.Errorf("fake desktop yamux: %v", err)
+		return
+	}
+	defer session.Close()
+	stream, err := session.AcceptStream()
+	if err != nil {
+		t.Errorf("fake desktop accept stream: %v", err)
+		return
+	}
+	defer stream.Close()
+	var request tunnel.StreamRequest
+	if err := tunnel.ReadJSON(stream, &request); err != nil {
+		t.Errorf("fake desktop read request: %v", err)
+		return
+	}
+	if request.V != tunnel.ProtocolVersion || request.NS != tunnel.NamespaceDesktop || request.Frame != tunnel.FrameRequest || request.Type != tunnel.TypeDesktopWebSocketOpen || request.Payload == nil {
+		t.Errorf("desktop request metadata = %#v", request)
+		return
+	}
+	handler(t, stream, request)
+}
+
 func runFakeWebAppTunnelClient(t *testing.T, ctx context.Context, relayURL, token string, handler func(*testing.T, *yamux.Stream)) {
 	t.Helper()
-	ws, _, err := websocket.DefaultDialer.DialContext(ctx, "ws"+strings.TrimPrefix(relayURL, "http")+"/tunnel", http.Header{
-		"Authorization": []string{"Bearer " + token},
-	})
+	ws, _, err := websocket.DefaultDialer.DialContext(ctx, "ws"+strings.TrimPrefix(relayURL, "http")+"/tunnel", nil)
 	if err != nil {
 		t.Errorf("fake webapp desktop dial: %v", err)
 		return
 	}
 	defer ws.Close()
+	open := tunnel.NewStreamRequest(tunnel.NamespaceDesktop, tunnel.FrameRequest, tunnel.TypeTunnelOpen, "tun_test", &tunnel.StreamPayload{
+		AgentToken: token,
+		Client:     "zenmind-desktop",
+		Capabilities: []string{
+			"webapp.http",
+			"webapp.websocket",
+		},
+	})
+	if err := ws.WriteJSON(open); err != nil {
+		t.Errorf("fake webapp desktop write tunnel.open: %v", err)
+		return
+	}
+	var openResponse tunnel.StreamResponse
+	if err := ws.ReadJSON(&openResponse); err != nil {
+		t.Errorf("fake webapp desktop read tunnel.open response: %v", err)
+		return
+	}
+	if openResponse.Frame != tunnel.FrameResponse || openResponse.Type != tunnel.TypeTunnelOpen || openResponse.Code != 0 {
+		t.Errorf("fake webapp desktop tunnel.open response = %#v", openResponse)
+		return
+	}
 	session, err := yamux.Client(tunnel.NewWebSocketNetConn(ws), yamux.DefaultConfig())
 	if err != nil {
 		t.Errorf("fake webapp desktop yamux: %v", err)
@@ -635,50 +814,49 @@ func handleFakeWebAppHTTPStream(t *testing.T, stream *yamux.Stream) {
 		t.Errorf("fake webapp read request: %v", err)
 		return
 	}
-	if request.V != tunnel.ProtocolVersion || request.NS != tunnel.NamespaceWebApp || request.Type != tunnel.TypeWebAppHTTPRequest {
+	if request.V != tunnel.ProtocolVersion || request.NS != tunnel.NamespaceWebApp || request.Frame != tunnel.FrameRequest || request.Type != tunnel.TypeWebAppHTTPRequest || request.Payload == nil {
 		t.Errorf("webapp http request metadata = %#v", request)
 		return
 	}
-	if request.Route == nil || request.Route.PublicHost == "" || request.Route.ID == "" {
-		t.Errorf("missing route metadata = %#v", request.Route)
+	if request.Public != nil || request.Upstream != nil || request.Route != nil {
+		t.Errorf("webapp metadata should be nested under payload: %#v", request)
 		return
 	}
-	if request.Upstream == nil || request.Upstream.Scheme != "http" || request.Upstream.Port == 0 {
-		t.Errorf("unexpected upstream metadata = %#v", request.Upstream)
+	if request.Payload.Route == nil || request.Payload.Route.PublicHost == "" || request.Payload.Route.ID == "" {
+		t.Errorf("missing route metadata = %#v", request.Payload.Route)
+		return
+	}
+	if request.Payload.Upstream == nil || request.Payload.Upstream.Scheme != "http" || request.Payload.Upstream.Port == 0 {
+		t.Errorf("unexpected upstream metadata = %#v", request.Payload.Upstream)
 		return
 	}
 	var body io.ReadCloser = http.NoBody
-	if request.BodyLength > 0 {
-		body = io.NopCloser(io.LimitReader(stream, request.BodyLength))
+	if request.Payload.BodyLength != nil && *request.Payload.BodyLength > 0 {
+		body = io.NopCloser(io.LimitReader(stream, *request.Payload.BodyLength))
 	}
-	outReq, err := http.NewRequest(request.Public.Method, fakeUpstreamURL(request.Upstream, request.Public.Path), body)
+	outReq, err := http.NewRequest(request.Payload.Public.Method, fakeUpstreamURL(request.Payload.Upstream, request.Payload.Public.Path), body)
 	if err != nil {
-		_ = tunnel.WriteJSON(stream, tunnel.StreamResponse{V: tunnel.ProtocolVersion, NS: tunnel.NamespaceWebApp, Type: tunnel.TypeError, ID: request.ID, OK: false, StatusCode: http.StatusBadGateway, Error: err.Error()})
+		_ = tunnel.WriteJSON(stream, tunnel.NewErrorResponse(tunnel.NamespaceWebApp, request.Type, request.ID, http.StatusBadGateway, err.Error()))
 		return
 	}
-	outReq.Header = tunnel.StripHopHeaders(request.Public.Headers)
-	outReq.Header.Set("X-Forwarded-Host", request.Public.Host)
+	outReq.Header = tunnel.StripHopHeaders(request.Payload.Public.Headers)
+	outReq.Header.Set("X-Forwarded-Host", request.Payload.Public.Host)
 	resp, err := http.DefaultClient.Do(outReq)
 	if err != nil {
-		_ = tunnel.WriteJSON(stream, tunnel.StreamResponse{V: tunnel.ProtocolVersion, NS: tunnel.NamespaceWebApp, Type: tunnel.TypeError, ID: request.ID, OK: false, StatusCode: http.StatusBadGateway, Error: err.Error()})
+		_ = tunnel.WriteJSON(stream, tunnel.NewErrorResponse(tunnel.NamespaceWebApp, request.Type, request.ID, http.StatusBadGateway, err.Error()))
 		return
 	}
 	defer resp.Body.Close()
 	responseBody, err := io.ReadAll(resp.Body)
 	if err != nil {
-		_ = tunnel.WriteJSON(stream, tunnel.StreamResponse{V: tunnel.ProtocolVersion, NS: tunnel.NamespaceWebApp, Type: tunnel.TypeError, ID: request.ID, OK: false, StatusCode: http.StatusBadGateway, Error: err.Error()})
+		_ = tunnel.WriteJSON(stream, tunnel.NewErrorResponse(tunnel.NamespaceWebApp, request.Type, request.ID, http.StatusBadGateway, err.Error()))
 		return
 	}
-	if err := tunnel.WriteJSON(stream, tunnel.StreamResponse{
-		V:          tunnel.ProtocolVersion,
-		NS:         tunnel.NamespaceWebApp,
-		Type:       tunnel.TypeWebAppHTTPResponse,
-		ID:         request.ID,
-		OK:         true,
+	if err := tunnel.WriteJSON(stream, tunnel.NewSuccessResponse(tunnel.NamespaceWebApp, tunnel.TypeWebAppHTTPRequest, request.ID, &tunnel.StreamResponseData{
 		StatusCode: resp.StatusCode,
 		Headers:    tunnel.StripHopHeaders(resp.Header),
-		BodyLength: int64(len(responseBody)),
-	}); err != nil {
+		BodyLength: tunnel.Int64Ptr(int64(len(responseBody))),
+	})); err != nil {
 		t.Errorf("fake webapp write response: %v", err)
 		return
 	}
@@ -696,28 +874,27 @@ func handleFakeWebAppWebSocketStream(t *testing.T, stream *yamux.Stream) {
 		t.Errorf("fake webapp ws read request: %v", err)
 		return
 	}
-	if request.V != tunnel.ProtocolVersion || request.NS != tunnel.NamespaceWebApp || request.Type != tunnel.TypeWebSocketConnect {
+	if request.V != tunnel.ProtocolVersion || request.NS != tunnel.NamespaceWebApp || request.Frame != tunnel.FrameRequest || request.Type != tunnel.TypeWebSocketConnect || request.Payload == nil {
 		t.Errorf("webapp websocket request metadata = %#v", request)
 		return
 	}
-	if request.Upstream == nil || request.Upstream.Scheme != "ws" || request.Upstream.Port == 0 {
-		t.Errorf("unexpected websocket upstream metadata = %#v", request.Upstream)
+	if request.Public != nil || request.Upstream != nil || request.Route != nil {
+		t.Errorf("webapp websocket metadata should be nested under payload: %#v", request)
 		return
 	}
-	localWS, _, err := websocket.DefaultDialer.Dial(fakeUpstreamURL(request.Upstream, request.Public.Path), tunnel.StripWebSocketDialHeaders(request.Public.Headers))
+	if request.Payload.Upstream == nil || request.Payload.Upstream.Scheme != "ws" || request.Payload.Upstream.Port == 0 {
+		t.Errorf("unexpected websocket upstream metadata = %#v", request.Payload.Upstream)
+		return
+	}
+	localWS, _, err := websocket.DefaultDialer.Dial(fakeUpstreamURL(request.Payload.Upstream, request.Payload.Public.Path), tunnel.StripWebSocketDialHeaders(request.Payload.Public.Headers))
 	if err != nil {
-		_ = tunnel.WriteJSON(stream, tunnel.StreamResponse{V: tunnel.ProtocolVersion, NS: tunnel.NamespaceWebApp, Type: tunnel.TypeError, ID: request.ID, OK: false, StatusCode: http.StatusBadGateway, Error: err.Error()})
+		_ = tunnel.WriteJSON(stream, tunnel.NewErrorResponse(tunnel.NamespaceWebApp, request.Type, request.ID, http.StatusBadGateway, err.Error()))
 		return
 	}
 	defer localWS.Close()
-	if err := tunnel.WriteJSON(stream, tunnel.StreamResponse{
-		V:          tunnel.ProtocolVersion,
-		NS:         tunnel.NamespaceWebApp,
-		Type:       tunnel.TypeWebSocketAccept,
-		ID:         request.ID,
-		OK:         true,
+	if err := tunnel.WriteJSON(stream, tunnel.NewSuccessResponse(tunnel.NamespaceWebApp, tunnel.TypeWebSocketConnect, request.ID, &tunnel.StreamResponseData{
 		StatusCode: http.StatusSwitchingProtocols,
-	}); err != nil {
+	})); err != nil {
 		t.Errorf("fake webapp ws write response: %v", err)
 		return
 	}
@@ -747,6 +924,48 @@ func fakeUpstreamURL(upstream *tunnel.UpstreamTarget, publicPath string) string 
 		target.Path = "/"
 	}
 	return target.String()
+}
+
+func newDesktopRelayIntegrationServer(t *testing.T) (*proxy.Manager, *httptest.Server, registerResponse) {
+	t.Helper()
+	db := openDesktopTestDB(t)
+	manager := proxy.NewManager()
+	cfg := desktopTestConfig(t)
+	relay := proxy.NewRelay(db, manager, nil, 64<<20)
+	relay.SetPublicBaseDomains(cfg.DesktopPublicBaseDomain, cfg.WebAppPublicBaseDomain)
+	desktopServer, err := NewServer(db, cfg, nil)
+	if err != nil {
+		t.Fatalf("new desktop server: %v", err)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/tunnel":
+			relay.HandleTunnel(w, r)
+		case strings.HasPrefix(r.URL.Path, "/api/desktop"):
+			desktopServer.ServeHTTP(w, r)
+		default:
+			relay.HandlePublic(w, r)
+		}
+	}))
+	t.Cleanup(server.Close)
+	registration := postRegisterHTTP(t, server.URL, desktopRegisterBody("mac-mini", "", false))
+	return manager, server, registration
+}
+
+func dialDesktopPublicWebSocket(t *testing.T, ctx context.Context, relayURL, publicHost, path string, header http.Header) (*websocket.Conn, *http.Response, error) {
+	t.Helper()
+	serverURL, err := url.Parse(relayURL)
+	if err != nil {
+		t.Fatalf("parse relay url: %v", err)
+	}
+	if path == "" {
+		path = "/ws"
+	}
+	publicWSURL := "ws://" + publicHost + ":" + serverURL.Port() + path
+	dialer := websocket.Dialer{NetDialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+		return (&net.Dialer{}).DialContext(ctx, network, serverURL.Host)
+	}}
+	return dialer.DialContext(ctx, publicWSURL, header)
 }
 
 func newDesktopTestServer(t *testing.T) (*Server, *store.DB) {

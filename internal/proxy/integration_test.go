@@ -10,9 +10,11 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/hashicorp/yamux"
 	"github.com/linlay/zenmind-tunnel-server/internal/auth"
 	"github.com/linlay/zenmind-tunnel-server/internal/config"
 	"github.com/linlay/zenmind-tunnel-server/internal/store"
+	"github.com/linlay/zenmind-tunnel-server/internal/tunnel"
 )
 
 func TestRelayAgentHTTPIntegration(t *testing.T) {
@@ -101,6 +103,147 @@ func TestRelayRejectsInvalidTunnelToken(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected invalid token dial to fail")
 	}
+}
+
+func TestRelayTunnelFirstFrameAuthStartsYamux(t *testing.T) {
+	db := openProxyTestDB(t)
+	manager := NewManager()
+	relay := NewRelay(db, manager, nil, 64<<20)
+	server := httptest.NewServer(http.HandlerFunc(relay.HandleTunnel))
+	defer server.Close()
+
+	raw, token := createProxyToken(t, db, "desktop")
+	ws, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(server.URL, "http"), nil)
+	if err != nil {
+		t.Fatalf("dial tunnel: %v", err)
+	}
+	defer ws.Close()
+	if err := ws.WriteJSON(tunnel.NewStreamRequest(tunnel.NamespaceDesktop, tunnel.FrameRequest, tunnel.TypeTunnelOpen, "tun_1", &tunnel.StreamPayload{
+		AgentToken: raw,
+		DeviceID:   "desktop-1",
+		Client:     "zenmind-desktop",
+	})); err != nil {
+		t.Fatalf("write tunnel.open: %v", err)
+	}
+	var response tunnel.StreamResponse
+	if err := ws.ReadJSON(&response); err != nil {
+		t.Fatalf("read tunnel.open response: %v", err)
+	}
+	if response.Frame != tunnel.FrameResponse || response.Type != tunnel.TypeTunnelOpen || response.Code != 0 || response.Data == nil || response.Data.SessionID == "" || response.Data.Multiplex != "yamux" {
+		t.Fatalf("tunnel.open response = %#v", response)
+	}
+	session, err := yamux.Client(tunnel.NewWebSocketNetConn(ws), yamux.DefaultConfig())
+	if err != nil {
+		t.Fatalf("start yamux client: %v", err)
+	}
+	defer session.Close()
+	waitForAgentToken(t, manager, token.ID)
+}
+
+func TestRelayTunnelFirstFrameInvalidTokenReturnsStandardError(t *testing.T) {
+	db := openProxyTestDB(t)
+	manager := NewManager()
+	relay := NewRelay(db, manager, nil, 64<<20)
+	server := httptest.NewServer(http.HandlerFunc(relay.HandleTunnel))
+	defer server.Close()
+
+	ws, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(server.URL, "http"), nil)
+	if err != nil {
+		t.Fatalf("dial tunnel: %v", err)
+	}
+	defer ws.Close()
+	if err := ws.WriteJSON(tunnel.NewStreamRequest(tunnel.NamespaceDesktop, tunnel.FrameRequest, tunnel.TypeTunnelOpen, "tun_bad", &tunnel.StreamPayload{
+		AgentToken: "wrong",
+	})); err != nil {
+		t.Fatalf("write tunnel.open: %v", err)
+	}
+	var response tunnel.StreamResponse
+	if err := ws.ReadJSON(&response); err != nil {
+		t.Fatalf("read tunnel.open error: %v", err)
+	}
+	if response.Frame != tunnel.FrameError || response.Type != tunnel.TypeTunnelOpen || response.ID != "tun_bad" || response.Code != http.StatusUnauthorized || response.Msg != "invalid agent token" {
+		t.Fatalf("tunnel.open error = %#v", response)
+	}
+}
+
+func TestRelayTunnelFirstFrameMalformedOrWrongFrameReturnsStandardError(t *testing.T) {
+	tests := []struct {
+		name string
+		send func(*testing.T, *websocket.Conn)
+		want int
+		id   string
+		msg  string
+	}{
+		{
+			name: "malformed json",
+			send: func(t *testing.T, ws *websocket.Conn) {
+				t.Helper()
+				if err := ws.WriteMessage(websocket.TextMessage, []byte("{")); err != nil {
+					t.Fatalf("write malformed json: %v", err)
+				}
+			},
+			want: http.StatusBadRequest,
+			msg:  "invalid tunnel.open frame",
+		},
+		{
+			name: "wrong frame",
+			send: func(t *testing.T, ws *websocket.Conn) {
+				t.Helper()
+				if err := ws.WriteJSON(tunnel.NewStreamRequest(tunnel.NamespaceDesktop, tunnel.FrameRequest, "wrong.open", "tun_wrong", &tunnel.StreamPayload{})); err != nil {
+					t.Fatalf("write wrong frame: %v", err)
+				}
+			},
+			want: http.StatusBadRequest,
+			id:   "tun_wrong",
+			msg:  "expected tunnel.open request",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			db := openProxyTestDB(t)
+			manager := NewManager()
+			relay := NewRelay(db, manager, nil, 64<<20)
+			server := httptest.NewServer(http.HandlerFunc(relay.HandleTunnel))
+			defer server.Close()
+
+			ws, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(server.URL, "http"), nil)
+			if err != nil {
+				t.Fatalf("dial tunnel: %v", err)
+			}
+			defer ws.Close()
+			tc.send(t, ws)
+			var response tunnel.StreamResponse
+			if err := ws.ReadJSON(&response); err != nil {
+				t.Fatalf("read tunnel.open error: %v", err)
+			}
+			if response.Frame != tunnel.FrameError || response.Type != tunnel.TypeTunnelOpen || response.ID != tc.id || response.Code != tc.want || response.Msg != tc.msg {
+				t.Fatalf("tunnel.open error = %#v", response)
+			}
+		})
+	}
+}
+
+func TestRelayTunnelLegacyBearerCompatibilityStartsYamux(t *testing.T) {
+	db := openProxyTestDB(t)
+	manager := NewManager()
+	relay := NewRelay(db, manager, nil, 64<<20)
+	server := httptest.NewServer(http.HandlerFunc(relay.HandleTunnel))
+	defer server.Close()
+
+	raw, token := createProxyToken(t, db, "legacy-agent")
+	ws, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(server.URL, "http"), http.Header{
+		"Authorization": []string{"Bearer " + raw},
+	})
+	if err != nil {
+		t.Fatalf("dial legacy tunnel: %v", err)
+	}
+	defer ws.Close()
+	session, err := yamux.Client(tunnel.NewWebSocketNetConn(ws), yamux.DefaultConfig())
+	if err != nil {
+		t.Fatalf("start legacy yamux client: %v", err)
+	}
+	defer session.Close()
+	waitForAgentToken(t, manager, token.ID)
 }
 
 func TestRelayRoutesToAssignedAgent(t *testing.T) {
