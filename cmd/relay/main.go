@@ -64,6 +64,10 @@ func main() {
 			relay.HandleUpload(w, r)
 		case strings.HasPrefix(r.URL.Path, "/api/pull/"):
 			relay.HandlePull(w, r)
+		case r.URL.Path == "/api/download":
+			relay.HandleDownload(w, r)
+		case strings.HasPrefix(r.URL.Path, "/api/download/push/"):
+			relay.HandleDownloadPush(w, r)
 		case r.URL.Path == "/api/components":
 			adminServer.ServeComponents(w, r)
 		case strings.HasPrefix(r.URL.Path, "/api/desktop"):

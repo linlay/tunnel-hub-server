@@ -266,9 +266,7 @@ func TestRegisterDesktopWebAppCreatesWARoute(t *testing.T) {
 	if response.DeviceID != "mac-mini" || response.Name != "notes" {
 		t.Fatalf("unexpected webapp response: %+v", response)
 	}
-	if !strings.HasSuffix(response.PublicHost, ".wa.zenmind.cc") {
-		t.Fatalf("webapp public host = %q", response.PublicHost)
-	}
+	assertWebAppPublicHost(t, response.PublicHost)
 	if response.PublicURL != "https://"+response.PublicHost || response.TargetURL != "http://127.0.0.1:5173" || !response.Active {
 		t.Fatalf("unexpected webapp response fields: %+v", response)
 	}
@@ -1031,16 +1029,43 @@ func desktopTestConfig(t *testing.T) config.RelayConfig {
 
 func assertDesktopPublicHost(t *testing.T, publicHost, deviceID string) {
 	t.Helper()
-	if !strings.HasSuffix(publicHost, ".m.zenmind.cc") {
-		t.Fatalf("publicHost = %q, want *.m.zenmind.cc", publicHost)
+	assertGeneratedPublicHost(t, publicHost, "m.zenmind.cc", deviceID)
+}
+
+func assertWebAppPublicHost(t *testing.T, publicHost string) {
+	t.Helper()
+	assertGeneratedPublicHost(t, publicHost, "wa.zenmind.cc", "")
+}
+
+func assertGeneratedPublicHost(t *testing.T, publicHost, baseDomain, forbiddenFragment string) {
+	t.Helper()
+	suffix := "." + baseDomain
+	if !strings.HasSuffix(publicHost, suffix) {
+		t.Fatalf("publicHost = %q, want *%s", publicHost, suffix)
 	}
-	if strings.Contains(publicHost, deviceID) {
-		t.Fatalf("publicHost %q should not contain device id %q", publicHost, deviceID)
+	if forbiddenFragment != "" && strings.Contains(publicHost, forbiddenFragment) {
+		t.Fatalf("publicHost %q should not contain %q", publicHost, forbiddenFragment)
 	}
-	label := strings.TrimSuffix(publicHost, ".m.zenmind.cc")
-	if !strings.HasPrefix(label, "zm") || len(label) < 12 {
-		t.Fatalf("publicHost label = %q, want generated zm label", label)
+	label := strings.TrimSuffix(publicHost, suffix)
+	if len(label) != 13 {
+		t.Fatalf("publicHost label = %q, want 13 characters", label)
 	}
+	if !isLowercaseBase32Label(label) {
+		t.Fatalf("publicHost label = %q, want lowercase base32 [a-z2-7]+", label)
+	}
+}
+
+func isLowercaseBase32Label(label string) bool {
+	if label == "" {
+		return false
+	}
+	for _, ch := range label {
+		if (ch >= 'a' && ch <= 'z') || (ch >= '2' && ch <= '7') {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 func performRegister(t *testing.T, server *Server, body string, token string) *httptest.ResponseRecorder {

@@ -18,6 +18,7 @@ import (
 
 const registerPath = "/api/desktop/devices/register"
 const publicHostRetryLimit = 8
+const publicLabelRandomBytes = 8
 
 type Server struct {
 	DB     *store.DB
@@ -279,7 +280,7 @@ func (s *Server) webAppResponse(result store.RegisterDesktopWebAppResult) webApp
 }
 
 func (s *Server) randomDesktopPublicHost() (string, error) {
-	label, err := randomDesktopPublicLabel()
+	label, err := randomPublicLabel()
 	if err != nil {
 		return "", err
 	}
@@ -287,7 +288,7 @@ func (s *Server) randomDesktopPublicHost() (string, error) {
 }
 
 func (s *Server) randomWebAppPublicHost() (string, error) {
-	label, err := randomPublicLabel("zwa")
+	label, err := randomPublicLabel()
 	if err != nil {
 		return "", err
 	}
@@ -318,17 +319,13 @@ func (s *Server) webAppPublicBaseDomain() string {
 	return baseDomain
 }
 
-func randomDesktopPublicLabel() (string, error) {
-	return randomPublicLabel("zm")
-}
-
-func randomPublicLabel(prefix string) (string, error) {
-	raw := make([]byte, 6)
+func randomPublicLabel() (string, error) {
+	raw := make([]byte, publicLabelRandomBytes)
 	if _, err := rand.Read(raw); err != nil {
 		return "", err
 	}
 	encoded := base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(raw)
-	return prefix + strings.ToLower(encoded), nil
+	return strings.ToLower(encoded), nil
 }
 
 func (s *Server) writeInternal(w http.ResponseWriter, message string, err error) {

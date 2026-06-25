@@ -19,6 +19,10 @@ tunnel-hub.zenmind.cc {
 		reverse_proxy relay:8080
 	}
 
+	handle /api/download* {
+		reverse_proxy relay:8080
+	}
+
 	handle /tunnel {
 		reverse_proxy relay:8080
 	}
@@ -36,6 +40,10 @@ tunnel-hub.zenmind.cc {
 	}
 
 	handle /api/pull* {
+		reverse_proxy relay:8080
+	}
+
+	handle /api/download* {
 		reverse_proxy relay:8080
 	}
 
