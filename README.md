@@ -13,8 +13,8 @@
 
 典型域名规划：
 
-- `tunnel-hub.zenmind.cc`: 管理前端、`/api/admin`、`/api/desktop`、`/api/components`、`/tunnel`。
-- `*.m.zenmind.cc`: 普通浏览器请求打开 Desktop public mini site；WebSocket upgrade 请求进入 Desktop 远程 WebSocket。
+- `tunnel-hub.zenmind.cc`: 管理前端、`/api/admin`、`/api/desktop`、`/api/components`、`/api/upload`、`/api/pull`、`/tunnel`。
+- `*.m.zenmind.cc`: 普通浏览器请求打开 Desktop public mini site；WebSocket upgrade、`/api/upload` 和 `/api/pull` 请求进入 Relay。
 - `*.wa.zenmind.cc`: Desktop WebApp 反向代理入口，支持 HTTP 和 WebSocket。
 
 ## 2. 快速开始
@@ -158,8 +158,8 @@ docker compose up -d --build
 - Website: `127.0.0.1:11963 -> 80`
 - Public Desktop site: `127.0.0.1:11965 -> 80`
 - `tunnel-hub.zenmind.cc/`: 转发到 website 容器。
-- `tunnel-hub.zenmind.cc/api/admin`, `/api/desktop`, `/api/components`, `/tunnel`: 转发到 Relay。
-- `*.m.zenmind.cc`: WebSocket upgrade 转发到 Relay；普通 HTTP 转发到 public Desktop site。
+- `tunnel-hub.zenmind.cc/api/admin`, `/api/desktop`, `/api/components`, `/api/upload`, `/api/pull`, `/tunnel`: 转发到 Relay。
+- `*.m.zenmind.cc`: WebSocket upgrade、`/api/upload` 和 `/api/pull` 转发到 Relay；普通 HTTP 转发到 public Desktop site。
 - `*.wa.zenmind.cc`: 直接转发到 Relay。
 
 示例配置在 `deploy/nginx/zenmind-tunnel.conf` 和 `deploy/caddy/Caddyfile`。
@@ -217,6 +217,16 @@ curl -X PUT https://tunnel-hub.zenmind.cc/api/desktop/devices/mac-mini/webapps/n
   -d '{"targetUrl":"http://127.0.0.1:5173","active":true}'
 ```
 
+上传附件到 Desktop chat：
+
+```bash
+curl -X POST https://tunnel-hub.zenmind.cc/api/upload \
+  -H "Authorization: Bearer $DESKTOP_APP_TOKEN" \
+  -F publicHost=zmxxxx.m.zenmind.cc \
+  -F chatId=chat_xxx \
+  -F file=@./note.txt
+```
+
 公开组件列表：
 
 ```bash
@@ -231,6 +241,7 @@ curl https://tunnel-hub.zenmind.cc/api/components
 - `desktop is offline` / `assigned desktop is offline`: 确认 Desktop 或 Agent 已连接 `/tunnel`，且 token 仍为 active。
 - WebSocket 无法升级：检查反向代理是否保留 `Upgrade` 和 `Connection` 头。
 - Desktop public mini site 没有打开：确认 `*.m.zenmind.cc` 普通 HTTP 已转发到 `tunnel-hub-public`，不是 Relay。
+- 附件上传返回 `desktop is offline`：确认对应 `publicHost` 的 Desktop 已连接 `/tunnel`。
 - 公网 Host 404：检查 DNS wildcard、Nginx/Caddy wildcard route、`PUBLIC_BASE_DOMAIN` / `DESKTOP_PUBLIC_BASE_DOMAIN` / `WEBAPP_PUBLIC_BASE_DOMAIN`。
 - HTTP 上传失败：检查 `MAX_REQUEST_BODY_BYTES`，当前 Relay 会完整缓冲请求体。
 

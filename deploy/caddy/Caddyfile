@@ -11,6 +11,14 @@ tunnel-hub.zenmind.cc {
 		reverse_proxy relay:8080
 	}
 
+	handle /api/upload {
+		reverse_proxy relay:8080
+	}
+
+	handle /api/pull* {
+		reverse_proxy relay:8080
+	}
+
 	handle /tunnel {
 		reverse_proxy relay:8080
 	}
@@ -23,6 +31,14 @@ tunnel-hub.zenmind.cc {
 # Public wildcard routes require DNS for *.m.zenmind.cc and *.wa.zenmind.cc.
 # Public ACME wildcard certificates usually require a DNS challenge provider.
 *.m.zenmind.cc {
+	handle /api/upload {
+		reverse_proxy relay:8080
+	}
+
+	handle /api/pull* {
+		reverse_proxy relay:8080
+	}
+
 	@desktopWs {
 		header Connection *Upgrade*
 		header Upgrade websocket

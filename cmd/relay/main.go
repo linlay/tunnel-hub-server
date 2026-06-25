@@ -60,6 +60,10 @@ func main() {
 		switch {
 		case r.URL.Path == "/tunnel":
 			relay.HandleTunnel(w, r)
+		case r.URL.Path == "/api/upload":
+			relay.HandleUpload(w, r)
+		case strings.HasPrefix(r.URL.Path, "/api/pull/"):
+			relay.HandlePull(w, r)
 		case r.URL.Path == "/api/components":
 			adminServer.ServeComponents(w, r)
 		case strings.HasPrefix(r.URL.Path, "/api/desktop"):
