@@ -30,14 +30,15 @@ const (
 	FrameResponse = "response"
 	FrameError    = "error"
 
-	TypeTunnelOpen           = "tunnel.open"
-	TypeDesktopWebSocket     = "websocket"
-	TypeDesktopWebSocketOpen = "desktop.websocket.open"
-	TypeWebAppHTTPRequest    = "http.request"
-	TypeWebAppHTTPResponse   = "http.response"
-	TypeWebSocketConnect     = "websocket.connect"
-	TypeWebSocketAccept      = "websocket.accept"
-	TypeError                = "error"
+	TypeTunnelOpen                 = "tunnel.open"
+	TypeDesktopWebSocket           = "websocket"
+	TypeDesktopWebSocketOpen       = "desktop.websocket.open"
+	TypeWebAppHTTPRequest          = "http.request"
+	TypeWebAppHTTPResponse         = "http.response"
+	TypeWebSocketConnect           = "websocket.connect"
+	TypeWebSocketAccept            = "websocket.accept"
+	TypeError                      = "error"
+	UnknownBodyLength        int64 = -1
 
 	maxJSONFrameBytes = 1 << 20
 )
