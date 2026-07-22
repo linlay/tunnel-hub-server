@@ -14,8 +14,13 @@
 典型域名规划：
 
 - `tunnel-hub.zenmind.cc`: 管理前端、`/api/admin`、`/api/desktop`、`/api/components` 和 `/tunnel`；不提供附件业务 API。
-- `*.m.zenmind.cc`: 普通浏览器请求打开 Desktop public mini site；WebSocket upgrade、`POST /api/upload` 和 `GET /api/resource` 请求进入 Relay。
+- `*.m.zenmind.cc`: 普通设备 Host 打开 Desktop public mini site；`<device>-<frontendPort>.m.zenmind.cc` 的全部请求，以及普通设备 Host 的 WebSocket upgrade、`POST /api/upload` 和 `GET /api/resource` 请求进入 Relay。
 - `*.wa.zenmind.cc`: Desktop WebApp 反向代理入口，支持 HTTP 和 WebSocket。
+
+WebApp 有两条独立链路：
+
+- 手机配对访问使用 `https://<device>-<frontendPort>.m.zenmind.cc/`，不创建数据库 WebApp route。首次导航携带配对 `app` token，Relay 换成 HttpOnly Cookie 并重定向到无 token 地址；每个请求仍由 Desktop 校验 token scope、device id 和运行中的 WebApp 端口。
+- 用户主动公开分享使用 `*.wa.zenmind.cc`。该路由仅由 Desktop 的“一键发布”注册和启停，保持匿名 URL 分享语义。
 
 ## 2. 快速开始
 
@@ -84,6 +89,7 @@ docker compose up --build
 | 名称 | 默认值 | 说明 |
 | --- | --- | --- |
 | `RELAY_ADDR` | `:8080` | Relay 监听地址。 |
+| `RELAY_PUBLIC_URL` | 空 | Desktop 注册响应中返回的 Relay WebSocket 地址；未配置时由 `PUBLIC_BASE_DOMAIN` 派生 `wss` 地址。 |
 | `RELAY_DB_PATH` | `tunnel.db` | SQLite 数据库路径；容器中通常设置为 `/data/tunnel.db`。 |
 | `ADMIN_HOST` | 空 | 旧版 Relay 静态管理站点 Host；拆分部署时保持为空。 |
 | `WEBSITE_DIST` | 空 | 旧版 Relay 静态站点目录；拆分部署时保持为空。 |
@@ -94,6 +100,7 @@ docker compose up --build
 | `ADMIN_PASSWORD` | 空 | 本地管理账号 bootstrap 密码；为空时跳过创建。 |
 | `ADMIN_SESSION_TTL` | `24h` | 本地管理登录 cookie 有效期。 |
 | `COOKIE_SECURE` | `false` | 管理 cookie 是否只允许 HTTPS。生产 HTTPS 下建议设为 `true`。 |
+| `MOBILE_WEBAPP_COOKIE_SECURE` | `true` | `.m` WebApp 会话 cookie 是否只允许 HTTPS；仅本地 HTTP 联调时设为 `false`。 |
 | `SSO_JWT_ISSUER` | 空 | 官网 SSO JWT issuer，生产和 Desktop 注册 API 必填。 |
 | `SSO_JWT_PUBLIC_KEY_FILE` | 空 | 官网 SSO JWT PEM 公钥文件路径。 |
 | `SSO_JWT_PUBLIC_KEY_PEM` | 空 | 官网 SSO JWT PEM 公钥内容，支持转义 `\n`。 |
@@ -159,7 +166,7 @@ docker compose up -d --build
 - Public Desktop site: `127.0.0.1:11965 -> 80`
 - `tunnel-hub.zenmind.cc/`: 转发到 website 容器。
 - `tunnel-hub.zenmind.cc/api/admin`, `/api/desktop`, `/api/components`, `/tunnel`: 转发到 Relay；`/api/upload`、`/api/resource` 和旧 `/api/download` 明确返回 404。
-- `*.m.zenmind.cc`: WebSocket upgrade、`POST /api/upload` 和 `GET /api/resource` 转发到 Relay；普通 HTTP 转发到 public Desktop site。
+- `*.m.zenmind.cc`: `<device>-<frontendPort>.m.zenmind.cc` 的全部路径，以及普通设备 Host 的 WebSocket upgrade、`POST /api/upload` 和 `GET /api/resource` 转发到 Relay；普通 `<device>.m.zenmind.cc` HTTP 转发到 public Desktop site。
 - `*.wa.zenmind.cc`: 直接转发到 Relay。
 
 示例配置在 `deploy/nginx/zenmind-tunnel.conf` 和 `deploy/caddy/Caddyfile`。

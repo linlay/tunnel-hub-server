@@ -257,13 +257,20 @@ func (s *Server) registrationResponse(result store.RegisterDesktopDeviceResult) 
 		PublicHost:   publicHost,
 		PublicURL:    "https://" + publicHost,
 		WebSocketURL: "wss://" + publicHost + "/ws",
-		RelayURL:     "wss://" + s.baseDomain() + "/tunnel",
+		RelayURL:     s.relayURL(),
 		TargetURL:    result.Device.TargetURL,
 		TokenID:      result.Token.ID,
 		AgentToken:   result.AgentToken,
 		Created:      result.Created,
 		Rotated:      result.Rotated,
 	}
+}
+
+func (s *Server) relayURL() string {
+	if configured := strings.TrimSpace(s.Config.RelayPublicURL); configured != "" {
+		return configured
+	}
+	return "wss://" + s.baseDomain() + "/tunnel"
 }
 
 func (s *Server) webAppResponse(result store.RegisterDesktopWebAppResult) webAppResponse {

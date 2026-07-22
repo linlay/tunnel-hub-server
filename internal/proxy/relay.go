@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -19,16 +20,27 @@ import (
 )
 
 type Relay struct {
-	DB                  *store.DB
-	Manager             *Manager
-	Logger              *slog.Logger
-	MaxRequestBodyBytes int64
-	DesktopBaseDomain   string
-	WebAppBaseDomain    string
-	trustedProxyCIDRs   []*net.IPNet
-	uploads             *uploadStore
-	resources           *resourceStore
+	DB                       *store.DB
+	Manager                  *Manager
+	Logger                   *slog.Logger
+	MaxRequestBodyBytes      int64
+	DesktopBaseDomain        string
+	WebAppBaseDomain         string
+	MobileWebAppCookieSecure bool
+	trustedProxyCIDRs        []*net.IPNet
+	uploads                  *uploadStore
+	resources                *resourceStore
 }
+
+type webAppRelayOptions struct {
+	AuthToken   string
+	Subprotocol string
+	Source      string
+	ObjectType  string
+}
+
+const secureMobileWebAppSessionCookie = "__Host-zenmind_mobile_session"
+const insecureMobileWebAppSessionCookie = "zenmind_mobile_session"
 
 func NewRelay(db *store.DB, manager *Manager, logger *slog.Logger, maxRequestBodyBytes int64) *Relay {
 	if logger == nil {
@@ -38,15 +50,27 @@ func NewRelay(db *store.DB, manager *Manager, logger *slog.Logger, maxRequestBod
 		maxRequestBodyBytes = 64 << 20
 	}
 	return &Relay{
-		DB:                  db,
-		Manager:             manager,
-		Logger:              logger,
-		MaxRequestBodyBytes: maxRequestBodyBytes,
-		DesktopBaseDomain:   "m.zenmind.cc",
-		WebAppBaseDomain:    "wa.zenmind.cc",
-		uploads:             newUploadStore(),
-		resources:           newResourceStore(),
+		DB:                       db,
+		Manager:                  manager,
+		Logger:                   logger,
+		MaxRequestBodyBytes:      maxRequestBodyBytes,
+		DesktopBaseDomain:        "m.zenmind.cc",
+		WebAppBaseDomain:         "wa.zenmind.cc",
+		MobileWebAppCookieSecure: true,
+		uploads:                  newUploadStore(),
+		resources:                newResourceStore(),
 	}
+}
+
+func (r *Relay) SetMobileWebAppCookieSecure(secure bool) {
+	r.MobileWebAppCookieSecure = secure
+}
+
+func (r *Relay) mobileWebAppSessionCookieName() string {
+	if r.MobileWebAppCookieSecure {
+		return secureMobileWebAppSessionCookie
+	}
+	return insecureMobileWebAppSessionCookie
 }
 
 func (r *Relay) SetPublicBaseDomains(desktopBaseDomain, webAppBaseDomain string) {
@@ -166,6 +190,10 @@ func (r *Relay) serveTunnelSession(req *http.Request, ws *websocket.Conn, tokenI
 
 func (r *Relay) HandlePublic(w http.ResponseWriter, req *http.Request) {
 	if isHostUnderBaseDomain(req.Host, r.DesktopBaseDomain) {
+		if _, _, ok := mobileWebAppHost(req.Host, r.DesktopBaseDomain); ok {
+			r.handleMobileWebAppPublic(w, req)
+			return
+		}
 		r.handleDesktopPublic(w, req)
 		return
 	}
@@ -180,10 +208,10 @@ func (r *Relay) HandlePublic(w http.ResponseWriter, req *http.Request) {
 	}
 	if isHostUnderBaseDomain(req.Host, r.WebAppBaseDomain) {
 		if isWebSocketRequest(req) {
-			r.handleWebAppPublicWebSocket(w, req, route)
+			r.handleWebAppPublicWebSocket(w, req, route, webAppRelayOptions{})
 			return
 		}
-		r.handleWebAppPublicHTTP(w, req, route)
+		r.handleWebAppPublicHTTP(w, req, route, webAppRelayOptions{})
 		return
 	}
 	if isWebSocketRequest(req) {
@@ -191,6 +219,80 @@ func (r *Relay) HandlePublic(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 	r.handlePublicHTTP(w, req, route)
+}
+
+func (r *Relay) handleMobileWebAppPublic(w http.ResponseWriter, req *http.Request) {
+	deviceHost, port, ok := mobileWebAppHost(req.Host, r.DesktopBaseDomain)
+	if !ok {
+		http.NotFound(w, req)
+		return
+	}
+	device, err := r.DB.GetDesktopDeviceByPublicHost(req.Context(), deviceHost)
+	if errors.Is(err, store.ErrNotFound) {
+		http.NotFound(w, req)
+		return
+	}
+	if err != nil {
+		r.writeGatewayError(w, "desktop lookup failed", err)
+		return
+	}
+	sessionCookieName := r.mobileWebAppSessionCookieName()
+	if req.URL != nil && !isWebSocketRequest(req) {
+		queryToken := strings.TrimSpace(req.URL.Query().Get("token"))
+		if queryToken != "" && (req.Method == http.MethodGet || req.Method == http.MethodHead) {
+			http.SetCookie(w, &http.Cookie{
+				Name:     sessionCookieName,
+				Value:    queryToken,
+				Path:     "/",
+				Secure:   r.MobileWebAppCookieSecure,
+				HttpOnly: true,
+				SameSite: http.SameSiteLaxMode,
+			})
+			nextURL := *req.URL
+			query := nextURL.Query()
+			query.Del("token")
+			nextURL.RawQuery = query.Encode()
+			http.Redirect(w, req, nextURL.RequestURI(), http.StatusSeeOther)
+			return
+		}
+	}
+	authToken, subprotocol := mobileWebAppAuth(req, sessionCookieName)
+	if authToken == "" {
+		http.Error(w, "mobile authentication token is required", http.StatusUnauthorized)
+		return
+	}
+	next := req.Clone(req.Context())
+	nextURL := *req.URL
+	next.URL = &nextURL
+	query := next.URL.Query()
+	query.Del("token")
+	next.URL.RawQuery = query.Encode()
+	next.RequestURI = next.URL.RequestURI()
+	next.Header = req.Header.Clone()
+	next.Header.Del("Authorization")
+	removeCookie(next.Header, sessionCookieName)
+	next.Header.Set("X-Forwarded-Host", tunnel.NormalizeHost(req.Host))
+	next.Header.Set("X-Forwarded-Proto", "https")
+	next.Header.Del("X-Forwarded-Prefix")
+
+	route := store.Route{
+		ID:         fmt.Sprintf("mobile:%d", port),
+		PublicHost: tunnel.NormalizeHost(req.Host),
+		TargetURL:  fmt.Sprintf("http://127.0.0.1:%d", port),
+		TokenID:    device.TokenID,
+		Active:     true,
+	}
+	options := webAppRelayOptions{
+		AuthToken:   authToken,
+		Subprotocol: subprotocol,
+		Source:      "mobile",
+		ObjectType:  "mobile-webapp",
+	}
+	if isWebSocketRequest(req) {
+		r.handleWebAppPublicWebSocket(w, next, route, options)
+		return
+	}
+	r.handleWebAppPublicHTTP(w, next, route, options)
 }
 
 func (r *Relay) handleDesktopPublic(w http.ResponseWriter, req *http.Request) {
@@ -286,7 +388,7 @@ func (r *Relay) handleDesktopPublic(w http.ResponseWriter, req *http.Request) {
 	r.Logger.Debug("desktop websocket stream closed", "error", err)
 }
 
-func (r *Relay) handleWebAppPublicHTTP(w http.ResponseWriter, req *http.Request, route store.Route) {
+func (r *Relay) handleWebAppPublicHTTP(w http.ResponseWriter, req *http.Request, route store.Route, options webAppRelayOptions) {
 	upstream, err := tunnel.ParseUpstreamTarget(route.TargetURL, false)
 	if err != nil {
 		r.writeGatewayError(w, "parse webapp upstream failed", err)
@@ -312,7 +414,7 @@ func (r *Relay) handleWebAppPublicHTTP(w http.ResponseWriter, req *http.Request,
 	trafficError := ""
 	defer func() {
 		r.recordTrafficEvent(store.TrafficEvent{
-			ObjectType: "webapp",
+			ObjectType: valueOr(options.ObjectType, "webapp"),
 			PublicHost: req.Host,
 			RouteID:    route.ID,
 			TokenID:    route.TokenID,
@@ -338,10 +440,13 @@ func (r *Relay) handleWebAppPublicHTTP(w http.ResponseWriter, req *http.Request,
 
 	id := requestID()
 	request := tunnel.NewStreamRequest(tunnel.NamespaceWebApp, tunnel.FrameRequest, tunnel.TypeWebAppHTTPRequest, id, &tunnel.StreamPayload{
-		Public:     publicRequest(req, tunnel.StripHopHeaders(req.Header)),
-		Upstream:   &upstream,
-		Route:      routeMetadata(route),
-		BodyLength: tunnel.Int64Ptr(int64(len(body))),
+		AuthToken:   options.AuthToken,
+		Subprotocol: options.Subprotocol,
+		Source:      options.Source,
+		Public:      publicRequest(req, tunnel.StripHopHeaders(req.Header)),
+		Upstream:    &upstream,
+		Route:       routeMetadata(route),
+		BodyLength:  tunnel.Int64Ptr(int64(len(body))),
 	})
 	if err := tunnel.WriteJSON(stream, request); err != nil {
 		r.writeGatewayError(w, "write webapp request metadata failed", err)
@@ -366,20 +471,31 @@ func (r *Relay) handleWebAppPublicHTTP(w http.ResponseWriter, req *http.Request,
 		writeStandardStreamError(w, response, http.StatusBadGateway)
 		return
 	}
-	copyHeaders(w.Header(), tunnel.StripHopHeaders(tunnel.StreamResponseHeaders(response)))
+	bodyLength := tunnel.StreamResponseBodyLength(response)
+	if bodyLength < tunnel.UnknownBodyLength {
+		trafficError = fmt.Sprintf("invalid webapp response body length: %d", bodyLength)
+		statusCode = http.StatusBadGateway
+		http.Error(w, trafficError, statusCode)
+		return
+	}
+	responseHeaders := tunnel.StripHopHeaders(tunnel.StreamResponseHeaders(response))
+	if options.Source == "mobile" {
+		responseHeaders = rewriteMobileWebAppResponseHeaders(responseHeaders, req, upstream)
+	}
+	if bodyLength == tunnel.UnknownBodyLength {
+		responseHeaders.Del("Content-Length")
+	}
+	copyHeaders(w.Header(), responseHeaders)
 	statusCode = statusOr(tunnel.StreamResponseStatusCode(response), http.StatusOK)
 	w.WriteHeader(statusCode)
-	bodyLength := tunnel.StreamResponseBodyLength(response)
-	bytesOut = bodyLength
-	if bodyLength > 0 {
-		if _, err := io.CopyN(w, stream, bodyLength); err != nil {
-			trafficError = err.Error()
-			r.Logger.Error("copy webapp response body", "error", err)
-		}
+	bytesOut, err = copyWebAppResponseBody(w, stream, bodyLength)
+	if err != nil {
+		trafficError = err.Error()
+		r.Logger.Error("copy webapp response body", "error", err)
 	}
 }
 
-func (r *Relay) handleWebAppPublicWebSocket(w http.ResponseWriter, req *http.Request, route store.Route) {
+func (r *Relay) handleWebAppPublicWebSocket(w http.ResponseWriter, req *http.Request, route store.Route, options webAppRelayOptions) {
 	upstream, err := tunnel.ParseUpstreamTarget(route.TargetURL, true)
 	if err != nil {
 		r.writeGatewayError(w, "parse webapp websocket upstream failed", err)
@@ -405,7 +521,7 @@ func (r *Relay) handleWebAppPublicWebSocket(w http.ResponseWriter, req *http.Req
 	trafficError := ""
 	defer func() {
 		r.recordTrafficEvent(store.TrafficEvent{
-			ObjectType: "webapp",
+			ObjectType: valueOr(options.ObjectType, "webapp"),
 			PublicHost: req.Host,
 			RouteID:    route.ID,
 			TokenID:    route.TokenID,
@@ -422,9 +538,12 @@ func (r *Relay) handleWebAppPublicWebSocket(w http.ResponseWriter, req *http.Req
 
 	id := requestID()
 	request := tunnel.NewStreamRequest(tunnel.NamespaceWebApp, tunnel.FrameRequest, tunnel.TypeWebSocketConnect, id, &tunnel.StreamPayload{
-		Public:   publicRequest(req, tunnel.StripWebSocketDialHeaders(req.Header)),
-		Upstream: &upstream,
-		Route:    routeMetadata(route),
+		AuthToken:   options.AuthToken,
+		Subprotocol: options.Subprotocol,
+		Source:      options.Source,
+		Public:      publicRequest(req, tunnel.StripWebSocketDialHeaders(req.Header)),
+		Upstream:    &upstream,
+		Route:       routeMetadata(route),
 	})
 	if err := tunnel.WriteJSON(stream, request); err != nil {
 		r.writeGatewayError(w, "write webapp websocket request metadata failed", err)
@@ -694,6 +813,43 @@ func copyHeaders(dst, src http.Header) {
 	}
 }
 
+func copyWebAppResponseBody(dst io.Writer, src io.Reader, bodyLength int64) (int64, error) {
+	switch {
+	case bodyLength == tunnel.UnknownBodyLength:
+		return io.Copy(dst, src)
+	case bodyLength == 0:
+		return 0, nil
+	case bodyLength > 0:
+		return io.CopyN(dst, src, bodyLength)
+	default:
+		return 0, fmt.Errorf("invalid webapp response body length: %d", bodyLength)
+	}
+}
+
+func rewriteMobileWebAppResponseHeaders(headers http.Header, req *http.Request, upstream tunnel.UpstreamTarget) http.Header {
+	next := headers.Clone()
+	if location := strings.TrimSpace(next.Get("Location")); location != "" {
+		next.Set("Location", rewriteMobileWebAppLocation(location, req, upstream))
+	}
+	return next
+}
+
+func rewriteMobileWebAppLocation(location string, req *http.Request, upstream tunnel.UpstreamTarget) string {
+	parsed, err := url.Parse(location)
+	if err != nil {
+		return location
+	}
+	if parsed.IsAbs() {
+		hostname := strings.ToLower(parsed.Hostname())
+		if hostname != "127.0.0.1" && hostname != "localhost" && hostname != "::1" && !strings.EqualFold(hostname, upstream.Host) {
+			return location
+		}
+		parsed.Scheme = "https"
+		parsed.Host = tunnel.NormalizeHost(req.Host)
+	}
+	return parsed.String()
+}
+
 func publicRequest(req *http.Request, headers http.Header) *tunnel.PublicRequest {
 	next := tunnel.NewPublicRequest(req, headers)
 	return &next
@@ -715,6 +871,69 @@ func desktopWebSocketAuth(req *http.Request) (string, string) {
 		authToken = strings.TrimSpace(subprotocol[len("bearer."):])
 	}
 	return authToken, subprotocol
+}
+
+func mobileWebAppAuth(req *http.Request, sessionCookieName string) (string, string) {
+	authToken := ""
+	if req.URL != nil {
+		authToken = strings.TrimSpace(req.URL.Query().Get("token"))
+	}
+	if authToken == "" {
+		authToken = bearerToken(req.Header.Get("Authorization"))
+	}
+	if authToken == "" {
+		if cookie, err := req.Cookie(sessionCookieName); err == nil {
+			authToken = strings.TrimSpace(cookie.Value)
+		}
+	}
+	subprotocol := bearerSubprotocol(req.Header)
+	if authToken == "" && subprotocol != "" {
+		authToken = strings.TrimSpace(subprotocol[len("bearer."):])
+	}
+	return authToken, subprotocol
+}
+
+func removeCookie(header http.Header, name string) {
+	cookies := (&http.Request{Header: header}).Cookies()
+	header.Del("Cookie")
+	for _, cookie := range cookies {
+		if cookie.Name != name {
+			header.Add("Cookie", cookie.String())
+		}
+	}
+}
+
+func mobileWebAppHost(host, baseDomain string) (string, int, bool) {
+	normalizedHost := tunnel.NormalizeHost(host)
+	normalizedBase := normalizeBaseDomain(baseDomain)
+	suffix := "." + normalizedBase
+	if normalizedBase == "" || !strings.HasSuffix(normalizedHost, suffix) {
+		return "", 0, false
+	}
+	label := strings.TrimSuffix(normalizedHost, suffix)
+	if label == "" || strings.Contains(label, ".") {
+		return "", 0, false
+	}
+	separator := strings.LastIndexByte(label, '-')
+	if separator <= 0 || separator == len(label)-1 {
+		return "", 0, false
+	}
+	deviceLabel := label[:separator]
+	portText := label[separator+1:]
+	port := 0
+	for _, char := range portText {
+		if char < '0' || char > '9' {
+			return "", 0, false
+		}
+		port = port*10 + int(char-'0')
+		if port > 65535 {
+			return "", 0, false
+		}
+	}
+	if port <= 0 {
+		return "", 0, false
+	}
+	return deviceLabel + suffix, port, true
 }
 
 func bearerSubprotocol(header http.Header) string {
@@ -837,6 +1056,13 @@ func statusOr(status, fallback int) int {
 		return fallback
 	}
 	return status
+}
+
+func valueOr(value, fallback string) string {
+	if strings.TrimSpace(value) == "" {
+		return fallback
+	}
+	return value
 }
 
 func requestID() string {

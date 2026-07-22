@@ -47,6 +47,11 @@ tunnel-hub.zenmind.cc {
 # Public wildcard routes require DNS for *.m.zenmind.cc and *.wa.zenmind.cc.
 # Public ACME wildcard certificates usually require a DNS challenge provider.
 *.m.zenmind.cc {
+	@mobileWebApp host_regexp mobileWebApp ^[^.]+-[0-9]+\.m\.zenmind\.cc$
+	handle @mobileWebApp {
+		reverse_proxy relay:8080
+	}
+
 	handle /api/upload {
 		reverse_proxy relay:8080
 	}

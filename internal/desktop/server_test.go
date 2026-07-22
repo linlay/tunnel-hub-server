@@ -90,6 +90,19 @@ func TestRegisterDesktopDeviceCreatesTokenAndBrokerHost(t *testing.T) {
 	}
 }
 
+func TestRegisterDesktopDeviceReturnsConfiguredRelayPublicURL(t *testing.T) {
+	server, _ := newDesktopTestServer(t)
+	server.Config.RelayPublicURL = "ws://127.0.0.1:11961/tunnel"
+	rec := performRegister(t, server, desktopRegisterBody("mac-mini", "", false), defaultDesktopJWT)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	response := decodeRegisterResponse(t, rec.Body)
+	if response.RelayURL != "ws://127.0.0.1:11961/tunnel" {
+		t.Fatalf("relayUrl = %q", response.RelayURL)
+	}
+}
+
 func TestRegisterDesktopDeviceAcceptsSSOJWT(t *testing.T) {
 	privateKey, publicKeyPEM := testSSOJWTKey(t)
 	server, db := newDesktopTestServerWithConfig(t, config.RelayConfig{
@@ -486,6 +499,266 @@ func TestDesktopPublicWebSocketNoTokenMapsDesktopError(t *testing.T) {
 	}
 	if resp == nil || resp.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("no-token status = %#v, err = %v", resp, err)
+	}
+}
+
+func mobileWebAppPublicHost(devicePublicHost string, port int) string {
+	label, suffix, found := strings.Cut(devicePublicHost, ".")
+	if !found {
+		return ""
+	}
+	return fmt.Sprintf("%s-%d.%s", label, port, suffix)
+}
+
+func TestDesktopMobileWebAppHTTPIntegration(t *testing.T) {
+	manager, server, registration := newDesktopRelayIntegrationServer(t)
+	publicHost := mobileWebAppPublicHost(registration.PublicHost, 43210)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go runFakeWebAppTunnelClient(t, ctx, server.URL, registration.AgentToken, func(t *testing.T, stream *yamux.Stream) {
+		t.Helper()
+		var request tunnel.StreamRequest
+		if err := tunnel.ReadJSON(stream, &request); err != nil {
+			t.Errorf("read mobile webapp request: %v", err)
+			return
+		}
+		payload := request.Payload
+		if request.NS != tunnel.NamespaceWebApp || request.Type != tunnel.TypeWebAppHTTPRequest || payload == nil {
+			t.Errorf("mobile webapp request metadata = %#v", request)
+			return
+		}
+		if payload.Source != "mobile" || payload.AuthToken != "paired-token" {
+			t.Errorf("mobile auth metadata = %#v", payload)
+			return
+		}
+		if payload.Public == nil || payload.Public.Path != "/hello?source=m" {
+			t.Errorf("mobile public metadata = %#v", payload.Public)
+			return
+		}
+		if payload.Public.Headers.Get("Authorization") != "" {
+			t.Errorf("authorization header leaked to webapp: %q", payload.Public.Headers.Get("Authorization"))
+			return
+		}
+		if strings.Contains(payload.Public.Headers.Get("Cookie"), "zenmind_mobile_session") {
+			t.Errorf("mobile session cookie leaked to webapp: %q", payload.Public.Headers.Get("Cookie"))
+			return
+		}
+		if payload.Public.Headers.Get("X-Forwarded-Host") != publicHost ||
+			payload.Public.Headers.Get("X-Forwarded-Proto") != "https" ||
+			payload.Public.Headers.Get("X-Forwarded-Prefix") != "" {
+			t.Errorf("mobile forwarded headers = %#v", payload.Public.Headers)
+			return
+		}
+		if payload.Upstream == nil || payload.Upstream.Host != "127.0.0.1" || payload.Upstream.Port != 43210 {
+			t.Errorf("mobile upstream metadata = %#v", payload.Upstream)
+			return
+		}
+		body := []byte("hello mobile webapp")
+		if err := tunnel.WriteJSON(stream, tunnel.NewSuccessResponse(tunnel.NamespaceWebApp, tunnel.TypeWebAppHTTPRequest, request.ID, &tunnel.StreamResponseData{
+			StatusCode: http.StatusOK,
+			BodyLength: tunnel.Int64Ptr(int64(len(body))),
+		})); err != nil {
+			t.Errorf("write mobile webapp response: %v", err)
+			return
+		}
+		if _, err := stream.Write(body); err != nil {
+			t.Errorf("write mobile webapp body: %v", err)
+		}
+	})
+	waitForDesktopAgentToken(t, manager, registration.TokenID)
+
+	req, err := http.NewRequest(http.MethodGet, server.URL+"/hello?source=m&token=paired-token", nil)
+	if err != nil {
+		t.Fatalf("new mobile webapp request: %v", err)
+	}
+	req.Host = publicHost
+	client := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error {
+		return http.ErrUseLastResponse
+	}}
+	loginResponse, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("start mobile webapp session: %v", err)
+	}
+	defer loginResponse.Body.Close()
+	if loginResponse.StatusCode != http.StatusSeeOther || loginResponse.Header.Get("Location") != "/hello?source=m" {
+		t.Fatalf("mobile login response: status=%d location=%q", loginResponse.StatusCode, loginResponse.Header.Get("Location"))
+	}
+	cookies := loginResponse.Cookies()
+	if len(cookies) != 1 || !cookies[0].HttpOnly || !cookies[0].Secure {
+		t.Fatalf("mobile session cookie = %#v", cookies)
+	}
+
+	req, err = http.NewRequest(http.MethodGet, server.URL+"/hello?source=m", nil)
+	if err != nil {
+		t.Fatalf("new authenticated mobile webapp request: %v", err)
+	}
+	req.Host = publicHost
+	req.AddCookie(cookies[0])
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("do authenticated mobile webapp request: %v", err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read mobile webapp body: %v", err)
+	}
+	if resp.StatusCode != http.StatusOK || string(body) != "hello mobile webapp" {
+		t.Fatalf("mobile webapp response: status=%d body=%q", resp.StatusCode, string(body))
+	}
+}
+
+func TestDesktopMobileWebAppRequiresToken(t *testing.T) {
+	_, server, registration := newDesktopRelayIntegrationServer(t)
+	req, err := http.NewRequest(http.MethodGet, server.URL+"/", nil)
+	if err != nil {
+		t.Fatalf("new mobile webapp request: %v", err)
+	}
+	req.Host = mobileWebAppPublicHost(registration.PublicHost, 43210)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("do mobile webapp request: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("mobile webapp status = %d, want %d", resp.StatusCode, http.StatusUnauthorized)
+	}
+}
+
+func TestDesktopMobileWebAppUnknownLengthAndResponseHeaders(t *testing.T) {
+	manager, server, registration := newDesktopRelayIntegrationServer(t)
+	publicHost := mobileWebAppPublicHost(registration.PublicHost, 43210)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go runFakeWebAppTunnelClient(t, ctx, server.URL, registration.AgentToken, func(t *testing.T, stream *yamux.Stream) {
+		var request tunnel.StreamRequest
+		if err := tunnel.ReadJSON(stream, &request); err != nil {
+			t.Errorf("read mobile webapp request: %v", err)
+			return
+		}
+		body := []byte("streamed mobile response")
+		if err := tunnel.WriteJSON(stream, tunnel.NewSuccessResponse(tunnel.NamespaceWebApp, tunnel.TypeWebAppHTTPRequest, request.ID, &tunnel.StreamResponseData{
+			StatusCode: http.StatusFound,
+			Headers: http.Header{
+				"Location":   []string{"http://127.0.0.1:43210/login?next=home"},
+				"Set-Cookie": []string{"theme=dark; Path=/; HttpOnly"},
+			},
+			BodyLength: tunnel.Int64Ptr(tunnel.UnknownBodyLength),
+		})); err != nil {
+			t.Errorf("write mobile webapp response: %v", err)
+			return
+		}
+		if _, err := stream.Write(body); err != nil {
+			t.Errorf("write mobile webapp body: %v", err)
+		}
+	})
+	waitForDesktopAgentToken(t, manager, registration.TokenID)
+
+	req, err := http.NewRequest(http.MethodGet, server.URL+"/start", nil)
+	if err != nil {
+		t.Fatalf("new mobile webapp request: %v", err)
+	}
+	req.Host = publicHost
+	req.Header.Set("Authorization", "Bearer paired-token")
+	client := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error {
+		return http.ErrUseLastResponse
+	}}
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("do mobile webapp request: %v", err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read mobile webapp response: %v", err)
+	}
+	wantLocation := "https://" + publicHost + "/login?next=home"
+	if resp.StatusCode != http.StatusFound || resp.Header.Get("Location") != wantLocation {
+		t.Fatalf("mobile redirect: status=%d location=%q", resp.StatusCode, resp.Header.Get("Location"))
+	}
+	if string(body) != "streamed mobile response" {
+		t.Fatalf("mobile streamed body = %q", body)
+	}
+	if cookie := resp.Header.Get("Set-Cookie"); !strings.Contains(cookie, "Path=/") {
+		t.Fatalf("mobile cookie path = %q", cookie)
+	}
+}
+
+func TestDesktopMobileWebAppWebSocketIntegration(t *testing.T) {
+	manager, server, registration := newDesktopRelayIntegrationServer(t)
+	publicHost := mobileWebAppPublicHost(registration.PublicHost, 43210)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go runFakeWebAppTunnelClient(t, ctx, server.URL, registration.AgentToken, func(t *testing.T, stream *yamux.Stream) {
+		var request tunnel.StreamRequest
+		if err := tunnel.ReadJSON(stream, &request); err != nil {
+			t.Errorf("read mobile webapp websocket request: %v", err)
+			return
+		}
+		payload := request.Payload
+		if request.Type != tunnel.TypeWebSocketConnect || payload == nil || payload.Source != "mobile" || payload.AuthToken != "paired-token" {
+			t.Errorf("mobile websocket metadata = %#v", request)
+			return
+		}
+		if payload.Public == nil || payload.Public.Path != "/socket?room=1" || payload.Public.Headers.Get("Sec-WebSocket-Protocol") != "" {
+			t.Errorf("mobile websocket public metadata = %#v", payload.Public)
+			return
+		}
+		if payload.Upstream == nil || payload.Upstream.Port != 43210 || payload.Upstream.Scheme != "ws" {
+			t.Errorf("mobile websocket upstream = %#v", payload.Upstream)
+			return
+		}
+		if err := tunnel.WriteJSON(stream, tunnel.NewSuccessResponse(tunnel.NamespaceWebApp, tunnel.TypeWebSocketConnect, request.ID, &tunnel.StreamResponseData{
+			StatusCode: http.StatusSwitchingProtocols,
+		})); err != nil {
+			t.Errorf("write mobile websocket response: %v", err)
+			return
+		}
+		header, message, err := tunnel.ReadWSFrame(stream)
+		if err != nil {
+			t.Errorf("read mobile websocket frame: %v", err)
+			return
+		}
+		if err := tunnel.WriteWSFrame(stream, header.Type, []byte("mobile:"+string(message))); err != nil {
+			t.Errorf("write mobile websocket frame: %v", err)
+		}
+	})
+	waitForDesktopAgentToken(t, manager, registration.TokenID)
+
+	client, _, err := dialDesktopPublicWebSocket(t, ctx, server.URL, publicHost, "/socket?room=1&token=paired-token", nil)
+	if err != nil {
+		t.Fatalf("dial mobile webapp websocket: %v", err)
+	}
+	defer client.Close()
+	if err := client.WriteMessage(websocket.TextMessage, []byte("ping")); err != nil {
+		t.Fatalf("write mobile webapp websocket: %v", err)
+	}
+	_, message, err := client.ReadMessage()
+	if err != nil {
+		t.Fatalf("read mobile webapp websocket: %v", err)
+	}
+	if string(message) != "mobile:ping" {
+		t.Fatalf("mobile websocket message = %q", message)
+	}
+}
+
+func TestDesktopMobileWebAppUnknownHostDoesNotSetSessionCookie(t *testing.T) {
+	_, server, _ := newDesktopRelayIntegrationServer(t)
+	req, err := http.NewRequest(http.MethodGet, server.URL+"/?token=paired-token", nil)
+	if err != nil {
+		t.Fatalf("new mobile webapp request: %v", err)
+	}
+	req.Host = "missing-43210.m.zenmind.cc"
+	client := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error {
+		return http.ErrUseLastResponse
+	}}
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("do mobile webapp request: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound || len(resp.Cookies()) != 0 {
+		t.Fatalf("unknown mobile host: status=%d cookies=%#v", resp.StatusCode, resp.Cookies())
 	}
 }
 
