@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/textproto"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -29,6 +30,17 @@ type fakeUploadResult struct {
 	Downloaded    []byte
 }
 
+func TestRelayUploadRejectsMainHost(t *testing.T) {
+	relay := NewRelay(nil, NewManager(), nil, 64<<20)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/upload", nil)
+	req.Host = "tunnel-hub.zenmind.cc"
+	relay.HandleUpload(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
 func TestRelayUploadForwardsToDesktopAndServesPull(t *testing.T) {
 	db := openProxyTestDB(t)
 	manager := NewManager()
@@ -45,14 +57,14 @@ func TestRelayUploadForwardsToDesktopAndServesPull(t *testing.T) {
 	waitForAgentToken(t, manager, registration.Token.ID)
 
 	body, contentType := uploadMultipartBody(t, map[string]string{
-		"chatId":     "chat_upload",
-		"requestId":  "req_upload",
-		"publicHost": registration.Device.PublicHost,
+		"chatId":    "chat_upload",
+		"requestId": "req_upload",
 	}, "note.txt", "text/plain", []byte("hello upload"))
 	req, err := http.NewRequest(http.MethodPost, server.URL+"/api/upload", body)
 	if err != nil {
 		t.Fatalf("new upload request: %v", err)
 	}
+	req.Host = registration.Device.PublicHost
 	req.Header.Set("Content-Type", contentType)
 	req.Header.Set("Authorization", "Bearer desktop-app-token")
 	resp, err := http.DefaultClient.Do(req)
@@ -123,34 +135,34 @@ func TestRelayUploadRequiresFieldsAndDesktopOnline(t *testing.T) {
 	}{
 		{
 			name:       "missing token",
-			fields:     map[string]string{"chatId": "chat_1", "publicHost": registration.Device.PublicHost},
+			fields:     map[string]string{"chatId": "chat_1"},
 			fileName:   "a.txt",
 			wantStatus: http.StatusUnauthorized,
 		},
 		{
 			name:       "missing chat id",
 			auth:       "desktop-token",
-			fields:     map[string]string{"publicHost": registration.Device.PublicHost},
+			fields:     map[string]string{},
 			fileName:   "a.txt",
 			wantStatus: http.StatusBadRequest,
 		},
 		{
-			name:       "missing public host",
+			name:       "public host field is forbidden even when empty",
 			auth:       "desktop-token",
-			fields:     map[string]string{"chatId": "chat_1"},
+			fields:     map[string]string{"chatId": "chat_1", "publicHost": ""},
 			fileName:   "a.txt",
 			wantStatus: http.StatusBadRequest,
 		},
 		{
 			name:       "missing file",
 			auth:       "desktop-token",
-			fields:     map[string]string{"chatId": "chat_1", "publicHost": registration.Device.PublicHost},
+			fields:     map[string]string{"chatId": "chat_1"},
 			wantStatus: http.StatusBadRequest,
 		},
 		{
 			name:       "desktop offline",
 			auth:       "desktop-token",
-			fields:     map[string]string{"chatId": "chat_1", "publicHost": registration.Device.PublicHost},
+			fields:     map[string]string{"chatId": "chat_1"},
 			fileName:   "a.txt",
 			wantStatus: http.StatusBadGateway,
 		},
@@ -162,6 +174,7 @@ func TestRelayUploadRequiresFieldsAndDesktopOnline(t *testing.T) {
 			if err != nil {
 				t.Fatalf("new upload request: %v", err)
 			}
+			req.Host = registration.Device.PublicHost
 			req.Header.Set("Content-Type", contentType)
 			if tc.auth != "" {
 				req.Header.Set("Authorization", "Bearer "+tc.auth)
@@ -238,13 +251,13 @@ func TestRelayUploadCleansPendingFileAfterDesktopError(t *testing.T) {
 	waitForAgentToken(t, manager, registration.Token.ID)
 
 	body, contentType := uploadMultipartBody(t, map[string]string{
-		"chatId":     "chat_upload",
-		"publicHost": registration.Device.PublicHost,
+		"chatId": "chat_upload",
 	}, "note.txt", "text/plain", []byte("hello upload"))
 	req, err := http.NewRequest(http.MethodPost, server.URL+"/api/upload", body)
 	if err != nil {
 		t.Fatalf("new upload request: %v", err)
 	}
+	req.Host = registration.Device.PublicHost
 	req.Header.Set("Content-Type", contentType)
 	req.Header.Set("Authorization", "Bearer desktop-app-token")
 	resp, err := http.DefaultClient.Do(req)
@@ -363,7 +376,22 @@ func runFakeUploadDesktop(t *testing.T, ctx context.Context, relayURL, token str
 		respond(stream, frame)
 		return
 	}
-	httpResp, err := http.Get(frame.Payload.Upload.URL) //nolint:gosec
+	pullTarget, err := url.Parse(frame.Payload.Upload.URL)
+	if err != nil {
+		t.Errorf("parse upload pull URL: %v", err)
+		return
+	}
+	base, _ := url.Parse(relayURL)
+	originalHost := pullTarget.Host
+	pullTarget.Scheme = base.Scheme
+	pullTarget.Host = base.Host
+	pullReq, err := http.NewRequest(http.MethodGet, pullTarget.String(), nil)
+	if err != nil {
+		t.Errorf("create upload pull request: %v", err)
+		return
+	}
+	pullReq.Host = originalHost
+	httpResp, err := http.DefaultClient.Do(pullReq)
 	if err != nil {
 		t.Errorf("fake desktop pull upload: %v", err)
 		return

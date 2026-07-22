@@ -12,14 +12,26 @@ tunnel-hub.zenmind.cc {
 	}
 
 	handle /api/upload {
+		respond 404
+	}
+
+	handle /api/resource {
+		respond 404
+	}
+
+	handle /api/download {
+		respond 404
+	}
+
+	handle /api/download/* {
+		respond 404
+	}
+
+	handle /api/pull/* {
 		reverse_proxy relay:8080
 	}
 
-	handle /api/pull* {
-		reverse_proxy relay:8080
-	}
-
-	handle /api/download* {
+	handle /api/push/* {
 		reverse_proxy relay:8080
 	}
 
@@ -39,12 +51,24 @@ tunnel-hub.zenmind.cc {
 		reverse_proxy relay:8080
 	}
 
-	handle /api/pull* {
+	handle /api/resource {
 		reverse_proxy relay:8080
 	}
 
-	handle /api/download* {
+	handle /api/pull/* {
 		reverse_proxy relay:8080
+	}
+
+	handle /api/push/* {
+		reverse_proxy relay:8080
+	}
+
+	handle /api/download {
+		respond 404
+	}
+
+	handle /api/download/* {
+		respond 404
 	}
 
 	@desktopWs {

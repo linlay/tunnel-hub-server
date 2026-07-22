@@ -27,7 +27,7 @@ type Relay struct {
 	WebAppBaseDomain    string
 	trustedProxyCIDRs   []*net.IPNet
 	uploads             *uploadStore
-	downloads           *downloadStore
+	resources           *resourceStore
 }
 
 func NewRelay(db *store.DB, manager *Manager, logger *slog.Logger, maxRequestBodyBytes int64) *Relay {
@@ -45,7 +45,7 @@ func NewRelay(db *store.DB, manager *Manager, logger *slog.Logger, maxRequestBod
 		DesktopBaseDomain:   "m.zenmind.cc",
 		WebAppBaseDomain:    "wa.zenmind.cc",
 		uploads:             newUploadStore(),
-		downloads:           newDownloadStore(),
+		resources:           newResourceStore(),
 	}
 }
 

@@ -51,14 +51,13 @@ type pendingUpload struct {
 }
 
 type parsedUploadRequest struct {
-	ChatID     string
-	RequestID  string
-	PublicHost string
-	FileName   string
-	MimeType   string
-	SizeBytes  int64
-	SHA256     string
-	Path       string
+	ChatID    string
+	RequestID string
+	FileName  string
+	MimeType  string
+	SizeBytes int64
+	SHA256    string
+	Path      string
 }
 
 type desktopUploadPayload struct {
@@ -160,6 +159,10 @@ func (s *uploadStore) get(id, ticket string) (*pendingUpload, int, string) {
 }
 
 func (r *Relay) HandleUpload(w http.ResponseWriter, req *http.Request) {
+	if !isHostUnderBaseDomain(req.Host, r.DesktopBaseDomain) {
+		http.NotFound(w, req)
+		return
+	}
 	if req.Method != http.MethodPost {
 		writeUploadError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
@@ -170,23 +173,18 @@ func (r *Relay) HandleUpload(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 	parsed, status, message := r.parseUploadMultipart(w, req)
-	if status != http.StatusOK {
-		writeUploadError(w, status, message)
-		return
-	}
 	registered := false
 	defer func() {
 		if !registered && parsed.Path != "" {
 			_ = os.Remove(parsed.Path)
 		}
 	}()
-
-	publicHost := r.uploadPublicHost(req, parsed.PublicHost)
-	if publicHost == "" {
-		writeUploadError(w, http.StatusBadRequest, "publicHost is required")
+	if status != http.StatusOK {
+		writeUploadError(w, status, message)
 		return
 	}
-	device, err := r.DB.GetDesktopDeviceByPublicHost(req.Context(), publicHost)
+
+	device, err := r.DB.GetDesktopDeviceByPublicHost(req.Context(), tunnel.NormalizeHost(req.Host))
 	if errors.Is(err, store.ErrNotFound) {
 		writeUploadError(w, http.StatusNotFound, "desktop not found")
 		return
@@ -308,12 +306,8 @@ func (r *Relay) parseUploadMultipart(w http.ResponseWriter, req *http.Request) (
 			}
 			out.RequestID = value
 		case "publicHost":
-			value, status, message := readUploadField(part)
-			if status != http.StatusOK {
-				_ = part.Close()
-				return out, status, message
-			}
-			out.PublicHost = value
+			_ = part.Close()
+			return out, http.StatusBadRequest, "publicHost form field is not allowed"
 		case "file":
 			if out.Path != "" {
 				_ = part.Close()
@@ -336,7 +330,6 @@ func (r *Relay) parseUploadMultipart(w http.ResponseWriter, req *http.Request) (
 	}
 	out.ChatID = strings.TrimSpace(out.ChatID)
 	out.RequestID = strings.TrimSpace(out.RequestID)
-	out.PublicHost = strings.TrimSpace(out.PublicHost)
 	if out.ChatID == "" {
 		return out, http.StatusBadRequest, "chatId is required"
 	}
@@ -510,24 +503,6 @@ func detectUploadMimeType(path string) string {
 		return http.DetectContentType(head[:n])
 	}
 	return "application/octet-stream"
-}
-
-func (r *Relay) uploadPublicHost(req *http.Request, formValue string) string {
-	if isHostUnderBaseDomain(req.Host, r.DesktopBaseDomain) {
-		return tunnel.NormalizeHost(req.Host)
-	}
-	return normalizeUploadPublicHost(formValue)
-}
-
-func normalizeUploadPublicHost(value string) string {
-	value = strings.TrimSpace(value)
-	if value == "" {
-		return ""
-	}
-	if parsed, err := url.Parse(value); err == nil && parsed.Host != "" {
-		return tunnel.NormalizeHost(parsed.Host)
-	}
-	return tunnel.NormalizeHost(value)
 }
 
 func (r *Relay) uploadPullURL(req *http.Request, uploadID, ticket string) string {

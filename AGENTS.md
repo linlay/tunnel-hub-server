@@ -36,6 +36,8 @@ Relay 入口在 `cmd/relay/main.go`，启动顺序是：
 - `/tunnel`: Agent 或 Desktop 主动连入的 WebSocket。旧 Agent 使用 `Authorization: Bearer <token>`；Desktop 推荐首帧发送 `ns=d` 的 `tunnel.open`。
 - 普通服务 Host: 通过 `routes.public_host` 找 active route，打开对应 token 的 yamux stream，转发 HTTP/WebSocket 到 Agent 本地服务。
 - `*.m.zenmind.cc`: Desktop public Host。WebSocket upgrade 请求进入 Relay，向 Desktop tunnel stream 发送 `ns=d` / `desktop.websocket.open` 元数据；普通 HTTP 由宿主机反向代理转发到 `tunnel-hub-public`。
+- `*.m.zenmind.cc/api/upload`: Mobile 上传入口，只从请求 Host 确定 Desktop，内部发送 `ns=ap`, `type=/api/upload`；multipart 不允许携带 `publicHost`。
+- `*.m.zenmind.cc/api/resource`: Mobile 资源入口，内部发送 `ns=ap`, `type=/api/resource` 和 `{file,pushURL}`；Desktop 通过 ticket 保护的 `/api/push/{id}` 回推文件。
 - `*.wa.zenmind.cc`: Desktop WebApp public HTTP/WebSocket。Relay 通过 route 和 token 打开 Desktop stream，向 Desktop 发送 `ns=wa` 的 `http.request` 或 `websocket.connect` 元数据。
 
 ## 4. 目录结构
@@ -89,6 +91,8 @@ Relay 入口在 `cmd/relay/main.go`，启动顺序是：
 - `GET /api/components`
 - `POST /api/desktop/devices/register`
 - `PUT /api/desktop/devices/{deviceId}/webapps/{name}`
+- `POST https://<desktop>.m.zenmind.cc/api/upload`
+- `GET https://<desktop>.m.zenmind.cc/api/resource?file=<chat-relative-path>`
 
 隧道协议要点：
 
@@ -98,6 +102,8 @@ Relay 入口在 `cmd/relay/main.go`，启动顺序是：
 - WebApp HTTP metadata 使用 `ns=wa`, `type=http.request`。
 - WebApp WebSocket metadata 使用 `ns=wa`, `type=websocket.connect`。
 - Desktop public WebSocket metadata 使用 `ns=d`, `type=desktop.websocket.open`。
+- Agent Platform 业务帧的 `ns=ap` 只存在于内部 WebSocket 协议，不映射成 HTTP URL 前缀。
+- `/api/pull/{id}` 与 `/api/push/{id}` 是 ticket 保护的内部附件数据面，不属于客户端公共 API。
 
 ## 7. 开发要点
 
@@ -109,6 +115,7 @@ Relay 入口在 `cmd/relay/main.go`，启动顺序是：
 - HTTP 请求体当前在 Relay 侧完整缓冲，限制由 `MAX_REQUEST_BODY_BYTES` 控制。涉及大文件、流式上传或 backpressure 的改动要重点测试。
 - Desktop public Host 不使用 `deviceId`，由随机 `zm...m.zenmind.cc` 生成；WebApp Host 由随机 `zwa...wa.zenmind.cc` 生成。
 - Desktop/platform auth token 由 Desktop 侧校验，Relay 只负责把 query token 或 `bearer.<token>` subprotocol 透传给 Desktop。
+- 附件 API 的 Desktop 身份只来自 `<desktop>.m.zenmind.cc` Host；不得从 body、query 或其他客户端字段接受 `publicHost` 覆盖。
 - 管理 token 手动创建当前禁用；Desktop 注册会创建/轮换 tunnel token。
 - Go 改动提交前运行 `gofmt -w` 和相关 `go test`。
 

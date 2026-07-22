@@ -13,8 +13,8 @@
 
 典型域名规划：
 
-- `tunnel-hub.zenmind.cc`: 管理前端、`/api/admin`、`/api/desktop`、`/api/components`、`/api/upload`、`/api/pull`、`/api/download`、`/tunnel`。
-- `*.m.zenmind.cc`: 普通浏览器请求打开 Desktop public mini site；WebSocket upgrade、`/api/upload`、`/api/pull` 和 `/api/download` 请求进入 Relay。
+- `tunnel-hub.zenmind.cc`: 管理前端、`/api/admin`、`/api/desktop`、`/api/components` 和 `/tunnel`；不提供附件业务 API。
+- `*.m.zenmind.cc`: 普通浏览器请求打开 Desktop public mini site；WebSocket upgrade、`POST /api/upload` 和 `GET /api/resource` 请求进入 Relay。
 - `*.wa.zenmind.cc`: Desktop WebApp 反向代理入口，支持 HTTP 和 WebSocket。
 
 ## 2. 快速开始
@@ -158,8 +158,8 @@ docker compose up -d --build
 - Website: `127.0.0.1:11963 -> 80`
 - Public Desktop site: `127.0.0.1:11965 -> 80`
 - `tunnel-hub.zenmind.cc/`: 转发到 website 容器。
-- `tunnel-hub.zenmind.cc/api/admin`, `/api/desktop`, `/api/components`, `/api/upload`, `/api/pull`, `/api/download`, `/tunnel`: 转发到 Relay。
-- `*.m.zenmind.cc`: WebSocket upgrade、`/api/upload`、`/api/pull` 和 `/api/download` 转发到 Relay；普通 HTTP 转发到 public Desktop site。
+- `tunnel-hub.zenmind.cc/api/admin`, `/api/desktop`, `/api/components`, `/tunnel`: 转发到 Relay；`/api/upload`、`/api/resource` 和旧 `/api/download` 明确返回 404。
+- `*.m.zenmind.cc`: WebSocket upgrade、`POST /api/upload` 和 `GET /api/resource` 转发到 Relay；普通 HTTP 转发到 public Desktop site。
 - `*.wa.zenmind.cc`: 直接转发到 Relay。
 
 示例配置在 `deploy/nginx/zenmind-tunnel.conf` 和 `deploy/caddy/Caddyfile`。
@@ -220,9 +220,8 @@ curl -X PUT https://tunnel-hub.zenmind.cc/api/desktop/devices/mac-mini/webapps/n
 上传附件到 Desktop chat：
 
 ```bash
-curl -X POST https://tunnel-hub.zenmind.cc/api/upload \
+curl -X POST https://zmxxxx.m.zenmind.cc/api/upload \
   -H "Authorization: Bearer $DESKTOP_APP_TOKEN" \
-  -F publicHost=zmxxxx.m.zenmind.cc \
   -F chatId=chat_xxx \
   -F file=@./note.txt
 ```
@@ -230,10 +229,8 @@ curl -X POST https://tunnel-hub.zenmind.cc/api/upload \
 从 Desktop chat 下载附件：
 
 ```bash
-curl -OJ -X POST https://tunnel-hub.zenmind.cc/api/download \
-  -H "Authorization: Bearer $DESKTOP_APP_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"publicHost":"zmxxxx.m.zenmind.cc","chatId":"chat_xxx","resourceId":"r01"}'
+curl -OJ 'https://zmxxxx.m.zenmind.cc/api/resource?file=chat_xxx%2Fnote.txt' \
+  -H "Authorization: Bearer $DESKTOP_APP_TOKEN"
 ```
 
 公开组件列表：
@@ -250,8 +247,8 @@ curl https://tunnel-hub.zenmind.cc/api/components
 - `desktop is offline` / `assigned desktop is offline`: 确认 Desktop 或 Agent 已连接 `/tunnel`，且 token 仍为 active。
 - WebSocket 无法升级：检查反向代理是否保留 `Upgrade` 和 `Connection` 头。
 - Desktop public mini site 没有打开：确认 `*.m.zenmind.cc` 普通 HTTP 已转发到 `tunnel-hub-public`，不是 Relay。
-- 附件上传返回 `desktop is offline`：确认对应 `publicHost` 的 Desktop 已连接 `/tunnel`。
-- 附件下载返回 `desktop download timed out`：确认 Desktop 已实现 `/api/download` 业务帧，并能访问 Hub 提供的 `/api/download/push/{id}`。
+- 附件上传返回 `desktop is offline`：确认请求 Host 对应的 Desktop 已连接 `/tunnel`。
+- 附件资源返回 `desktop resource timed out`：确认 Desktop 已实现 `/api/resource` 业务帧，并能访问 Hub 提供的 ticket 保护回推 URL。
 - 公网 Host 404：检查 DNS wildcard、Nginx/Caddy wildcard route、`PUBLIC_BASE_DOMAIN` / `DESKTOP_PUBLIC_BASE_DOMAIN` / `WEBAPP_PUBLIC_BASE_DOMAIN`。
 - HTTP 上传失败：检查 `MAX_REQUEST_BODY_BYTES`，当前 Relay 会完整缓冲请求体。
 
