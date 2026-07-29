@@ -104,7 +104,7 @@ docker compose up --build
 | `SSO_JWT_ISSUER` | 空 | 官网 SSO JWT issuer，生产和 Desktop 注册 API 必填。 |
 | `SSO_JWT_PUBLIC_KEY_FILE` | 空 | 官网 SSO JWT PEM 公钥文件路径。 |
 | `SSO_JWT_PUBLIC_KEY_PEM` | 空 | 官网 SSO JWT PEM 公钥内容，支持转义 `\n`。 |
-| `SSO_JWT_AUDIENCE` | `zenmind-tunnel-hub-server` | JWT audience。 |
+| `SSO_JWT_AUDIENCE` | `tunnel` | JWT audience。 |
 | `MAX_REQUEST_BODY_BYTES` | `67108864` | Relay 缓冲 HTTP 请求体的最大字节数。 |
 | `TRUSTED_PROXY_CIDRS` | 空 | 可信反向代理 CIDR，命中后才读取 `X-Real-IP` / `X-Forwarded-For`；生产 Docker + nginx 建议 `172.23.0.1/32,127.0.0.1/32,::1/128`。 |
 

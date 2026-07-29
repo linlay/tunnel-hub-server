@@ -55,7 +55,7 @@ func LoadRelayConfig() RelayConfig {
 		SSOJWTIssuer:             env("SSO_JWT_ISSUER", ""),
 		SSOJWTPublicKeyFile:      env("SSO_JWT_PUBLIC_KEY_FILE", ""),
 		SSOJWTPublicKeyPEM:       env("SSO_JWT_PUBLIC_KEY_PEM", ""),
-		SSOJWTAudience:           env("SSO_JWT_AUDIENCE", "zenmind-tunnel-hub-server"),
+		SSOJWTAudience:           env("SSO_JWT_AUDIENCE", "tunnel"),
 		MaxRequestBodyBytes:      envInt64("MAX_REQUEST_BODY_BYTES", 64<<20),
 		TrustedProxyCIDRs:        env("TRUSTED_PROXY_CIDRS", ""),
 	}
