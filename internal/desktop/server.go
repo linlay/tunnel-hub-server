@@ -32,10 +32,12 @@ func NewServer(db *store.DB, cfg config.RelayConfig, logger *slog.Logger) (*Serv
 		logger = slog.Default()
 	}
 	ssoJWT, err := auth.NewSSOJWTVerifier(auth.SSOJWTConfig{
-		Issuer:        cfg.SSOJWTIssuer,
-		Audience:      cfg.SSOJWTAudience,
-		PublicKeyFile: cfg.SSOJWTPublicKeyFile,
-		PublicKeyPEM:  cfg.SSOJWTPublicKeyPEM,
+		Issuer:           cfg.SSOJWTIssuer,
+		Audience:         cfg.SSOJWTAudience,
+		UserIDClaim:      cfg.SSOJWTUserIDClaim,
+		AllowAnyAudience: cfg.SSOJWTAllowAnyAudience,
+		PublicKeyFile:    cfg.SSOJWTPublicKeyFile,
+		PublicKeyPEM:     cfg.SSOJWTPublicKeyPEM,
 	})
 	if err != nil {
 		return nil, err
@@ -228,7 +230,7 @@ func (s *Server) authorizeRegistration(w http.ResponseWriter, r *http.Request) (
 		writeError(w, http.StatusUnauthorized, "invalid bearer token")
 		return auth.SSOJWTPrincipal{}, false
 	}
-	if !principal.HasScope("tunnel") {
+	if !s.Config.SSOJWTAllowMissingScope && !principal.HasScope("tunnel") {
 		writeError(w, http.StatusForbidden, "tunnel scope required")
 		return auth.SSOJWTPrincipal{}, false
 	}

@@ -86,6 +86,42 @@ func TestAdminSSOJWTBearerAuth(t *testing.T) {
 	}
 }
 
+func TestAdminSSOJWTRelaxedCompatibility(t *testing.T) {
+	privateKey, publicKeyPEM := testSSOJWTKey(t)
+	server, _ := newAdminTestServerWithConfig(t, config.RelayConfig{
+		PublicBaseDomain:        "tunnel-hub.zenmind.cc",
+		SSOJWTIssuer:            "https://official.example.test",
+		SSOJWTPublicKeyPEM:      publicKeyPEM,
+		SSOJWTAudience:          "tunnel",
+		SSOJWTAllowAnyAudience:  true,
+		SSOJWTAllowAnyAdminRole: true,
+		SSOJWTAllowMissingScope: true,
+	})
+	token := signTestSSOJWT(t, privateKey, testSSOJWTClaims{
+		Issuer:   "https://official.example.test",
+		Audience: "unrelated-client",
+		UserID:   "external-user",
+		Email:    "external@example.test",
+		Expires:  time.Now().Add(time.Hour),
+	})
+	req := httptest.NewRequest(http.MethodGet, "/api/admin/me", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+
+	server.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("relaxed admin JWT status = %d body = %s", rec.Code, rec.Body.String())
+	}
+	var response map[string]any
+	if err := json.NewDecoder(rec.Body).Decode(&response); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if response["role"] != "admin" || response["userId"] != "external-user" {
+		t.Fatalf("unexpected relaxed principal: %#v", response)
+	}
+}
+
 func TestAdminLocalLoginCookieAuth(t *testing.T) {
 	server, db := newAdminTestServer(t)
 	if _, _, err := db.EnsureAdminUser(context.Background(), "admin", "secret"); err != nil {
@@ -800,7 +836,7 @@ func signTestSSOJWTWithAlg(t *testing.T, privateKey *rsa.PrivateKey, claims test
 	headerJSON, _ := json.Marshal(map[string]any{"alg": alg, "typ": "JWT", "kid": "test-key"})
 	claimsJSON, _ := json.Marshal(map[string]any{
 		"iss":     claims.Issuer,
-		"sub":     "user:" + claims.UserID,
+		"sub":     claims.UserID,
 		"aud":     claims.Audience,
 		"iat":     time.Now().Unix(),
 		"exp":     claims.Expires.Unix(),

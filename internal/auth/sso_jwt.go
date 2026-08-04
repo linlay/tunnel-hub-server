@@ -20,10 +20,12 @@ var (
 )
 
 type SSOJWTConfig struct {
-	Issuer        string
-	Audience      string
-	PublicKeyFile string
-	PublicKeyPEM  string
+	Issuer           string
+	Audience         string
+	UserIDClaim      string
+	AllowAnyAudience bool
+	PublicKeyFile    string
+	PublicKeyPEM     string
 }
 
 type SSOJWTPrincipal struct {
@@ -35,14 +37,20 @@ type SSOJWTPrincipal struct {
 }
 
 type SSOJWTVerifier struct {
-	issuer    string
-	audience  string
-	publicKey *rsa.PublicKey
+	issuer           string
+	audience         string
+	userIDClaim      string
+	allowAnyAudience bool
+	publicKey        *rsa.PublicKey
 }
 
 func NewSSOJWTVerifier(config SSOJWTConfig) (*SSOJWTVerifier, error) {
 	issuer := strings.TrimSpace(config.Issuer)
 	audience := strings.TrimSpace(config.Audience)
+	userIDClaim := strings.TrimSpace(config.UserIDClaim)
+	if userIDClaim == "" {
+		userIDClaim = "sub"
+	}
 	if issuer == "" && strings.TrimSpace(config.PublicKeyFile) == "" && strings.TrimSpace(config.PublicKeyPEM) == "" {
 		return nil, nil
 	}
@@ -53,16 +61,18 @@ func NewSSOJWTVerifier(config SSOJWTConfig) (*SSOJWTVerifier, error) {
 	if issuer == "" {
 		return nil, errors.New("SSO_JWT_ISSUER is required")
 	}
-	if audience == "" {
+	if audience == "" && !config.AllowAnyAudience {
 		return nil, errors.New("SSO_JWT_AUDIENCE is required")
 	}
 	if !configured {
 		return nil, errors.New("SSO_JWT_PUBLIC_KEY_FILE or SSO_JWT_PUBLIC_KEY_PEM is required")
 	}
 	return &SSOJWTVerifier{
-		issuer:    issuer,
-		audience:  audience,
-		publicKey: publicKey,
+		issuer:           issuer,
+		audience:         audience,
+		userIDClaim:      userIDClaim,
+		allowAnyAudience: config.AllowAnyAudience,
+		publicKey:        publicKey,
 	}, nil
 }
 
@@ -163,16 +173,23 @@ func (v *SSOJWTVerifier) Verify(token string, now time.Time) (SSOJWTPrincipal, e
 	if readStringClaim(claims, "iss") != v.issuer {
 		return SSOJWTPrincipal{}, errors.New("issuer mismatch")
 	}
-	if !claimHasAudience(claims["aud"], v.audience) {
+	if !v.allowAnyAudience && !claimHasAudience(claims["aud"], v.audience) {
 		return SSOJWTPrincipal{}, errors.New("audience mismatch")
 	}
 	exp := readNumberClaim(claims, "exp")
 	if exp <= 0 || exp <= now.Unix() {
 		return SSOJWTPrincipal{}, errors.New("token expired")
 	}
-	userID := readStringClaim(claims, "user_id")
+	const clockSkewSeconds = int64(60)
+	if nbf := readNumberClaim(claims, "nbf"); nbf > 0 && nbf > now.Unix()+clockSkewSeconds {
+		return SSOJWTPrincipal{}, errors.New("token is not active")
+	}
+	if iat := readNumberClaim(claims, "iat"); iat > 0 && iat > now.Unix()+clockSkewSeconds {
+		return SSOJWTPrincipal{}, errors.New("token issued in the future")
+	}
+	userID := readStringClaim(claims, v.userIDClaim)
 	if userID == "" {
-		return SSOJWTPrincipal{}, errors.New("missing user_id")
+		return SSOJWTPrincipal{}, errors.New("missing user id claim")
 	}
 	return SSOJWTPrincipal{
 		UserID: userID,

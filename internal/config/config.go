@@ -24,6 +24,10 @@ type RelayConfig struct {
 	SSOJWTPublicKeyFile      string
 	SSOJWTPublicKeyPEM       string
 	SSOJWTAudience           string
+	SSOJWTUserIDClaim        string
+	SSOJWTAllowAnyAudience   bool
+	SSOJWTAllowAnyAdminRole  bool
+	SSOJWTAllowMissingScope  bool
 	MaxRequestBodyBytes      int64
 	TrustedProxyCIDRs        string
 }
@@ -56,6 +60,10 @@ func LoadRelayConfig() RelayConfig {
 		SSOJWTPublicKeyFile:      env("SSO_JWT_PUBLIC_KEY_FILE", ""),
 		SSOJWTPublicKeyPEM:       env("SSO_JWT_PUBLIC_KEY_PEM", ""),
 		SSOJWTAudience:           env("SSO_JWT_AUDIENCE", "tunnel"),
+		SSOJWTUserIDClaim:        env("SSO_JWT_USER_ID_CLAIM", "sub"),
+		SSOJWTAllowAnyAudience:   envBool("SSO_JWT_ALLOW_ANY_AUDIENCE", false),
+		SSOJWTAllowAnyAdminRole:  envBool("SSO_JWT_ALLOW_ANY_ADMIN_ROLE", false),
+		SSOJWTAllowMissingScope:  envBool("SSO_JWT_ALLOW_MISSING_TUNNEL_SCOPE", false),
 		MaxRequestBodyBytes:      envInt64("MAX_REQUEST_BODY_BYTES", 64<<20),
 		TrustedProxyCIDRs:        env("TRUSTED_PROXY_CIDRS", ""),
 	}

@@ -33,10 +33,12 @@ func NewServer(db *store.DB, manager *proxy.Manager, cfg config.RelayConfig, log
 		logger = slog.Default()
 	}
 	ssoJWT, err := auth.NewSSOJWTVerifier(auth.SSOJWTConfig{
-		Issuer:        cfg.SSOJWTIssuer,
-		Audience:      cfg.SSOJWTAudience,
-		PublicKeyFile: cfg.SSOJWTPublicKeyFile,
-		PublicKeyPEM:  cfg.SSOJWTPublicKeyPEM,
+		Issuer:           cfg.SSOJWTIssuer,
+		Audience:         cfg.SSOJWTAudience,
+		UserIDClaim:      cfg.SSOJWTUserIDClaim,
+		AllowAnyAudience: cfg.SSOJWTAllowAnyAudience,
+		PublicKeyFile:    cfg.SSOJWTPublicKeyFile,
+		PublicKeyPEM:     cfg.SSOJWTPublicKeyPEM,
 	})
 	if err != nil {
 		return nil, err
@@ -865,12 +867,13 @@ func (s *Server) currentPrincipal(r *http.Request) (adminPrincipal, int, string,
 		}
 		return adminPrincipal{}, http.StatusUnauthorized, "invalid bearer token", false
 	}
-	if jwtPrincipal.Role != "admin" {
+	if !s.Config.SSOJWTAllowAnyAdminRole && jwtPrincipal.Role != "admin" {
 		return adminPrincipal{}, http.StatusForbidden, "admin role required", false
 	}
-	if !jwtPrincipal.HasScope("tunnel") {
+	if !s.Config.SSOJWTAllowMissingScope && !jwtPrincipal.HasScope("tunnel") {
 		return adminPrincipal{}, http.StatusForbidden, "tunnel scope required", false
 	}
+	jwtPrincipal.Role = "admin"
 	return ssoAdminPrincipal(jwtPrincipal), 0, "", true
 }
 

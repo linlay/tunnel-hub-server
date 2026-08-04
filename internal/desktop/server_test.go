@@ -164,6 +164,31 @@ func TestRegisterDesktopDeviceAcceptsSSOJWT(t *testing.T) {
 	}
 }
 
+func TestRegisterDesktopDeviceAcceptsRelaxedSSOJWT(t *testing.T) {
+	privateKey, publicKeyPEM := testSSOJWTKey(t)
+	server, _ := newDesktopTestServerWithConfig(t, config.RelayConfig{
+		PublicBaseDomain:        "tunnel-hub.zenmind.cc",
+		DesktopPublicBaseDomain: "m.zenmind.cc",
+		SSOJWTIssuer:            "https://official.example.test",
+		SSOJWTPublicKeyPEM:      publicKeyPEM,
+		SSOJWTAudience:          "tunnel",
+		SSOJWTAllowAnyAudience:  true,
+		SSOJWTAllowMissingScope: true,
+	})
+	token := signTestSSOJWT(t, privateKey, testSSOJWTClaims{
+		Issuer:   "https://official.example.test",
+		Audience: "unrelated-client",
+		UserID:   "external-user",
+		Email:    "external@example.test",
+		Expires:  time.Now().Add(time.Hour),
+	})
+
+	rec := performRegister(t, server, desktopRegisterBody("relaxed-jwt-device", "", false), token)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("relaxed desktop JWT status = %d body = %s", rec.Code, rec.Body.String())
+	}
+}
+
 func TestRegisterDesktopDeviceReusesExistingDevice(t *testing.T) {
 	server, db := newDesktopTestServer(t)
 	first := decodeRegisterResponse(t, performRegister(t, server, desktopRegisterBody("mac-mini", "", false), defaultDesktopJWT).Body)
@@ -1397,7 +1422,7 @@ func signTestSSOJWT(t *testing.T, privateKey *rsa.PrivateKey, claims testSSOJWTC
 	headerJSON, _ := json.Marshal(map[string]any{"alg": "RS256", "typ": "JWT", "kid": "test-key"})
 	claimsJSON, _ := json.Marshal(map[string]any{
 		"iss":     claims.Issuer,
-		"sub":     "user:" + claims.UserID,
+		"sub":     claims.UserID,
 		"aud":     claims.Audience,
 		"iat":     time.Now().Unix(),
 		"exp":     claims.Expires.Unix(),

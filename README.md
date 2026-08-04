@@ -105,6 +105,10 @@ docker compose up --build
 | `SSO_JWT_PUBLIC_KEY_FILE` | 空 | 官网 SSO JWT PEM 公钥文件路径。 |
 | `SSO_JWT_PUBLIC_KEY_PEM` | 空 | 官网 SSO JWT PEM 公钥内容，支持转义 `\n`。 |
 | `SSO_JWT_AUDIENCE` | `tunnel` | JWT audience。 |
+| `SSO_JWT_USER_ID_CLAIM` | `sub` | 用作稳定用户标识的 JWT claim 名；只有上游明确使用自定义标识时才配置为 `userId` 或 `user_id`。 |
+| `SSO_JWT_ALLOW_ANY_AUDIENCE` | `false` | 兼容开关；为 `true` 时跳过 audience 校验，但仍校验签名、issuer 和有效期。 |
+| `SSO_JWT_ALLOW_ANY_ADMIN_ROLE` | `false` | 高风险兼容开关；为 `true` 时任意有效 SSO 用户都获得 Tunnel Hub 管理权限。 |
+| `SSO_JWT_ALLOW_MISSING_TUNNEL_SCOPE` | `false` | 兼容开关；为 `true` 时管理和 Desktop 注册不再要求 `scope=tunnel`。 |
 | `MAX_REQUEST_BODY_BYTES` | `67108864` | Relay 缓冲 HTTP 请求体的最大字节数。 |
 | `TRUSTED_PROXY_CIDRS` | 空 | 可信反向代理 CIDR，命中后才读取 `X-Real-IP` / `X-Forwarded-For`；生产 Docker + nginx 建议 `172.23.0.1/32,127.0.0.1/32,::1/128`。 |
 

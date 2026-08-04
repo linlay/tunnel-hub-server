@@ -42,3 +42,24 @@ func TestLoadRelayConfigSupportsTrustedProxyCIDRs(t *testing.T) {
 		t.Fatalf("TrustedProxyCIDRs = %q", cfg.TrustedProxyCIDRs)
 	}
 }
+
+func TestLoadRelayConfigSupportsRelaxedSSOCompatibility(t *testing.T) {
+	t.Setenv("SSO_JWT_USER_ID_CLAIM", "userId")
+	t.Setenv("SSO_JWT_ALLOW_ANY_AUDIENCE", "true")
+	t.Setenv("SSO_JWT_ALLOW_ANY_ADMIN_ROLE", "true")
+	t.Setenv("SSO_JWT_ALLOW_MISSING_TUNNEL_SCOPE", "true")
+
+	cfg := LoadRelayConfig()
+	if cfg.SSOJWTUserIDClaim != "userId" || !cfg.SSOJWTAllowAnyAudience || !cfg.SSOJWTAllowAnyAdminRole || !cfg.SSOJWTAllowMissingScope {
+		t.Fatalf("relaxed SSO config was not loaded: %+v", cfg)
+	}
+}
+
+func TestLoadRelayConfigDefaultsSSOUserIDClaimToSubject(t *testing.T) {
+	t.Setenv("SSO_JWT_USER_ID_CLAIM", "")
+
+	cfg := LoadRelayConfig()
+	if cfg.SSOJWTUserIDClaim != "sub" {
+		t.Fatalf("SSOJWTUserIDClaim = %q, want sub", cfg.SSOJWTUserIDClaim)
+	}
+}
