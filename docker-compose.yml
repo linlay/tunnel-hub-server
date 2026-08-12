@@ -14,9 +14,10 @@ services:
       RELAY_DB_PATH: "/data/tunnel.db"
       DESKTOP_PUBLIC_BASE_DOMAIN: "m.zenmind.cc"
       WEBAPP_PUBLIC_BASE_DOMAIN: "wa.zenmind.cc"
+      SHARE_PUBLIC_BASE_URL: "${SHARE_PUBLIC_BASE_URL:-https://share.zenmind.cc}"
       SSO_JWT_PUBLIC_KEY_FILE: "/configs/jwt-public.pem"
     ports:
-      - "8080:8080"
+      - "127.0.0.1:${TUNNEL_HUB_RELAY_PORT:-11961}:8080"
     volumes:
       - relay-data:/data
       - ./configs:/configs:ro

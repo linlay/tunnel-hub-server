@@ -16,6 +16,7 @@
 - `tunnel-hub.zenmind.cc`: 管理前端、`/api/admin`、`/api/desktop`、`/api/components` 和 `/tunnel`；不提供附件业务 API。
 - `*.m.zenmind.cc`: 普通设备 Host 打开 Desktop public mini site；`<device>-<frontendPort>.m.zenmind.cc` 的全部请求，以及普通设备 Host 的 WebSocket upgrade、`POST /api/upload` 和 `GET /api/resource` 请求进入 Relay。
 - `*.wa.zenmind.cc`: Desktop WebApp 反向代理入口，支持 HTTP 和 WebSocket。
+- `share.zenmind.cc`: 对话分享的公开只读页面；`/share/` 指向 `agent-webclient` 轻量入口，`/api/public/shares/` 转发到 Relay。
 
 WebApp 有两条独立链路：
 
@@ -41,7 +42,7 @@ go test ./...
 go run ./cmd/relay
 ```
 
-Relay 默认监听 `:8080`，本地 SQLite 数据库默认是 `tunnel.db`。
+复制 `.env.example` 后，Relay 本地默认监听 `:11961`，避开 Desktop OIDC 固定使用的 `127.0.0.1:8080`；本地 SQLite 数据库默认是 `tunnel.db`。
 
 `.env.example` 默认启用了官网 SSO JWT issuer 和 `configs/jwt-public.pem` 路径。只做本地管理账号调试时，可以把 `.env` 里的 `SSO_JWT_ISSUER`、`SSO_JWT_PUBLIC_KEY_FILE`、`SSO_JWT_PUBLIC_KEY_PEM` 置空；需要调试官网 SSO 或 Desktop 注册 API 时，必须先准备有效 JWT 公钥。
 
@@ -60,7 +61,7 @@ Agent 需要使用已创建的 tunnel token。Desktop 新注册后返回的是�
 
 ```bash
 cd tunnel-hub-server
-AGENT_TOKEN=<token> AGENT_RELAY_URL=ws://127.0.0.1:8080/tunnel go run ./cmd/agent
+AGENT_TOKEN=<token> AGENT_RELAY_URL=ws://127.0.0.1:11961/tunnel go run ./cmd/agent
 ```
 
 生产环境使用：
@@ -88,11 +89,12 @@ docker compose up --build
 
 | 名称 | 默认值 | 说明 |
 | --- | --- | --- |
-| `RELAY_ADDR` | `:8080` | Relay 监听地址。 |
+| `RELAY_ADDR` | `:11961` | Relay 本地监听地址；容器内由 Compose 覆盖为 `:8080`。 |
 | `RELAY_PUBLIC_URL` | 空 | Desktop 注册响应中返回的 Relay WebSocket 地址；未配置时由 `PUBLIC_BASE_DOMAIN` 派生 `wss` 地址。 |
 | `RELAY_DB_PATH` | `tunnel.db` | SQLite 数据库路径；容器中通常设置为 `/data/tunnel.db`。 |
 | `ADMIN_HOST` | 空 | 旧版 Relay 静态管理站点 Host；拆分部署时保持为空。 |
 | `WEBSITE_DIST` | 空 | 旧版 Relay 静态站点目录；拆分部署时保持为空。 |
+| `SHARE_PUBLIC_BASE_URL` | 空 | 承载 `agent-webclient /share/` 的完整 HTTPS origin，例如 `https://share.zenmind.cc`。未配置时拒绝创建分享，避免生成指向错误环境的链接。 |
 | `PUBLIC_BASE_DOMAIN` | `tunnel-hub.zenmind.cc` | `/api/admin/services/{name}` 创建服务 Host 时使用。 |
 | `DESKTOP_PUBLIC_BASE_DOMAIN` | `m.zenmind.cc` | Desktop public WebSocket 随机 Host 的根域。 |
 | `WEBAPP_PUBLIC_BASE_DOMAIN` | `wa.zenmind.cc` | Desktop WebApp public Host 的根域。 |
@@ -116,7 +118,7 @@ docker compose up --build
 
 | 名称 | 默认值 | 说明 |
 | --- | --- | --- |
-| `AGENT_RELAY_URL` | `ws://127.0.0.1:8080/tunnel` | Relay tunnel WebSocket 地址。 |
+| `AGENT_RELAY_URL` | `ws://127.0.0.1:11961/tunnel` | Agent 默认 Relay tunnel WebSocket 地址。 |
 | `AGENT_TOKEN` | 必填 | Agent/desktop tunnel token。 |
 | `AGENT_TLS_INSECURE_SKIP_VERIFY` | `false` | 开发调试 TLS 跳过校验开关，生产不要开启。 |
 | `AGENT_RECONNECT_SECONDS` | `3` | 断线重连间隔。 |
@@ -159,7 +161,7 @@ cd tunnel-hub-server
 docker compose up -d --build
 ```
 
-默认映射 `8080:8080`。生产宿主机可以改为只监听内网端口，再由 Nginx/Caddy 终止 TLS 并转发。
+默认映射 `127.0.0.1:11961:8080`，避开 Desktop OIDC 的本地 8080 端口。生产宿主机可以改为只监听内网端口，再由 Nginx/Caddy 终止 TLS 并转发。
 
 ### 拆分生产部署
 
@@ -172,8 +174,9 @@ docker compose up -d --build
 - `tunnel-hub.zenmind.cc/api/admin`, `/api/desktop`, `/api/components`, `/tunnel`: 转发到 Relay；`/api/upload`、`/api/resource` 和旧 `/api/download` 明确返回 404。
 - `*.m.zenmind.cc`: `<device>-<frontendPort>.m.zenmind.cc` 的全部路径，以及普通设备 Host 的 WebSocket upgrade、`POST /api/upload` 和 `GET /api/resource` 转发到 Relay；普通 `<device>.m.zenmind.cc` HTTP 转发到 public Desktop site。
 - `*.wa.zenmind.cc`: 直接转发到 Relay。
+- 对话分享页面由 `agent-webclient` 的 `/share/` 入口承载；公开站点网关将 `/api/public/shares/` 转发到 Relay，并将 `/share/` 转发到 `agent-webclient`。Relay 只配置 `SHARE_PUBLIC_BASE_URL` 生成公开链接，不托管分享页面。
 
-示例配置在 `deploy/nginx/zenmind-tunnel.conf` 和 `deploy/caddy/Caddyfile`。
+Tunnel 端示例配置在 `deploy/nginx/zenmind-tunnel.conf` 和 `deploy/caddy/Caddyfile`；分享站点的 `/share/` 与同源公开 API 代理由 `agent-webclient` 部署层配置。
 
 ## 5. 运维
 
@@ -196,7 +199,7 @@ docker logs tunnel-hub-server
 本地管理账号登录：
 
 ```bash
-curl -i http://127.0.0.1:8080/api/admin/login \
+curl -i http://127.0.0.1:11961/api/admin/login \
   -H "Content-Type: application/json" \
   -d '{"username":"admin","password":"<local-password>"}'
 ```
@@ -217,6 +220,20 @@ curl -X POST https://tunnel-hub.zenmind.cc/api/desktop/devices/register \
   -H "Authorization: Bearer $ZENMIND_OFFICIAL_JWT" \
   -H "Content-Type: application/json" \
   -d '{"deviceId":"mac-mini","deviceName":"Frank MacBook Pro","rotateToken":false}'
+```
+
+创建、读取和撤销对话分享：
+
+```bash
+curl -X POST https://tunnel-hub.zenmind.cc/api/desktop/shares \
+  -H "Authorization: Bearer $ZENMIND_OFFICIAL_JWT" \
+  -H "Content-Type: application/json" \
+  -d '{"schemaVersion":1,"title":"示例对话","createdAt":1700000000000,"updatedAt":1700000001000,"entries":[{"type":"message","role":"user","content":"你好"},{"type":"reasoning","content":"先确认问题范围","label":"分析问题","durationMs":900},{"type":"message","role":"assistant","content":"你好！"}]}'
+
+curl https://tunnel-hub.zenmind.cc/api/public/shares/share_xxx
+
+curl -X DELETE https://tunnel-hub.zenmind.cc/api/desktop/shares/share_xxx \
+  -H "Authorization: Bearer $ZENMIND_OFFICIAL_JWT"
 ```
 
 注册 Desktop WebApp：

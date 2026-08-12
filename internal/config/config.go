@@ -12,6 +12,7 @@ type RelayConfig struct {
 	RelayPublicURL           string
 	AdminHost                string
 	WebsiteDist              string
+	SharePublicBaseURL       string
 	PublicBaseDomain         string
 	DesktopPublicBaseDomain  string
 	WebAppPublicBaseDomain   string
@@ -43,11 +44,12 @@ func LoadRelayConfig() RelayConfig {
 	loadDotEnv()
 
 	return RelayConfig{
-		Addr:                     env("RELAY_ADDR", ":8080"),
+		Addr:                     env("RELAY_ADDR", ":11961"),
 		DatabasePath:             env("RELAY_DB_PATH", "tunnel.db"),
 		RelayPublicURL:           env("RELAY_PUBLIC_URL", ""),
 		AdminHost:                env("ADMIN_HOST", ""),
 		WebsiteDist:              env("WEBSITE_DIST", ""),
+		SharePublicBaseURL:       env("SHARE_PUBLIC_BASE_URL", ""),
 		PublicBaseDomain:         env("PUBLIC_BASE_DOMAIN", "tunnel-hub.zenmind.cc"),
 		DesktopPublicBaseDomain:  env("DESKTOP_PUBLIC_BASE_DOMAIN", "m.zenmind.cc"),
 		WebAppPublicBaseDomain:   env("WEBAPP_PUBLIC_BASE_DOMAIN", "wa.zenmind.cc"),
@@ -73,7 +75,7 @@ func LoadAgentConfig() AgentConfig {
 	loadDotEnv()
 
 	return AgentConfig{
-		RelayURL:           env("AGENT_RELAY_URL", "ws://127.0.0.1:8080/tunnel"),
+		RelayURL:           env("AGENT_RELAY_URL", "ws://127.0.0.1:11961/tunnel"),
 		Token:              os.Getenv("AGENT_TOKEN"),
 		InsecureSkipVerify: envBool("AGENT_TLS_INSECURE_SKIP_VERIFY", false),
 		ReconnectInterval:  time.Duration(envInt64("AGENT_RECONNECT_SECONDS", 3)) * time.Second,
