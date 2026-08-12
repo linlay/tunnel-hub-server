@@ -11,6 +11,10 @@ tunnel-hub.zenmind.cc {
 		reverse_proxy relay:8080
 	}
 
+	handle /api/public/shares/* {
+		reverse_proxy relay:8080
+	}
+
 	handle /api/upload {
 		respond 404
 	}

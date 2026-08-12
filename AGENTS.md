@@ -39,6 +39,7 @@ Relay 入口在 `cmd/relay/main.go`，启动顺序是：
 - `*.m.zenmind.cc/api/upload`: Mobile 上传入口，只从请求 Host 确定 Desktop，内部发送 `ns=ap`, `type=/api/upload`；multipart 不允许携带 `publicHost`。
 - `*.m.zenmind.cc/api/resource`: Mobile 资源入口，内部发送 `ns=ap`, `type=/api/resource` 和 `{file,pushURL}`；Desktop 通过 ticket 保护的 `/api/push/{id}` 回推文件。
 - `*.wa.zenmind.cc`: Desktop WebApp public HTTP/WebSocket。Relay 通过 route 和 token 打开 Desktop stream，向 Desktop 发送 `ns=wa` 的 `http.request` 或 `websocket.connect` 元数据。
+- `share.zenmind.cc`: 对话分享只读站点。`/share/{id}` 由 `agent-webclient` 轻量入口渲染，`/api/public/shares/{id}` 由 Relay 从 SQLite 读取未撤销快照。
 
 ## 4. 目录结构
 
@@ -67,6 +68,7 @@ Relay 入口在 `cmd/relay/main.go`，启动顺序是：
 - `agent_sessions`: Agent/Desktop tunnel 在线历史。
 - `events`: 管理操作和系统事件。
 - `traffic_events`: Desktop/WebApp/普通 route 的访问统计。
+- `conversation_shares`: 用户创建的版本化只读对话快照和撤销状态；公开 ID 必须不可预测，所有者身份来自官网 SSO JWT。
 
 注意：`admin_api_keys` 仍在 schema 中，但当前主 API 路径没有完整使用它，不要把它当成已上线能力写入 README。
 
@@ -91,6 +93,8 @@ Relay 入口在 `cmd/relay/main.go`，启动顺序是：
 - `GET /api/components`
 - `POST /api/desktop/devices/register`
 - `PUT /api/desktop/devices/{deviceId}/webapps/{name}`
+- `POST /api/desktop/shares`, `DELETE /api/desktop/shares/{shareId}`
+- `GET /api/public/shares/{shareId}`
 - `POST https://<desktop>.m.zenmind.cc/api/upload`
 - `GET https://<desktop>.m.zenmind.cc/api/resource?file=<chat-relative-path>`
 

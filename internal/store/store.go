@@ -182,7 +182,10 @@ func (db *DB) Migrate(ctx context.Context) error {
 	if err := db.ensureDesktopWebAppTable(ctx); err != nil {
 		return err
 	}
-	return db.ensureTrafficEventsTable(ctx)
+	if err := db.ensureTrafficEventsTable(ctx); err != nil {
+		return err
+	}
+	return nil
 }
 
 func (db *DB) CreateRoute(ctx context.Context, publicHost, targetURL string, active bool, tokenID string) (Route, error) {
@@ -1634,6 +1637,18 @@ CREATE TABLE IF NOT EXISTS events (
 	details TEXT NOT NULL DEFAULT '',
 	created_at TIMESTAMP NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS conversation_shares (
+	id TEXT PRIMARY KEY,
+	owner_user_id TEXT NOT NULL,
+	title TEXT NOT NULL,
+	snapshot_json BLOB NOT NULL,
+	created_at TIMESTAMP NOT NULL,
+	revoked_at TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_conversation_shares_owner_created
+	ON conversation_shares(owner_user_id, created_at DESC);
 
 CREATE TABLE IF NOT EXISTS traffic_events (
 	id INTEGER PRIMARY KEY AUTOINCREMENT,

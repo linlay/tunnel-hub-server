@@ -17,6 +17,8 @@ import (
 )
 
 const registerPath = "/api/desktop/devices/register"
+const conversationSharesPath = "/api/desktop/shares"
+const publicConversationSharesPath = "/api/public/shares/"
 const publicHostRetryLimit = 8
 const publicLabelRandomBytes = 8
 
@@ -51,6 +53,24 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	switch {
+	case r.URL.Path == conversationSharesPath:
+		if r.Method != http.MethodPost {
+			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+		s.handleCreateConversationShare(w, r)
+	case strings.HasPrefix(r.URL.Path, conversationSharesPath+"/"):
+		if r.Method != http.MethodDelete {
+			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+		s.handleRevokeConversationShare(w, r)
+	case strings.HasPrefix(r.URL.Path, publicConversationSharesPath):
+		if r.Method != http.MethodGet {
+			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+		s.handleGetPublicConversationShare(w, r)
 	case r.URL.Path == registerPath:
 		if r.Method != http.MethodPost {
 			writeError(w, http.StatusMethodNotAllowed, "method not allowed")

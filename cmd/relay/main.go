@@ -73,7 +73,7 @@ func main() {
 			http.NotFound(w, r)
 		case r.URL.Path == "/api/components":
 			adminServer.ServeComponents(w, r)
-		case strings.HasPrefix(r.URL.Path, "/api/desktop"):
+		case strings.HasPrefix(r.URL.Path, "/api/desktop") || strings.HasPrefix(r.URL.Path, "/api/public/shares/"):
 			desktopServer.ServeHTTP(w, r)
 		case strings.HasPrefix(r.URL.Path, "/api/admin"):
 			adminServer.ServeHTTP(w, r)
