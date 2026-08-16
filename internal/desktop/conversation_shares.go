@@ -1,36 +1,40 @@
 package desktop
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"mime"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/linlay/zenmind-tunnel-server/internal/store"
 )
 
 const maxConversationShareBytes int64 = 2 << 20
-const maxConversationShareEntries = 2000
-const maxConversationShareEntryBytes = 200_000
+const maxConversationShareEvents = 2000
+const maxConversationShareContentBytes = 200_000
+const maxConversationShareTitleBytes = 300
+const maxConversationShareLabelBytes = 300
 
-type conversationShareSnapshot struct {
-	SchemaVersion int                      `json:"schemaVersion"`
-	Title         string                   `json:"title"`
-	CreatedAt     int64                    `json:"createdAt"`
-	UpdatedAt     int64                    `json:"updatedAt"`
-	Entries       []conversationShareEntry `json:"entries"`
-}
+var errConversationShareTooLarge = errors.New("share event stream is too large")
 
-type conversationShareEntry struct {
-	Type       string `json:"type"`
-	Role       string `json:"role,omitempty"`
-	Content    string `json:"content"`
-	Label      string `json:"label,omitempty"`
-	DurationMs *int64 `json:"durationMs,omitempty"`
-	CreatedAt  int64  `json:"createdAt,omitempty"`
+var conversationShareFramePrefix = []byte("event: message\ndata: ")
+
+type conversationShareEvent struct {
+	Seq            int64   `json:"seq"`
+	Type           string  `json:"type"`
+	ShareVersion   *int    `json:"shareVersion,omitempty"`
+	ChatName       *string `json:"chatName,omitempty"`
+	Message        *string `json:"message,omitempty"`
+	Text           *string `json:"text,omitempty"`
+	ReasoningLabel *string `json:"reasoningLabel,omitempty"`
+	Timestamp      int64   `json:"timestamp"`
 }
 
 type conversationShareCreateResponse struct {
@@ -44,9 +48,13 @@ func (s *Server) handleCreateConversationShare(w http.ResponseWriter, r *http.Re
 	if !ok {
 		return
 	}
-	snapshot, canonical, err := decodeConversationShareSnapshot(w, r)
+	title, eventStream, err := decodeConversationShareEventStream(w, r)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		status := http.StatusBadRequest
+		if errors.Is(err, errConversationShareTooLarge) {
+			status = http.StatusRequestEntityTooLarge
+		}
+		writeError(w, status, err.Error())
 		return
 	}
 	shareURL, err := s.conversationShareURL("")
@@ -54,7 +62,7 @@ func (s *Server) handleCreateConversationShare(w http.ResponseWriter, r *http.Re
 		writeError(w, http.StatusServiceUnavailable, err.Error())
 		return
 	}
-	share, err := s.DB.CreateConversationShare(r.Context(), principal.UserID, snapshot.Title, canonical)
+	share, err := s.DB.CreateConversationShare(r.Context(), principal.UserID, title, eventStream)
 	if err != nil {
 		s.writeInternal(w, "create conversation share", err)
 		return
@@ -103,82 +111,189 @@ func (s *Server) handleGetPublicConversationShare(w http.ResponseWriter, r *http
 		return
 	}
 	w.Header().Set("Cache-Control", "no-store")
-	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
+	w.Header().Set("Content-Length", strconv.Itoa(len(share.EventStream)))
+	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write(share.SnapshotJSON)
+	_, _ = w.Write(share.EventStream)
 }
 
-func decodeConversationShareSnapshot(w http.ResponseWriter, r *http.Request) (conversationShareSnapshot, []byte, error) {
+// decodeConversationShareEventStream implements only the finite Share SSE Profile.
+// It deliberately does not accept the broader SSE grammar used by live streams.
+func decodeConversationShareEventStream(w http.ResponseWriter, r *http.Request) (string, []byte, error) {
+	mediaType, params, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
+	if err != nil || mediaType != "text/event-stream" {
+		return "", nil, errors.New("Content-Type must be text/event-stream")
+	}
+	for name := range params {
+		if name != "charset" {
+			return "", nil, errors.New("share event stream has unsupported media type parameters")
+		}
+	}
+	if charset, ok := params["charset"]; ok && !strings.EqualFold(charset, "utf-8") {
+		return "", nil, errors.New("share event stream charset must be utf-8")
+	}
 	limited := http.MaxBytesReader(w, r.Body, maxConversationShareBytes)
 	defer limited.Close()
-	decoder := json.NewDecoder(limited)
+	eventStream, err := io.ReadAll(limited)
+	if err != nil {
+		var maxBytesError *http.MaxBytesError
+		if errors.As(err, &maxBytesError) {
+			return "", nil, errConversationShareTooLarge
+		}
+		return "", nil, errors.New("invalid share event stream")
+	}
+	if len(eventStream) == 0 || !utf8.Valid(eventStream) || !bytes.HasSuffix(eventStream, []byte("\n\n")) {
+		return "", nil, errors.New("invalid share event stream encoding")
+	}
+
+	remaining := eventStream
+	expectedSeq := int64(1)
+	eventCount := 0
+	queryCount := 0
+	turnOpen := false
+	runStarted := false
+	snapshotsStarted := false
+	var lastTurnTimestamp int64
+	var title string
+	done := false
+
+	for len(remaining) > 0 {
+		boundary := bytes.Index(remaining, []byte("\n\n"))
+		if boundary < 0 {
+			return "", nil, errors.New("unterminated share event frame")
+		}
+		frame := remaining[:boundary]
+		remaining = remaining[boundary+2:]
+		if !bytes.HasPrefix(frame, conversationShareFramePrefix) {
+			return "", nil, errors.New("invalid share event frame")
+		}
+		data := frame[len(conversationShareFramePrefix):]
+		if len(data) == 0 || bytes.IndexByte(data, '\n') >= 0 || bytes.IndexByte(data, '\r') >= 0 {
+			return "", nil, errors.New("invalid share event data")
+		}
+		if bytes.Equal(data, []byte("[DONE]")) {
+			if len(remaining) != 0 || expectedSeq == 1 || queryCount == 0 {
+				return "", nil, errors.New("invalid share event completion")
+			}
+			done = true
+			break
+		}
+
+		var event conversationShareEvent
+		if err := decodeStrictShareEvent(data, &event); err != nil {
+			return "", nil, errors.New("invalid share event payload")
+		}
+		if event.Seq != expectedSeq || !isEpochMilliseconds(event.Timestamp) {
+			return "", nil, errors.New("invalid share event sequence or time")
+		}
+		expectedSeq++
+
+		if event.Seq == 1 {
+			if err := validateConversationStart(event); err != nil {
+				return "", nil, err
+			}
+			title = strings.TrimSpace(*event.ChatName)
+			continue
+		}
+		eventCount++
+		if eventCount > maxConversationShareEvents {
+			return "", nil, fmt.Errorf("share event stream must contain at most %d conversation events", maxConversationShareEvents)
+		}
+
+		switch event.Type {
+		case "request.query":
+			if turnOpen || !onlyEventFields(event, false, false, true, false, false) || !validShareContent(event.Message) {
+				return "", nil, errors.New("invalid request.query event")
+			}
+			turnOpen = true
+			runStarted = false
+			snapshotsStarted = false
+			lastTurnTimestamp = event.Timestamp
+			queryCount++
+		case "run.start":
+			if !turnOpen || runStarted || snapshotsStarted || event.Timestamp < lastTurnTimestamp || !onlyEventFields(event, false, false, false, false, false) {
+				return "", nil, errors.New("invalid run.start event")
+			}
+			runStarted = true
+			lastTurnTimestamp = event.Timestamp
+		case "reasoning.snapshot":
+			if !turnOpen || event.Timestamp < lastTurnTimestamp || !onlyReasoningEventFields(event) || !validShareContent(event.Text) {
+				return "", nil, errors.New("invalid reasoning.snapshot event")
+			}
+			if event.ReasoningLabel != nil && len([]byte(*event.ReasoningLabel)) > maxConversationShareLabelBytes {
+				return "", nil, errors.New("reasoning label is too large")
+			}
+			snapshotsStarted = true
+			lastTurnTimestamp = event.Timestamp
+		case "content.snapshot":
+			if !turnOpen || event.Timestamp < lastTurnTimestamp || !onlyEventFields(event, false, false, false, true, false) || !validShareContent(event.Text) {
+				return "", nil, errors.New("invalid content.snapshot event")
+			}
+			snapshotsStarted = true
+			lastTurnTimestamp = event.Timestamp
+		case "run.complete", "run.cancel", "run.error":
+			if !turnOpen || event.Timestamp < lastTurnTimestamp || !onlyEventFields(event, false, false, false, false, false) {
+				return "", nil, errors.New("invalid terminal event")
+			}
+			turnOpen = false
+		default:
+			return "", nil, errors.New("unsupported share event type")
+		}
+	}
+	if !done {
+		return "", nil, errors.New("share event stream must end with [DONE]")
+	}
+	return title, eventStream, nil
+}
+
+func decodeStrictShareEvent(data []byte, event *conversationShareEvent) error {
+	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.DisallowUnknownFields()
-	var snapshot conversationShareSnapshot
-	if err := decoder.Decode(&snapshot); err != nil {
-		return conversationShareSnapshot{}, nil, errors.New("invalid share snapshot")
+	if err := decoder.Decode(event); err != nil {
+		return err
 	}
 	var extra any
 	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
-		return conversationShareSnapshot{}, nil, errors.New("invalid share snapshot")
-	}
-	if err := validateConversationShareSnapshot(snapshot); err != nil {
-		return conversationShareSnapshot{}, nil, err
-	}
-	canonical, err := json.Marshal(snapshot)
-	return snapshot, canonical, err
-}
-
-func validateConversationShareSnapshot(snapshot conversationShareSnapshot) error {
-	if snapshot.SchemaVersion != 1 {
-		return errors.New("unsupported share schemaVersion")
-	}
-	if title := strings.TrimSpace(snapshot.Title); title == "" || len([]byte(title)) > 300 {
-		return errors.New("title must be between 1 and 300 bytes")
-	}
-	if snapshot.CreatedAt < 1_000_000_000_000 || snapshot.UpdatedAt < snapshot.CreatedAt {
-		return errors.New("invalid snapshot time")
-	}
-	if len(snapshot.Entries) == 0 || len(snapshot.Entries) > maxConversationShareEntries {
-		return fmt.Errorf("entries must contain between 1 and %d items", maxConversationShareEntries)
-	}
-	for _, entry := range snapshot.Entries {
-		switch entry.Type {
-		case "message":
-			if entry.Role != "user" && entry.Role != "assistant" {
-				return errors.New("message role must be user or assistant")
-			}
-			if entry.Label != "" {
-				return errors.New("message label is not allowed")
-			}
-			if entry.DurationMs != nil {
-				return errors.New("message durationMs is not allowed")
-			}
-		case "reasoning":
-			if entry.Role != "" {
-				return errors.New("reasoning role is not allowed")
-			}
-			if len([]byte(entry.Label)) > 300 {
-				return errors.New("reasoning label is invalid")
-			}
-			if entry.DurationMs != nil && *entry.DurationMs < 0 {
-				return errors.New("reasoning durationMs is invalid")
-			}
-		default:
-			return errors.New("entry type must be message or reasoning")
-		}
-		if strings.TrimSpace(entry.Content) == "" || len([]byte(entry.Content)) > maxConversationShareEntryBytes {
-			return errors.New("entry content is invalid")
-		}
-		if entry.CreatedAt != 0 && entry.CreatedAt < 1_000_000_000_000 {
-			return errors.New("entry createdAt is invalid")
-		}
+		return errors.New("multiple JSON values")
 	}
 	return nil
 }
 
+func validateConversationStart(event conversationShareEvent) error {
+	if event.Type != "chat.start" || event.ShareVersion == nil || *event.ShareVersion != 1 || event.ChatName == nil || !onlyEventFields(event, true, true, false, false, false) {
+		return errors.New("share event stream must start with chat.start version 1")
+	}
+	title := strings.TrimSpace(*event.ChatName)
+	if title == "" || len([]byte(*event.ChatName)) > maxConversationShareTitleBytes {
+		return errors.New("chat name must be between 1 and 300 bytes")
+	}
+	return nil
+}
+
+func onlyEventFields(event conversationShareEvent, shareVersion, chatName, message, text, reasoningLabel bool) bool {
+	return (event.ShareVersion != nil) == shareVersion &&
+		(event.ChatName != nil) == chatName &&
+		(event.Message != nil) == message &&
+		(event.Text != nil) == text &&
+		(event.ReasoningLabel != nil) == reasoningLabel
+}
+
+func onlyReasoningEventFields(event conversationShareEvent) bool {
+	return event.ShareVersion == nil && event.ChatName == nil && event.Message == nil && event.Text != nil
+}
+
+func validShareContent(value *string) bool {
+	return value != nil && strings.TrimSpace(*value) != "" && len([]byte(*value)) <= maxConversationShareContentBytes
+}
+
+func isEpochMilliseconds(value int64) bool {
+	return value >= 1_000_000_000_000
+}
+
 func conversationShareIDFromPath(path, prefix string) (string, bool) {
 	id := strings.TrimPrefix(path, prefix)
-	if id == path || !strings.HasPrefix(id, "share_") || strings.Contains(id, "/") || len(id) > 80 {
+	if id == path || len(id) == 0 || len(id) > 80 {
 		return "", false
 	}
 	for _, char := range id {

@@ -39,7 +39,7 @@ Relay 入口在 `cmd/relay/main.go`，启动顺序是：
 - `*.m.zenmind.cc/api/upload`: Mobile 上传入口，只从请求 Host 确定 Desktop，内部发送 `ns=ap`, `type=/api/upload`；multipart 不允许携带 `publicHost`。
 - `*.m.zenmind.cc/api/resource`: Mobile 资源入口，内部发送 `ns=ap`, `type=/api/resource` 和 `{file,pushURL}`；Desktop 通过 ticket 保护的 `/api/push/{id}` 回推文件。
 - `*.wa.zenmind.cc`: Desktop WebApp public HTTP/WebSocket。Relay 通过 route 和 token 打开 Desktop stream，向 Desktop 发送 `ns=wa` 的 `http.request` 或 `websocket.connect` 元数据。
-- `share.zenmind.cc`: 对话分享只读站点。`/share/{id}` 由 `agent-webclient` 轻量入口渲染，`/api/public/shares/{id}` 由 Relay 从 SQLite 读取未撤销快照。
+- `share.zenmind.cc`: 对话分享只读站点。`/share/{id}` 由 `agent-webclient` 轻量入口渲染，`/api/public/shares/{id}` 由 Relay 从 SQLite 主键读取未撤销的有限 Share SSE 原始字节。
 
 ## 4. 目录结构
 
@@ -68,7 +68,7 @@ Relay 入口在 `cmd/relay/main.go`，启动顺序是：
 - `agent_sessions`: Agent/Desktop tunnel 在线历史。
 - `events`: 管理操作和系统事件。
 - `traffic_events`: Desktop/WebApp/普通 route 的访问统计。
-- `conversation_shares`: 用户创建的版本化只读对话快照和撤销状态；公开 ID 必须不可预测，所有者身份来自官网 SSO JWT。
+- `conversation_shares`: 用户创建的版本化有限 Share SSE 和撤销状态；公开 ID 必须不可预测，生成时使用 `share_` 前缀，但接收端只按 URL-safe 不透明 ID 校验。所有者身份来自官网 SSO JWT；Relay 严格校验后保存并返回原始事件流字节，不建立第二套分享 schema。
 
 注意：`admin_api_keys` 仍在 schema 中，但当前主 API 路径没有完整使用它，不要把它当成已上线能力写入 README。
 

@@ -227,8 +227,8 @@ curl -X POST https://tunnel-hub.zenmind.cc/api/desktop/devices/register \
 ```bash
 curl -X POST https://tunnel-hub.zenmind.cc/api/desktop/shares \
   -H "Authorization: Bearer $ZENMIND_OFFICIAL_JWT" \
-  -H "Content-Type: application/json" \
-  -d '{"schemaVersion":1,"title":"示例对话","createdAt":1700000000000,"updatedAt":1700000001000,"entries":[{"type":"message","role":"user","content":"你好"},{"type":"reasoning","content":"先确认问题范围","label":"分析问题","durationMs":900},{"type":"message","role":"assistant","content":"你好！"}]}'
+  -H "Content-Type: text/event-stream" \
+  --data-binary $'event: message\ndata: {"seq":1,"type":"chat.start","shareVersion":1,"chatName":"示例对话","timestamp":1700000000000}\n\nevent: message\ndata: {"seq":2,"type":"request.query","message":"你好","timestamp":1700000000000}\n\nevent: message\ndata: {"seq":3,"type":"content.snapshot","text":"你好！","timestamp":1700000001000}\n\nevent: message\ndata: {"seq":4,"type":"run.complete","timestamp":1700000001000}\n\nevent: message\ndata: [DONE]\n\n'
 
 curl https://tunnel-hub.zenmind.cc/api/public/shares/share_xxx
 
