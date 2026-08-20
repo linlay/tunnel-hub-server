@@ -47,15 +47,15 @@ func TestRegisterRequiresOfficialJWT(t *testing.T) {
 	}
 }
 
-func TestRegisterDesktopDeviceCreatesTokenAndBrokerHost(t *testing.T) {
+func TestRegisterDesktopDeviceCreatesBrokerIdentityAndPublicHost(t *testing.T) {
 	server, db := newDesktopTestServer(t)
 	rec := performRegister(t, server, desktopRegisterBody("mac-mini", "", false), defaultDesktopJWT)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
 	}
 	response := decodeRegisterResponse(t, rec.Body)
-	if !response.Created || response.Rotated {
-		t.Fatalf("unexpected create flags: %+v", response)
+	if !response.Created {
+		t.Fatalf("unexpected create flag: %+v", response)
 	}
 	assertDesktopPublicHost(t, response.PublicHost, "mac-mini")
 	if response.WebSocketURL != "wss://"+response.PublicHost+"/ws" {
@@ -64,8 +64,8 @@ func TestRegisterDesktopDeviceCreatesTokenAndBrokerHost(t *testing.T) {
 	if response.RelayURL != "wss://tunnel-hub.zenmind.cc/tunnel" {
 		t.Fatalf("relayUrl = %q", response.RelayURL)
 	}
-	if !strings.HasPrefix(response.AgentToken, "zt_") || response.TokenID == "" {
-		t.Fatalf("missing token fields: %+v", response)
+	if response.TokenID == "" {
+		t.Fatalf("missing internal broker identity: %+v", response)
 	}
 
 	if response.TargetURL != "" {
@@ -80,13 +80,6 @@ func TestRegisterDesktopDeviceCreatesTokenAndBrokerHost(t *testing.T) {
 	}
 	if device.TokenID != response.TokenID || device.TargetURL != "" {
 		t.Fatalf("unexpected desktop device: %+v", device)
-	}
-	token, err := db.FindActiveTokenBySecret(context.Background(), response.AgentToken)
-	if err != nil {
-		t.Fatalf("find active token: %v", err)
-	}
-	if token.ID != response.TokenID {
-		t.Fatalf("token id = %q, want %q", token.ID, response.TokenID)
 	}
 }
 
@@ -128,9 +121,6 @@ func TestRegisterDesktopDeviceAcceptsSSOJWT(t *testing.T) {
 	}
 	response := decodeRegisterResponse(t, rec.Body)
 	assertDesktopPublicHost(t, response.PublicHost, "jwt-device")
-	if response.AgentToken == "" {
-		t.Fatalf("unexpected JWT registration response: %+v", response)
-	}
 	if _, err := db.GetDesktopDeviceByPublicHost(context.Background(), response.PublicHost); err != nil {
 		t.Fatalf("get JWT registered desktop device: %v", err)
 	}
@@ -198,7 +188,7 @@ func TestRegisterDesktopDeviceReusesExistingDevice(t *testing.T) {
 		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
 	}
 	second := decodeRegisterResponse(t, rec.Body)
-	if second.Created || second.Rotated || second.AgentToken != "" {
+	if second.Created {
 		t.Fatalf("unexpected reuse response: %+v", second)
 	}
 	if second.TokenID != first.TokenID {
@@ -220,7 +210,7 @@ func TestRegisterDesktopDeviceIgnoresLegacyDeviceSecret(t *testing.T) {
 		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
 	}
 	second := decodeRegisterResponse(t, rec.Body)
-	if second.TokenID != first.TokenID || second.AgentToken != "" {
+	if second.TokenID != first.TokenID {
 		t.Fatalf("legacy deviceSecret affected registration: %+v", second)
 	}
 	if _, err := db.GetRouteByHost(context.Background(), second.PublicHost); !errors.Is(err, store.ErrNotFound) {
@@ -255,40 +245,6 @@ func TestRegisterDesktopDeviceAllowsSameDeviceIDForDifferentOwners(t *testing.T)
 	}
 	if _, err := db.GetRouteByHost(context.Background(), second.PublicHost); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("second desktop registration should not create route, got %v", err)
-	}
-}
-
-func TestRegisterDesktopDeviceRotatesToken(t *testing.T) {
-	server, db := newDesktopTestServer(t)
-	first := decodeRegisterResponse(t, performRegister(t, server, desktopRegisterBody("mac-mini", "", false), defaultDesktopJWT).Body)
-
-	rec := performRegister(t, server, desktopRegisterBody("mac-mini", "", true), defaultDesktopJWT)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
-	}
-	second := decodeRegisterResponse(t, rec.Body)
-	if second.Created || !second.Rotated || second.AgentToken == "" {
-		t.Fatalf("unexpected rotate response: %+v", second)
-	}
-	if second.TokenID == first.TokenID {
-		t.Fatalf("token did not rotate: %q", second.TokenID)
-	}
-	if _, err := db.FindActiveTokenBySecret(context.Background(), first.AgentToken); !errors.Is(err, store.ErrNotFound) {
-		t.Fatalf("old token should be inactive, got %v", err)
-	}
-	token, err := db.FindActiveTokenBySecret(context.Background(), second.AgentToken)
-	if err != nil {
-		t.Fatalf("new token should be active: %v", err)
-	}
-	if token.ID != second.TokenID {
-		t.Fatalf("new token id = %q, want %q", token.ID, second.TokenID)
-	}
-	device, err := db.GetDesktopDeviceByPublicHost(context.Background(), second.PublicHost)
-	if err != nil {
-		t.Fatalf("get desktop device: %v", err)
-	}
-	if device.TokenID != second.TokenID {
-		t.Fatalf("device token id = %q, want %q", device.TokenID, second.TokenID)
 	}
 }
 
@@ -391,6 +347,7 @@ func TestDesktopRegistrationTunnelWebSocketIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new desktop server: %v", err)
 	}
+	relay.SetDesktopIdentityVerifier(desktopServer.ssoJWT, cfg.SSOJWTAllowMissingScope)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.URL.Path == "/tunnel":
@@ -406,8 +363,8 @@ func TestDesktopRegistrationTunnelWebSocketIntegration(t *testing.T) {
 	registration := postRegisterHTTP(t, server.URL, desktopRegisterBody("mac-mini", "", false))
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go runFakeDesktopBroker(t, ctx, server.URL, registration.AgentToken)
-	waitForDesktopAgentToken(t, manager, registration.TokenID)
+	go runFakeDesktopBroker(t, ctx, server.URL, defaultDesktopJWT)
+	waitForDesktopBroker(t, manager, registration.TokenID)
 
 	serverURL, err := url.Parse(server.URL)
 	if err != nil {
@@ -443,7 +400,7 @@ func TestDesktopPublicWebSocketQueryTokenMetadata(t *testing.T) {
 	manager, server, registration := newDesktopRelayIntegrationServer(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go runFakeDesktopBrokerWithHandler(t, ctx, server.URL, registration.AgentToken, func(t *testing.T, stream *yamux.Stream, request tunnel.StreamRequest) {
+	go runFakeDesktopBrokerWithHandler(t, ctx, server.URL, defaultDesktopJWT, func(t *testing.T, stream *yamux.Stream, request tunnel.StreamRequest) {
 		t.Helper()
 		if request.Payload == nil || request.Payload.AuthToken != "query-token" || request.Payload.Subprotocol != "" {
 			t.Errorf("desktop auth metadata = %#v", request.Payload)
@@ -461,7 +418,7 @@ func TestDesktopPublicWebSocketQueryTokenMetadata(t *testing.T) {
 			StatusCode: http.StatusSwitchingProtocols,
 		}))
 	})
-	waitForDesktopAgentToken(t, manager, registration.TokenID)
+	waitForDesktopBroker(t, manager, registration.TokenID)
 
 	client, _, err := dialDesktopPublicWebSocket(t, ctx, server.URL, registration.PublicHost, "/ws?room=1&token=query-token", nil)
 	if err != nil {
@@ -474,7 +431,7 @@ func TestDesktopPublicWebSocketBearerSubprotocolMetadata(t *testing.T) {
 	manager, server, registration := newDesktopRelayIntegrationServer(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go runFakeDesktopBrokerWithHandler(t, ctx, server.URL, registration.AgentToken, func(t *testing.T, stream *yamux.Stream, request tunnel.StreamRequest) {
+	go runFakeDesktopBrokerWithHandler(t, ctx, server.URL, defaultDesktopJWT, func(t *testing.T, stream *yamux.Stream, request tunnel.StreamRequest) {
 		t.Helper()
 		if request.Payload == nil || request.Payload.AuthToken != "protocol-token" || request.Payload.Subprotocol != "bearer.protocol-token" {
 			t.Errorf("desktop auth metadata = %#v", request.Payload)
@@ -489,7 +446,7 @@ func TestDesktopPublicWebSocketBearerSubprotocolMetadata(t *testing.T) {
 			Headers:    http.Header{"Sec-WebSocket-Protocol": []string{"bearer.protocol-token"}},
 		}))
 	})
-	waitForDesktopAgentToken(t, manager, registration.TokenID)
+	waitForDesktopBroker(t, manager, registration.TokenID)
 
 	client, resp, err := dialDesktopPublicWebSocket(t, ctx, server.URL, registration.PublicHost, "/ws", http.Header{
 		"Sec-WebSocket-Protocol": []string{"bearer.protocol-token"},
@@ -507,7 +464,7 @@ func TestDesktopPublicWebSocketNoTokenMapsDesktopError(t *testing.T) {
 	manager, server, registration := newDesktopRelayIntegrationServer(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go runFakeDesktopBrokerWithHandler(t, ctx, server.URL, registration.AgentToken, func(t *testing.T, stream *yamux.Stream, request tunnel.StreamRequest) {
+	go runFakeDesktopBrokerWithHandler(t, ctx, server.URL, defaultDesktopJWT, func(t *testing.T, stream *yamux.Stream, request tunnel.StreamRequest) {
 		t.Helper()
 		if request.Payload == nil || request.Payload.AuthToken != "" {
 			t.Errorf("desktop auth metadata = %#v", request.Payload)
@@ -515,7 +472,7 @@ func TestDesktopPublicWebSocketNoTokenMapsDesktopError(t *testing.T) {
 		}
 		_ = tunnel.WriteJSON(stream, tunnel.NewErrorResponse(tunnel.NamespaceDesktop, tunnel.TypeDesktopWebSocketOpen, request.ID, http.StatusUnauthorized, "auth failed"))
 	})
-	waitForDesktopAgentToken(t, manager, registration.TokenID)
+	waitForDesktopBroker(t, manager, registration.TokenID)
 
 	client, resp, err := dialDesktopPublicWebSocket(t, ctx, server.URL, registration.PublicHost, "/ws", nil)
 	if err == nil {
@@ -540,7 +497,7 @@ func TestDesktopMobileWebAppHTTPIntegration(t *testing.T) {
 	publicHost := mobileWebAppPublicHost(registration.PublicHost, 43210)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go runFakeWebAppTunnelClient(t, ctx, server.URL, registration.AgentToken, func(t *testing.T, stream *yamux.Stream) {
+	go runFakeWebAppTunnelClient(t, ctx, server.URL, defaultDesktopJWT, func(t *testing.T, stream *yamux.Stream) {
 		t.Helper()
 		var request tunnel.StreamRequest
 		if err := tunnel.ReadJSON(stream, &request); err != nil {
@@ -590,7 +547,7 @@ func TestDesktopMobileWebAppHTTPIntegration(t *testing.T) {
 			t.Errorf("write mobile webapp body: %v", err)
 		}
 	})
-	waitForDesktopAgentToken(t, manager, registration.TokenID)
+	waitForDesktopBroker(t, manager, registration.TokenID)
 
 	req, err := http.NewRequest(http.MethodGet, server.URL+"/hello?source=m&token=paired-token", nil)
 	if err != nil {
@@ -655,7 +612,7 @@ func TestDesktopMobileWebAppUnknownLengthAndResponseHeaders(t *testing.T) {
 	publicHost := mobileWebAppPublicHost(registration.PublicHost, 43210)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go runFakeWebAppTunnelClient(t, ctx, server.URL, registration.AgentToken, func(t *testing.T, stream *yamux.Stream) {
+	go runFakeWebAppTunnelClient(t, ctx, server.URL, defaultDesktopJWT, func(t *testing.T, stream *yamux.Stream) {
 		var request tunnel.StreamRequest
 		if err := tunnel.ReadJSON(stream, &request); err != nil {
 			t.Errorf("read mobile webapp request: %v", err)
@@ -677,7 +634,7 @@ func TestDesktopMobileWebAppUnknownLengthAndResponseHeaders(t *testing.T) {
 			t.Errorf("write mobile webapp body: %v", err)
 		}
 	})
-	waitForDesktopAgentToken(t, manager, registration.TokenID)
+	waitForDesktopBroker(t, manager, registration.TokenID)
 
 	req, err := http.NewRequest(http.MethodGet, server.URL+"/start", nil)
 	if err != nil {
@@ -714,7 +671,7 @@ func TestDesktopMobileWebAppWebSocketIntegration(t *testing.T) {
 	publicHost := mobileWebAppPublicHost(registration.PublicHost, 43210)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go runFakeWebAppTunnelClient(t, ctx, server.URL, registration.AgentToken, func(t *testing.T, stream *yamux.Stream) {
+	go runFakeWebAppTunnelClient(t, ctx, server.URL, defaultDesktopJWT, func(t *testing.T, stream *yamux.Stream) {
 		var request tunnel.StreamRequest
 		if err := tunnel.ReadJSON(stream, &request); err != nil {
 			t.Errorf("read mobile webapp websocket request: %v", err)
@@ -748,7 +705,7 @@ func TestDesktopMobileWebAppWebSocketIntegration(t *testing.T) {
 			t.Errorf("write mobile websocket frame: %v", err)
 		}
 	})
-	waitForDesktopAgentToken(t, manager, registration.TokenID)
+	waitForDesktopBroker(t, manager, registration.TokenID)
 
 	client, _, err := dialDesktopPublicWebSocket(t, ctx, server.URL, publicHost, "/socket?room=1&token=paired-token", nil)
 	if err != nil {
@@ -811,6 +768,7 @@ func TestDesktopRegistrationWebAppHTTPIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new desktop server: %v", err)
 	}
+	relay.SetDesktopIdentityVerifier(desktopServer.ssoJWT, cfg.SSOJWTAllowMissingScope)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.URL.Path == "/tunnel":
@@ -828,8 +786,8 @@ func TestDesktopRegistrationWebAppHTTPIntegration(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go runFakeWebAppTunnelClient(t, ctx, server.URL, registration.AgentToken, handleFakeWebAppHTTPStream)
-	waitForDesktopAgentToken(t, manager, registration.TokenID)
+	go runFakeWebAppTunnelClient(t, ctx, server.URL, defaultDesktopJWT, handleFakeWebAppHTTPStream)
+	waitForDesktopBroker(t, manager, registration.TokenID)
 
 	req, err := http.NewRequest(http.MethodGet, server.URL+"/hello?source=wa", nil)
 	if err != nil {
@@ -885,6 +843,7 @@ func TestDesktopRegistrationWebAppWebSocketIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new desktop server: %v", err)
 	}
+	relay.SetDesktopIdentityVerifier(desktopServer.ssoJWT, cfg.SSOJWTAllowMissingScope)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.URL.Path == "/tunnel":
@@ -902,8 +861,8 @@ func TestDesktopRegistrationWebAppWebSocketIntegration(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go runFakeWebAppTunnelClient(t, ctx, server.URL, registration.AgentToken, handleFakeWebAppWebSocketStream)
-	waitForDesktopAgentToken(t, manager, registration.TokenID)
+	go runFakeWebAppTunnelClient(t, ctx, server.URL, defaultDesktopJWT, handleFakeWebAppWebSocketStream)
+	waitForDesktopBroker(t, manager, registration.TokenID)
 
 	serverURL, err := url.Parse(server.URL)
 	if err != nil {
@@ -946,9 +905,9 @@ func runFakeDesktopBroker(t *testing.T, ctx context.Context, relayURL, token str
 	}
 	defer ws.Close()
 	open := tunnel.NewStreamRequest(tunnel.NamespaceDesktop, tunnel.FrameRequest, tunnel.TypeTunnelOpen, "tun_test", &tunnel.StreamPayload{
-		AgentToken: token,
-		DeviceID:   "mac-mini",
-		Client:     "zenmind-desktop",
+		IdentityToken: token,
+		DeviceID:      "mac-mini",
+		Client:        "zenmind-desktop",
 		Capabilities: []string{
 			"desktop.websocket",
 			"webapp.http",
@@ -1027,8 +986,9 @@ func runFakeDesktopBrokerWithHandler(t *testing.T, ctx context.Context, relayURL
 	}
 	defer ws.Close()
 	open := tunnel.NewStreamRequest(tunnel.NamespaceDesktop, tunnel.FrameRequest, tunnel.TypeTunnelOpen, "tun_test", &tunnel.StreamPayload{
-		AgentToken: token,
-		Client:     "zenmind-desktop",
+		IdentityToken: token,
+		DeviceID:      "mac-mini",
+		Client:        "zenmind-desktop",
 		Capabilities: []string{
 			"desktop.websocket",
 		},
@@ -1079,8 +1039,9 @@ func runFakeWebAppTunnelClient(t *testing.T, ctx context.Context, relayURL, toke
 	}
 	defer ws.Close()
 	open := tunnel.NewStreamRequest(tunnel.NamespaceDesktop, tunnel.FrameRequest, tunnel.TypeTunnelOpen, "tun_test", &tunnel.StreamPayload{
-		AgentToken: token,
-		Client:     "zenmind-desktop",
+		IdentityToken: token,
+		DeviceID:      "mac-mini",
+		Client:        "zenmind-desktop",
 		Capabilities: []string{
 			"webapp.http",
 			"webapp.websocket",
@@ -1244,6 +1205,7 @@ func newDesktopRelayIntegrationServer(t *testing.T) (*proxy.Manager, *httptest.S
 	if err != nil {
 		t.Fatalf("new desktop server: %v", err)
 	}
+	relay.SetDesktopIdentityVerifier(desktopServer.ssoJWT, cfg.SSOJWTAllowMissingScope)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.URL.Path == "/tunnel":
@@ -1502,15 +1464,11 @@ func decodeWebAppResponse(t *testing.T, body io.Reader) webAppResponse {
 	return response
 }
 
-func desktopRegisterBody(deviceID, targetURL string, rotateToken bool) string {
-	rotate := "false"
-	if rotateToken {
-		rotate = "true"
-	}
-	return `{"deviceId":"` + deviceID + `","targetUrl":"` + targetURL + `","rotateToken":` + rotate + `}`
+func desktopRegisterBody(deviceID, targetURL string, _ bool) string {
+	return `{"deviceId":"` + deviceID + `","targetUrl":"` + targetURL + `"}`
 }
 
-func waitForDesktopAgentToken(t *testing.T, manager *proxy.Manager, tokenID string) {
+func waitForDesktopBroker(t *testing.T, manager *proxy.Manager, tokenID string) {
 	t.Helper()
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
@@ -1521,7 +1479,7 @@ func waitForDesktopAgentToken(t *testing.T, manager *proxy.Manager, tokenID stri
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	t.Fatalf("agent token %s did not connect", tokenID)
+	t.Fatalf("Desktop broker %s did not connect", tokenID)
 }
 
 func waitForTrafficEvent(t *testing.T, db *store.DB, objectType, publicHost, kind string) store.TrafficEvent {

@@ -35,11 +35,12 @@ func TestRelayResourceRequestsDesktopAndReturnsPushedFile(t *testing.T) {
 	defer server.Close()
 
 	registration := registerUploadDesktop(t, db, "desk.m.zenmind.cc")
+	configureRegisteredProxyDesktopIdentity(relay, "official-jwt", registration)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	resultCh := make(chan fakeResourceResult, 1)
 	fileBody := []byte("hello resource")
-	go runFakeResourceDesktop(t, ctx, server.URL, registration.AgentToken, resultCh, fileBody, "text/plain", false, nil)
+	go runFakeResourceDesktop(t, ctx, server.URL, "official-jwt", resultCh, fileBody, "text/plain", false, nil)
 	waitForAgentToken(t, manager, registration.Token.ID)
 
 	req, err := http.NewRequest(http.MethodGet, server.URL+"/api/resource?file=chat_resource%2Fnote.txt", nil)
@@ -103,6 +104,7 @@ func TestRelayResourceEnforcesDesktopHostAuthAndSafeFile(t *testing.T) {
 	relay := NewRelay(db, manager, nil, 64<<20)
 	relay.SetPublicBaseDomains("m.zenmind.cc", "wa.zenmind.cc")
 	registration := registerUploadDesktop(t, db, "desk.m.zenmind.cc")
+	configureRegisteredProxyDesktopIdentity(relay, "official-jwt", registration)
 
 	tests := []struct {
 		name   string
@@ -142,9 +144,10 @@ func TestRelayResourcePropagatesDesktopTokenRejection(t *testing.T) {
 	server := newResourceRelayTestServer(t, relay)
 	defer server.Close()
 	registration := registerUploadDesktop(t, db, "desk.m.zenmind.cc")
+	configureRegisteredProxyDesktopIdentity(relay, "official-jwt", registration)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go runFakeResourceDesktop(t, ctx, server.URL, registration.AgentToken, nil, nil, "", true, nil)
+	go runFakeResourceDesktop(t, ctx, server.URL, "official-jwt", nil, nil, "", true, nil)
 	waitForAgentToken(t, manager, registration.Token.ID)
 
 	req, _ := http.NewRequest(http.MethodGet, server.URL+"/api/resource?file=chat%2Fa.txt", nil)
@@ -216,9 +219,10 @@ func TestRelayResourceCleansPendingStateAfterDesktopError(t *testing.T) {
 	server := newResourceRelayTestServer(t, relay)
 	defer server.Close()
 	registration := registerUploadDesktop(t, db, "desk.m.zenmind.cc")
+	configureRegisteredProxyDesktopIdentity(relay, "official-jwt", registration)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go runFakeResourceDesktop(t, ctx, server.URL, registration.AgentToken, nil, nil, "", false, func(stream *yamux.Stream, frame desktopResourceBusinessRequest) {
+	go runFakeResourceDesktop(t, ctx, server.URL, "official-jwt", nil, nil, "", false, func(stream *yamux.Stream, frame desktopResourceBusinessRequest) {
 		_ = tunnel.WriteWSFrame(stream, websocket.TextMessage, []byte(`{"ns":"ap","frame":"error","type":"/api/resource","id":"`+frame.ID+`","code":404,"msg":"resource not found"}`))
 	})
 	waitForAgentToken(t, manager, registration.Token.ID)
@@ -268,8 +272,9 @@ func runFakeResourceDesktop(t *testing.T, ctx context.Context, relayURL, token s
 	}
 	defer ws.Close()
 	open := tunnel.NewStreamRequest(tunnel.NamespaceDesktop, tunnel.FrameRequest, tunnel.TypeTunnelOpen, "tun_resource", &tunnel.StreamPayload{
-		AgentToken: token,
-		Client:     "zenmind-desktop",
+		IdentityToken: token,
+		DeviceID:      "mac-mini",
+		Client:        "zenmind-desktop",
 		Capabilities: []string{
 			"desktop.websocket",
 		},

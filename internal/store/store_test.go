@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -88,6 +89,37 @@ func TestTokenValidation(t *testing.T) {
 	}
 }
 
+func TestDesktopBrokerIdentityCannotAuthenticateAsAgentBearer(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+
+	raw, err := auth.NewToken()
+	if err != nil {
+		t.Fatalf("new token: %v", err)
+	}
+	token, err := db.CreateToken(ctx, "legacy-desktop-token", raw)
+	if err != nil {
+		t.Fatalf("create token: %v", err)
+	}
+	registration, err := db.RegisterDesktopDevice(ctx, RegisterDesktopDeviceInput{
+		DeviceID:    "legacy-desktop",
+		OwnerUserID: "42",
+		PublicHost:  "legacy-desktop.m.example.test",
+	})
+	if err != nil {
+		t.Fatalf("register desktop: %v", err)
+	}
+	if _, err := db.sql.ExecContext(ctx, `
+		UPDATE desktop_devices SET token_id = ? WHERE device_id = ?
+	`, token.ID, registration.Device.DeviceKey); err != nil {
+		t.Fatalf("bind legacy token to desktop: %v", err)
+	}
+
+	if _, err := db.FindActiveTokenBySecret(ctx, raw); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("Desktop broker identity authenticated through Agent bearer path: %v", err)
+	}
+}
+
 func TestRegisterDesktopDeviceOwnership(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
@@ -101,8 +133,11 @@ func TestRegisterDesktopDeviceOwnership(t *testing.T) {
 	if err != nil {
 		t.Fatalf("register desktop device: %v", err)
 	}
-	if !first.Created || first.Device.OwnerUserID != "42" || first.AgentToken == "" {
+	if !first.Created || first.Device.OwnerUserID != "42" || first.Token.ID == "" {
 		t.Fatalf("unexpected first registration: %+v", first)
+	}
+	if first.Token.Active || first.Token.TokenHash != "" || first.Token.TokenPrefix != "" {
+		t.Fatalf("Desktop broker identity must not contain a credential: %+v", first.Token)
 	}
 
 	second, err := db.RegisterDesktopDevice(ctx, RegisterDesktopDeviceInput{
@@ -114,7 +149,7 @@ func TestRegisterDesktopDeviceOwnership(t *testing.T) {
 	if err != nil {
 		t.Fatalf("update desktop device: %v", err)
 	}
-	if second.Created || second.Token.ID != first.Token.ID || second.AgentToken != "" || second.Device.TargetURL != "" {
+	if second.Created || second.Token.ID != first.Token.ID || second.Device.TargetURL != "" {
 		t.Fatalf("unexpected second registration: %+v", second)
 	}
 
@@ -239,55 +274,6 @@ func TestRegisterDesktopWebAppCreatesRoute(t *testing.T) {
 	}
 	if updated.Route.PublicHost != "notes.wa.zenmind.cc" || updated.Route.TargetURL != "http://127.0.0.1:8080" || updated.Route.Active {
 		t.Fatalf("webapp update should reuse host and route: %+v", updated.Route)
-	}
-}
-
-func TestRotateDesktopTokenUpdatesWebAppRoutes(t *testing.T) {
-	db := openTestDB(t)
-	ctx := context.Background()
-	device, err := db.RegisterDesktopDevice(ctx, RegisterDesktopDeviceInput{
-		DeviceID:    "mac-mini",
-		OwnerUserID: "42",
-		OwnerEmail:  "desktop.test",
-		PublicHost:  "desktop.m.zenmind.cc",
-	})
-	if err != nil {
-		t.Fatalf("register desktop: %v", err)
-	}
-	webapp, err := db.RegisterDesktopWebApp(ctx, RegisterDesktopWebAppInput{
-		OwnerUserID: "42",
-		DeviceID:    "mac-mini",
-		Name:        "notes",
-		PublicHost:  "notes.wa.zenmind.cc",
-		TargetURL:   "http://127.0.0.1:5173",
-		Active:      true,
-	})
-	if err != nil {
-		t.Fatalf("register webapp: %v", err)
-	}
-	if webapp.Route.TokenID != device.Token.ID {
-		t.Fatalf("initial webapp token = %q, want %q", webapp.Route.TokenID, device.Token.ID)
-	}
-
-	rotated, err := db.RegisterDesktopDevice(ctx, RegisterDesktopDeviceInput{
-		DeviceID:    "mac-mini",
-		OwnerUserID: "42",
-		OwnerEmail:  "desktop.test",
-		PublicHost:  "desktop.m.zenmind.cc",
-		RotateToken: true,
-	})
-	if err != nil {
-		t.Fatalf("rotate desktop token: %v", err)
-	}
-	if rotated.Token.ID == device.Token.ID {
-		t.Fatal("token did not rotate")
-	}
-	route, err := db.GetActiveRouteByHost(ctx, "notes.wa.zenmind.cc")
-	if err != nil {
-		t.Fatalf("get webapp route: %v", err)
-	}
-	if route.TokenID != rotated.Token.ID {
-		t.Fatalf("webapp route token = %q, want %q", route.TokenID, rotated.Token.ID)
 	}
 }
 

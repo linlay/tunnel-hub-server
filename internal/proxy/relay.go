@@ -15,6 +15,7 @@ import (
 
 	"github.com/gorilla/websocket"
 	"github.com/hashicorp/yamux"
+	"github.com/linlay/zenmind-tunnel-server/internal/auth"
 	"github.com/linlay/zenmind-tunnel-server/internal/store"
 	"github.com/linlay/zenmind-tunnel-server/internal/tunnel"
 )
@@ -30,6 +31,12 @@ type Relay struct {
 	trustedProxyCIDRs        []*net.IPNet
 	uploads                  *uploadStore
 	resources                *resourceStore
+	desktopIdentityVerifier  DesktopIdentityVerifier
+	allowMissingTunnelScope  bool
+}
+
+type DesktopIdentityVerifier interface {
+	Verify(token string, now time.Time) (auth.SSOJWTPrincipal, error)
 }
 
 type webAppRelayOptions struct {
@@ -86,6 +93,11 @@ func (r *Relay) SetTrustedProxyCIDRs(value string) {
 	r.trustedProxyCIDRs = parseTrustedProxyCIDRs(value)
 }
 
+func (r *Relay) SetDesktopIdentityVerifier(verifier DesktopIdentityVerifier, allowMissingTunnelScope bool) {
+	r.desktopIdentityVerifier = verifier
+	r.allowMissingTunnelScope = allowMissingTunnelScope
+}
+
 func (r *Relay) HandleTunnel(w http.ResponseWriter, req *http.Request) {
 	clientRemoteAddr := r.clientRemoteAddr(req)
 	rawToken := bearerToken(req.Header.Get("Authorization"))
@@ -122,12 +134,25 @@ func (r *Relay) HandleTunnel(w http.ResponseWriter, req *http.Request) {
 		_ = ws.WriteJSON(tunnel.NewErrorResponse(tunnel.NamespaceDesktop, tunnel.TypeTunnelOpen, open.ID, http.StatusBadRequest, "expected tunnel.open request"))
 		return
 	}
-	token, err := r.DB.FindActiveTokenBySecret(req.Context(), open.Payload.AgentToken)
-	if err != nil {
-		_ = ws.WriteJSON(tunnel.NewErrorResponse(tunnel.NamespaceDesktop, tunnel.TypeTunnelOpen, open.ID, http.StatusUnauthorized, "invalid agent token"))
+	if r.desktopIdentityVerifier == nil {
+		_ = ws.WriteJSON(tunnel.NewErrorResponse(tunnel.NamespaceDesktop, tunnel.TypeTunnelOpen, open.ID, http.StatusServiceUnavailable, "official JWT verifier is not configured"))
 		return
 	}
-	dbSession, err := r.DB.CreateAgentSession(req.Context(), token.ID, clientRemoteAddr)
+	principal, err := r.desktopIdentityVerifier.Verify(strings.TrimSpace(open.Payload.IdentityToken), time.Now())
+	if err != nil {
+		_ = ws.WriteJSON(tunnel.NewErrorResponse(tunnel.NamespaceDesktop, tunnel.TypeTunnelOpen, open.ID, http.StatusUnauthorized, "invalid identity token"))
+		return
+	}
+	if !r.allowMissingTunnelScope && !principal.HasScope("tunnel") {
+		_ = ws.WriteJSON(tunnel.NewErrorResponse(tunnel.NamespaceDesktop, tunnel.TypeTunnelOpen, open.ID, http.StatusForbidden, "tunnel scope required"))
+		return
+	}
+	device, err := r.DB.GetDesktopDeviceByOwnerAndDeviceID(req.Context(), principal.UserID, open.Payload.DeviceID)
+	if err != nil {
+		_ = ws.WriteJSON(tunnel.NewErrorResponse(tunnel.NamespaceDesktop, tunnel.TypeTunnelOpen, open.ID, http.StatusForbidden, "desktop device is not registered for this user"))
+		return
+	}
+	dbSession, err := r.DB.CreateAgentSession(req.Context(), device.TokenID, clientRemoteAddr)
 	if err != nil {
 		r.Logger.Error("create agent session", "error", err)
 		_ = ws.WriteJSON(tunnel.NewErrorResponse(tunnel.NamespaceDesktop, tunnel.TypeTunnelOpen, open.ID, http.StatusInternalServerError, "create agent session failed"))
@@ -142,10 +167,10 @@ func (r *Relay) HandleTunnel(w http.ResponseWriter, req *http.Request) {
 		r.Logger.Error("write tunnel.open response", "error", err)
 		return
 	}
-	r.serveTunnelSession(req, ws, token.ID, clientRemoteAddr, &dbSession)
+	r.serveTunnelSession(req, ws, device.TokenID, clientRemoteAddr, &dbSession, principal.ExpiresAt)
 }
 
-func (r *Relay) serveTunnelSession(req *http.Request, ws *websocket.Conn, tokenID, clientRemoteAddr string, dbSession *store.AgentSession) {
+func (r *Relay) serveTunnelSession(req *http.Request, ws *websocket.Conn, tokenID, clientRemoteAddr string, dbSession *store.AgentSession, expiresAt ...time.Time) {
 	conn := tunnel.NewWebSocketNetConn(ws)
 	config := yamux.DefaultConfig()
 	config.EnableKeepAlive = true
@@ -158,6 +183,12 @@ func (r *Relay) serveTunnelSession(req *http.Request, ws *websocket.Conn, tokenI
 		}
 		r.Logger.Error("start yamux server", "error", err)
 		return
+	}
+	if len(expiresAt) > 0 && !expiresAt[0].IsZero() {
+		timer := time.AfterFunc(time.Until(expiresAt[0]), func() {
+			_ = session.Close()
+		})
+		defer timer.Stop()
 	}
 
 	if dbSession == nil {

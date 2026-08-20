@@ -33,7 +33,7 @@ Relay 入口在 `cmd/relay/main.go`，启动顺序是：
 
 - `/api/admin/*`: 管理 API。支持本地 `tunnel_hub_session` cookie，也支持官网 SSO JWT；JWT 必须满足 `role=admin` 且 `scope` 包含 `tunnel`。
 - `/api/desktop/*`: Desktop 注册 API。只接受官网 SSO JWT，要求 `scope` 包含 `tunnel`。
-- `/tunnel`: Agent 或 Desktop 主动连入的 WebSocket。旧 Agent 使用 `Authorization: Bearer <token>`；Desktop 推荐首帧发送 `ns=d` 的 `tunnel.open`。
+- `/tunnel`: Agent 或 Desktop 主动连入的 WebSocket。通用 Agent 使用 `Authorization: Bearer <token>`；Desktop 必须在首个 `ns=d` / `tunnel.open` 帧中提交官网 SSO `identityToken` 和 `deviceId`，Relay 验证 JWT 与设备所有权。
 - 普通服务 Host: 通过 `routes.public_host` 找 active route，打开对应 token 的 yamux stream，转发 HTTP/WebSocket 到 Agent 本地服务。
 - `*.m.zenmind.cc`: Desktop public Host。WebSocket upgrade 请求进入 Relay，向 Desktop tunnel stream 发送 `ns=d` / `desktop.websocket.open` 元数据；普通 HTTP 由宿主机反向代理转发到 `tunnel-hub-public`。
 - `*.m.zenmind.cc/api/upload`: Mobile 上传入口，只从请求 Host 确定 Desktop，内部发送 `ns=ap`, `type=/api/upload`；multipart 不允许携带 `publicHost`。
@@ -61,7 +61,7 @@ Relay 入口在 `cmd/relay/main.go`，启动顺序是：
 
 - `admin_users`: 本地管理用户。
 - `admin_sessions`: 本地管理登录 session，cookie 名为 `tunnel_hub_session`。
-- `tunnel_tokens`: Agent/Desktop tunnel token，仅存 hash 和 prefix。
+- `tunnel_tokens`: 通用 Agent 的可出示 tunnel token，以及仅供 Relay 内部路由/session 关联的 Desktop broker identity。Agent 行存 hash/prefix；Desktop broker 行保持 inactive 且 credential 字段为空，不存在可出示的原始 secret。
 - `routes`: public Host 到 target/token 的映射。
 - `desktop_devices`: 用户维度的 Desktop 设备、随机 public Host、token 绑定。
 - `desktop_webapps`: Desktop 设备下的 WebApp，绑定独立随机 `*.wa` Host 和 route。
@@ -103,6 +103,8 @@ Relay 入口在 `cmd/relay/main.go`，启动顺序是：
 - JSON metadata 使用 `internal/tunnel.WriteJSON` / `ReadJSON`，4 字节大端长度前缀，最大 `1 MiB`。
 - WebSocket 数据帧使用 `internal/tunnel` 的 9 字节 frame envelope。
 - Desktop tunnel open 首帧必须是 `v=1`, `ns=d`, `frame=request`, `type=tunnel.open`。
+- Desktop `tunnel.open.payload` 必须包含官网 SSO `identityToken` 和 `deviceId`；Relay 校验签名、issuer、audience、有效期、`tunnel` scope 与设备所有权，并在 JWT 到期时关闭 session。不得回退到 Desktop 专用 bearer token。
+- `Authorization: Bearer` 入口只能接受未绑定 Desktop 设备的通用 Agent token；历史 Desktop token 即使仍存在于数据库，也必须被拒绝。
 - WebApp HTTP metadata 使用 `ns=wa`, `type=http.request`。
 - WebApp WebSocket metadata 使用 `ns=wa`, `type=websocket.connect`。
 - Desktop public WebSocket metadata 使用 `ns=d`, `type=desktop.websocket.open`。
@@ -115,12 +117,12 @@ Relay 入口在 `cmd/relay/main.go`，启动顺序是：
 - 环境变量事实以 `internal/config/config.go` 和 `.env.example` 为准；不要在文档里写真实生产值。
 - `.env.example` 默认包含 SSO issuer 和 public key file；本地只跑 direct admin login 时，需要清空 SSO 相关变量或准备 `configs/jwt-public.pem`，否则 `admin.NewServer`/`desktop.NewServer` 会启动失败。
 - Host 匹配必须统一经过 `internal/tunnel.NormalizeHost` 或等价逻辑，避免大小写、端口、尾点导致 route 绕过。
-- `proxy.Manager` 以 token 维护在线 Agent；同一 token 新连接会替换旧连接。新增功能时要考虑 token/session 的一对多和替换行为。
+- `proxy.Manager` 以内部 token ID 维护在线 Agent/Desktop session；同一 ID 的新连接会替换旧连接。Desktop 的 ID 由已注册设备解析得到，不是客户端持有的 secret。新增功能时要考虑 token/session 的一对多和替换行为。
 - HTTP 请求体当前在 Relay 侧完整缓冲，限制由 `MAX_REQUEST_BODY_BYTES` 控制。涉及大文件、流式上传或 backpressure 的改动要重点测试。
 - Desktop public Host 不使用 `deviceId`，由随机 `zm...m.zenmind.cc` 生成；WebApp Host 由随机 `zwa...wa.zenmind.cc` 生成。
 - Desktop/platform auth token 由 Desktop 侧校验，Relay 只负责把 query token 或 `bearer.<token>` subprotocol 透传给 Desktop。
 - 附件 API 的 Desktop 身份只来自 `<desktop>.m.zenmind.cc` Host；不得从 body、query 或其他客户端字段接受 `publicHost` 覆盖。
-- 管理 token 手动创建当前禁用；Desktop 注册会创建/轮换 tunnel token。
+- 管理 token 手动创建当前禁用；Desktop 注册只创建或复用 Relay 内部 broker identity，不签发、轮换或返回 Desktop tunnel secret。
 - Go 改动提交前运行 `gofmt -w` 和相关 `go test`。
 
 ## 8. 开发流程

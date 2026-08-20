@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/linlay/zenmind-tunnel-server/internal/admin"
+	"github.com/linlay/zenmind-tunnel-server/internal/auth"
 	"github.com/linlay/zenmind-tunnel-server/internal/config"
 	desktopapi "github.com/linlay/zenmind-tunnel-server/internal/desktop"
 	"github.com/linlay/zenmind-tunnel-server/internal/proxy"
@@ -47,6 +48,18 @@ func main() {
 	relay.SetPublicBaseDomains(cfg.DesktopPublicBaseDomain, cfg.WebAppPublicBaseDomain)
 	relay.SetMobileWebAppCookieSecure(cfg.MobileWebAppCookieSecure)
 	relay.SetTrustedProxyCIDRs(cfg.TrustedProxyCIDRs)
+	desktopIdentityVerifier, err := auth.NewSSOJWTVerifier(auth.SSOJWTConfig{
+		Issuer:           cfg.SSOJWTIssuer,
+		Audience:         cfg.SSOJWTAudience,
+		UserIDClaim:      cfg.SSOJWTUserIDClaim,
+		AllowAnyAudience: cfg.SSOJWTAllowAnyAudience,
+		PublicKeyFile:    cfg.SSOJWTPublicKeyFile,
+		PublicKeyPEM:     cfg.SSOJWTPublicKeyPEM,
+	})
+	if err != nil {
+		log.Fatalf("configure Desktop tunnel identity verifier: %v", err)
+	}
+	relay.SetDesktopIdentityVerifier(desktopIdentityVerifier, cfg.SSOJWTAllowMissingScope)
 	adminServer, err := admin.NewServer(db, manager, cfg, logger)
 	if err != nil {
 		log.Fatalf("configure admin server: %v", err)

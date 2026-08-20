@@ -298,7 +298,7 @@ func TestAdminAPIKeyEndpointRemoved(t *testing.T) {
 	}
 }
 
-func TestManualTokenCreationDisabledAndDesktopRegistrationStillReturnsAgentToken(t *testing.T) {
+func TestManualTokenCreationDisabledAndDesktopRegistrationStillCreatesBrokerIdentity(t *testing.T) {
 	server, db := newAdminTestServer(t)
 	req := authedAdminRequest(http.MethodPost, "/api/admin/tokens", `{"name":"manual"}`)
 	rec := httptest.NewRecorder()
@@ -318,8 +318,8 @@ func TestManualTokenCreationDisabledAndDesktopRegistrationStillReturnsAgentToken
 	if err != nil {
 		t.Fatalf("register desktop device: %v", err)
 	}
-	if registration.AgentToken == "" || registration.Token.ID == "" || !registration.Created {
-		t.Fatalf("registration should still issue agent token: %+v", registration)
+	if registration.Token.ID == "" || !registration.Created {
+		t.Fatalf("registration should still create an internal broker identity: %+v", registration)
 	}
 }
 

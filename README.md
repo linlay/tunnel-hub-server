@@ -57,7 +57,7 @@ ADMIN_PASSWORD=<local-password>
 
 ### 启动 Agent
 
-Agent 需要使用已创建的 tunnel token。Desktop 新注册后返回的是内部 `agentToken`；普通 Agent 可使用已有 active token。
+通用 Agent 需要使用已创建的 tunnel token。ZenMind Desktop 不使用该 token：它在注册 API 和 `/tunnel` 的首个 `tunnel.open` 帧中使用官网 SSO JWT。
 
 ```bash
 cd tunnel-hub-server
@@ -119,7 +119,7 @@ docker compose up --build
 | 名称 | 默认值 | 说明 |
 | --- | --- | --- |
 | `AGENT_RELAY_URL` | `ws://127.0.0.1:11961/tunnel` | Agent 默认 Relay tunnel WebSocket 地址。 |
-| `AGENT_TOKEN` | 必填 | Agent/desktop tunnel token。 |
+| `AGENT_TOKEN` | 必填 | 通用 Agent 的 tunnel token；ZenMind Desktop 不使用。 |
 | `AGENT_TLS_INSECURE_SKIP_VERIFY` | `false` | 开发调试 TLS 跳过校验开关，生产不要开启。 |
 | `AGENT_RECONNECT_SECONDS` | `3` | 断线重连间隔。 |
 
@@ -219,8 +219,10 @@ curl -X PUT https://tunnel-hub.zenmind.cc/api/admin/services/auditor \
 curl -X POST https://tunnel-hub.zenmind.cc/api/desktop/devices/register \
   -H "Authorization: Bearer $ZENMIND_OFFICIAL_JWT" \
   -H "Content-Type: application/json" \
-  -d '{"deviceId":"mac-mini","deviceName":"Frank MacBook Pro","rotateToken":false}'
+  -d '{"deviceId":"mac-mini","deviceName":"Frank MacBook Pro"}'
 ```
+
+注册响应只返回设备和公网路由元数据，不返回 Desktop tunnel secret。Desktop 随后在 WSS 首帧的 `tunnel.open.payload.identityToken` 中提交同一官网 SSO JWT；Relay 校验 JWT、`tunnel` scope 和设备所有权，并在 JWT 到期时关闭该 session。普通 Agent 仍使用 WebSocket `Authorization: Bearer <AGENT_TOKEN>`；历史上绑定到 Desktop 设备的 token 会被该 bearer 入口拒绝。
 
 创建、读取和撤销对话分享：
 
@@ -272,7 +274,7 @@ curl https://tunnel-hub.zenmind.cc/api/components
 - `official JWT verifier is not configured`: 检查 `SSO_JWT_ISSUER` 和 JWT 公钥配置。
 - 启动时报 `configs/jwt-public.pem` 不存在：准备有效公钥，或在只做本地账号调试时清空 `.env` 里的 SSO JWT 相关变量。
 - 管理台无法登录：确认 `ADMIN_PASSWORD` 首次启动时已设置，或使用官网 SSO JWT 调用 API。
-- `desktop is offline` / `assigned desktop is offline`: 确认 Desktop 或 Agent 已连接 `/tunnel`，且 token 仍为 active。
+- `desktop is offline` / `assigned desktop is offline`: 确认 Desktop 已登录、官网 SSO JWT 有效且已连接 `/tunnel`；通用 Agent 则确认 tunnel token 仍为 active。
 - WebSocket 无法升级：检查反向代理是否保留 `Upgrade` 和 `Connection` 头。
 - Desktop public mini site 没有打开：确认 `*.m.zenmind.cc` 普通 HTTP 已转发到 `tunnel-hub-public`，不是 Relay。
 - 附件上传返回 `desktop is offline`：确认请求 Host 对应的 Desktop 已连接 `/tunnel`。

@@ -50,10 +50,11 @@ func TestRelayUploadForwardsToDesktopAndServesPull(t *testing.T) {
 	defer server.Close()
 
 	registration := registerUploadDesktop(t, db, "desk.m.zenmind.cc")
+	configureRegisteredProxyDesktopIdentity(relay, "official-jwt", registration)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	resultCh := make(chan fakeUploadResult, 1)
-	go runFakeUploadDesktop(t, ctx, server.URL, registration.AgentToken, resultCh, nil)
+	go runFakeUploadDesktop(t, ctx, server.URL, "official-jwt", resultCh, nil)
 	waitForAgentToken(t, manager, registration.Token.ID)
 
 	body, contentType := uploadMultipartBody(t, map[string]string{
@@ -125,6 +126,7 @@ func TestRelayUploadRequiresFieldsAndDesktopOnline(t *testing.T) {
 	server := newUploadRelayTestServer(t, relay)
 	defer server.Close()
 	registration := registerUploadDesktop(t, db, "desk.m.zenmind.cc")
+	configureRegisteredProxyDesktopIdentity(relay, "official-jwt", registration)
 
 	tests := []struct {
 		name       string
@@ -243,9 +245,10 @@ func TestRelayUploadCleansPendingFileAfterDesktopError(t *testing.T) {
 	defer server.Close()
 
 	registration := registerUploadDesktop(t, db, "desk.m.zenmind.cc")
+	configureRegisteredProxyDesktopIdentity(relay, "official-jwt", registration)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go runFakeUploadDesktop(t, ctx, server.URL, registration.AgentToken, nil, func(stream *yamux.Stream, frame desktopBusinessRequest) {
+	go runFakeUploadDesktop(t, ctx, server.URL, "official-jwt", nil, func(stream *yamux.Stream, frame desktopBusinessRequest) {
 		_ = tunnel.WriteWSFrame(stream, websocket.TextMessage, []byte(`{"ns":"ap","frame":"error","type":"upload_failed","id":"`+frame.ID+`","code":502,"msg":"upload rejected"}`))
 	})
 	waitForAgentToken(t, manager, registration.Token.ID)
@@ -316,8 +319,9 @@ func runFakeUploadDesktop(t *testing.T, ctx context.Context, relayURL, token str
 	}
 	defer ws.Close()
 	open := tunnel.NewStreamRequest(tunnel.NamespaceDesktop, tunnel.FrameRequest, tunnel.TypeTunnelOpen, "tun_upload", &tunnel.StreamPayload{
-		AgentToken: token,
-		Client:     "zenmind-desktop",
+		IdentityToken: token,
+		DeviceID:      "mac-mini",
+		Client:        "zenmind-desktop",
 		Capabilities: []string{
 			"desktop.websocket",
 		},

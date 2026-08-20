@@ -64,7 +64,7 @@ type RouteMetadata struct {
 }
 
 type StreamPayload struct {
-	AgentToken     string          `json:"agentToken,omitempty"`
+	IdentityToken  string          `json:"identityToken,omitempty"`
 	DeviceID       string          `json:"deviceId,omitempty"`
 	Client         string          `json:"client,omitempty"`
 	Capabilities   []string        `json:"capabilities,omitempty"`

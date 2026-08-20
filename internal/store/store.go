@@ -46,19 +46,18 @@ type TunnelToken struct {
 }
 
 type DesktopDevice struct {
-	DeviceKey        string    `json:"-"`
-	DeviceID         string    `json:"deviceId"`
-	DeviceName       string    `json:"deviceName,omitempty"`
-	OwnerUserID      string    `json:"ownerUserId,omitempty"`
-	OwnerEmail       string    `json:"ownerEmail,omitempty"`
-	OwnerName        string    `json:"ownerName,omitempty"`
-	DeviceSecretHash string    `json:"-"`
-	TokenID          string    `json:"tokenId"`
-	RouteID          string    `json:"routeId,omitempty"`
-	PublicHost       string    `json:"publicHost"`
-	TargetURL        string    `json:"targetUrl,omitempty"`
-	CreatedAt        time.Time `json:"createdAt"`
-	UpdatedAt        time.Time `json:"updatedAt"`
+	DeviceKey   string    `json:"-"`
+	DeviceID    string    `json:"deviceId"`
+	DeviceName  string    `json:"deviceName,omitempty"`
+	OwnerUserID string    `json:"ownerUserId,omitempty"`
+	OwnerEmail  string    `json:"ownerEmail,omitempty"`
+	OwnerName   string    `json:"ownerName,omitempty"`
+	TokenID     string    `json:"tokenId"`
+	RouteID     string    `json:"routeId,omitempty"`
+	PublicHost  string    `json:"publicHost"`
+	TargetURL   string    `json:"targetUrl,omitempty"`
+	CreatedAt   time.Time `json:"createdAt"`
+	UpdatedAt   time.Time `json:"updatedAt"`
 }
 
 type DesktopWebApp struct {
@@ -105,17 +104,14 @@ type RegisterDesktopDeviceInput struct {
 	OwnerName        string
 	PublicHost       string
 	TargetURL        string
-	RotateToken      bool
 	RotatePublicHost bool
 }
 
 type RegisterDesktopDeviceResult struct {
-	Device     DesktopDevice
-	Route      Route
-	Token      TunnelToken
-	AgentToken string
-	Created    bool
-	Rotated    bool
+	Device  DesktopDevice
+	Route   Route
+	Token   TunnelToken
+	Created bool
 }
 
 type RegisterDesktopWebAppInput struct {
@@ -323,8 +319,12 @@ func (db *DB) CreateToken(ctx context.Context, name, rawToken string) (TunnelTok
 
 func (db *DB) FindActiveTokenBySecret(ctx context.Context, rawToken string) (TunnelToken, error) {
 	rows, err := db.sql.QueryContext(ctx, `
-		SELECT id, name, token_hash, token_prefix, active, created_at, last_used_at
-		FROM tunnel_tokens WHERE active = 1
+		SELECT token.id, token.name, token.token_hash, token.token_prefix, token.active, token.created_at, token.last_used_at
+		FROM tunnel_tokens AS token
+		WHERE token.active = 1
+		  AND NOT EXISTS (
+			SELECT 1 FROM desktop_devices AS desktop WHERE desktop.token_id = token.id
+		  )
 	`)
 	if err != nil {
 		return TunnelToken{}, err
@@ -444,14 +444,9 @@ func (db *DB) RegisterDesktopDevice(ctx context.Context, input RegisterDesktopDe
 	if device.OwnerUserID != "" && device.OwnerUserID != input.OwnerUserID {
 		return RegisterDesktopDeviceResult{}, ErrDesktopDeviceOwnerMismatch
 	}
-	token, rawToken, err := tokenForDesktopRegistration(ctx, tx, device.TokenID, input.DeviceID, input.RotateToken)
+	token, err := getTokenByIDTx(ctx, tx, device.TokenID)
 	if err != nil {
 		return RegisterDesktopDeviceResult{}, err
-	}
-	if token.ID != device.TokenID {
-		if err := updateDesktopWebAppRouteTokensTx(ctx, tx, device.DeviceKey, token.ID); err != nil {
-			return RegisterDesktopDeviceResult{}, err
-		}
 	}
 	publicHost := device.PublicHost
 	if publicHost == "" || input.RotatePublicHost {
@@ -471,11 +466,18 @@ func (db *DB) RegisterDesktopDevice(ctx context.Context, input RegisterDesktopDe
 	}
 	committed = true
 	return RegisterDesktopDeviceResult{
-		Device:     device,
-		Token:      token,
-		AgentToken: rawToken,
-		Rotated:    input.RotateToken,
+		Device: device,
+		Token:  token,
 	}, nil
+}
+
+func (db *DB) GetDesktopDeviceByOwnerAndDeviceID(ctx context.Context, ownerUserID, deviceID string) (DesktopDevice, error) {
+	row := db.sql.QueryRowContext(ctx, `
+		SELECT device_id, display_device_id, device_name, owner_user_id, owner_email, owner_name, device_secret_hash, token_id, route_id, public_host, target_url, created_at, updated_at
+		FROM desktop_devices
+		WHERE owner_user_id = ? AND display_device_id = ?
+	`, strings.TrimSpace(ownerUserID), strings.TrimSpace(deviceID))
+	return scanDesktopDevice(row)
 }
 
 func (db *DB) GetDesktopDeviceByPublicHost(ctx context.Context, host string) (DesktopDevice, error) {
@@ -816,44 +818,51 @@ func createDesktopDeviceRegistration(ctx context.Context, tx *sql.Tx, input Regi
 	if err := ensurePublicHostAvailableTx(ctx, tx, input.PublicHost, ""); err != nil {
 		return RegisterDesktopDeviceResult{}, err
 	}
-	rawToken, err := auth.NewToken()
-	if err != nil {
-		return RegisterDesktopDeviceResult{}, err
-	}
-	token, err := insertTokenTx(ctx, tx, "desktop:"+input.DeviceID, rawToken)
+	token, err := insertDesktopBrokerIdentityTx(ctx, tx, input.DeviceID)
 	if err != nil {
 		return RegisterDesktopDeviceResult{}, err
 	}
 	now := time.Now().UTC()
 	deviceKey := desktopDeviceKey(input.OwnerUserID, input.DeviceID)
 	device := DesktopDevice{
-		DeviceKey:        deviceKey,
-		DeviceID:         input.DeviceID,
-		DeviceName:       input.DeviceName,
-		OwnerUserID:      input.OwnerUserID,
-		OwnerEmail:       input.OwnerEmail,
-		OwnerName:        input.OwnerName,
-		DeviceSecretHash: "",
-		TokenID:          token.ID,
-		RouteID:          "",
-		PublicHost:       input.PublicHost,
-		TargetURL:        "",
-		CreatedAt:        now,
-		UpdatedAt:        now,
+		DeviceKey:   deviceKey,
+		DeviceID:    input.DeviceID,
+		DeviceName:  input.DeviceName,
+		OwnerUserID: input.OwnerUserID,
+		OwnerEmail:  input.OwnerEmail,
+		OwnerName:   input.OwnerName,
+		TokenID:     token.ID,
+		RouteID:     "",
+		PublicHost:  input.PublicHost,
+		TargetURL:   "",
+		CreatedAt:   now,
+		UpdatedAt:   now,
 	}
 	_, err = tx.ExecContext(ctx, `
 		INSERT INTO desktop_devices (device_id, display_device_id, device_name, owner_user_id, owner_email, owner_name, device_secret_hash, token_id, route_id, public_host, target_url, created_at, updated_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`, device.DeviceKey, device.DeviceID, device.DeviceName, device.OwnerUserID, device.OwnerEmail, device.OwnerName, device.DeviceSecretHash, device.TokenID, device.RouteID, device.PublicHost, device.TargetURL, device.CreatedAt, device.UpdatedAt)
+	`, device.DeviceKey, device.DeviceID, device.DeviceName, device.OwnerUserID, device.OwnerEmail, device.OwnerName, "", device.TokenID, device.RouteID, device.PublicHost, device.TargetURL, device.CreatedAt, device.UpdatedAt)
 	if err != nil {
 		return RegisterDesktopDeviceResult{}, err
 	}
-	return RegisterDesktopDeviceResult{
-		Device:     device,
-		Token:      token,
-		AgentToken: rawToken,
-		Created:    true,
-	}, nil
+	return RegisterDesktopDeviceResult{Device: device, Token: token, Created: true}, nil
+}
+
+func insertDesktopBrokerIdentityTx(ctx context.Context, tx *sql.Tx, deviceID string) (TunnelToken, error) {
+	now := time.Now().UTC()
+	identity := TunnelToken{
+		ID:          newID("broker"),
+		Name:        "desktop:" + strings.TrimSpace(deviceID),
+		TokenHash:   "",
+		TokenPrefix: "",
+		Active:      false,
+		CreatedAt:   now,
+	}
+	_, err := tx.ExecContext(ctx, `
+		INSERT INTO tunnel_tokens (id, name, token_hash, token_prefix, active, created_at)
+		VALUES (?, ?, ?, ?, ?, ?)
+	`, identity.ID, identity.Name, identity.TokenHash, identity.TokenPrefix, identity.Active, identity.CreatedAt)
+	return identity, err
 }
 
 func ensurePublicHostAvailableTx(ctx context.Context, tx *sql.Tx, publicHost, allowedDeviceKey string) error {
@@ -873,25 +882,6 @@ func ensurePublicHostAvailableTx(ctx context.Context, tx *sql.Tx, publicHost, al
 		return nil
 	}
 	return ErrDesktopDeviceHostConflict
-}
-
-func tokenForDesktopRegistration(ctx context.Context, tx *sql.Tx, oldTokenID, deviceID string, rotate bool) (TunnelToken, string, error) {
-	if !rotate {
-		token, err := getTokenByIDTx(ctx, tx, oldTokenID)
-		return token, "", err
-	}
-	if err := deactivateTokenTx(ctx, tx, oldTokenID); err != nil && !errors.Is(err, ErrNotFound) {
-		return TunnelToken{}, "", err
-	}
-	rawToken, err := auth.NewToken()
-	if err != nil {
-		return TunnelToken{}, "", err
-	}
-	token, err := insertTokenTx(ctx, tx, "desktop:"+deviceID, rawToken)
-	if err != nil {
-		return TunnelToken{}, "", err
-	}
-	return token, rawToken, nil
 }
 
 func insertTokenTx(ctx context.Context, tx *sql.Tx, name, rawToken string) (TunnelToken, error) {
@@ -1166,6 +1156,8 @@ func scanDesktopDevice(row rowScanner) (DesktopDevice, error) {
 	var ownerUserID sql.NullString
 	var ownerEmail sql.NullString
 	var ownerName sql.NullString
+	// Existing databases retain this inert column for schema compatibility.
+	var legacyDeviceSecretHash string
 	var routeID sql.NullString
 	var targetURL sql.NullString
 	err := row.Scan(
@@ -1175,7 +1167,7 @@ func scanDesktopDevice(row rowScanner) (DesktopDevice, error) {
 		&ownerUserID,
 		&ownerEmail,
 		&ownerName,
-		&device.DeviceSecretHash,
+		&legacyDeviceSecretHash,
 		&device.TokenID,
 		&routeID,
 		&device.PublicHost,

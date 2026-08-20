@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -105,23 +106,23 @@ func TestRelayRejectsInvalidTunnelToken(t *testing.T) {
 	}
 }
 
-func TestRelayTunnelFirstFrameAuthStartsYamux(t *testing.T) {
+func TestRelayTunnelFirstFrameSSOAuthStartsYamux(t *testing.T) {
 	db := openProxyTestDB(t)
 	manager := NewManager()
 	relay := NewRelay(db, manager, nil, 64<<20)
+	device := configureProxyDesktopIdentity(t, db, relay, "official-jwt", "42", "desktop-1", "profile tunnel")
 	server := httptest.NewServer(http.HandlerFunc(relay.HandleTunnel))
 	defer server.Close()
 
-	raw, token := createProxyToken(t, db, "desktop")
 	ws, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(server.URL, "http"), nil)
 	if err != nil {
 		t.Fatalf("dial tunnel: %v", err)
 	}
 	defer ws.Close()
 	if err := ws.WriteJSON(tunnel.NewStreamRequest(tunnel.NamespaceDesktop, tunnel.FrameRequest, tunnel.TypeTunnelOpen, "tun_1", &tunnel.StreamPayload{
-		AgentToken: raw,
-		DeviceID:   "desktop-1",
-		Client:     "zenmind-desktop",
+		IdentityToken: "official-jwt",
+		DeviceID:      "desktop-1",
+		Client:        "zenmind-desktop",
 	})); err != nil {
 		t.Fatalf("write tunnel.open: %v", err)
 	}
@@ -137,18 +138,69 @@ func TestRelayTunnelFirstFrameAuthStartsYamux(t *testing.T) {
 		t.Fatalf("start yamux client: %v", err)
 	}
 	defer session.Close()
-	waitForAgentToken(t, manager, token.ID)
+	waitForAgentToken(t, manager, device.TokenID)
+}
+
+func TestRelayTunnelFirstFrameSSOAuthExpiresSession(t *testing.T) {
+	db := openProxyTestDB(t)
+	manager := NewManager()
+	relay := NewRelay(db, manager, nil, 64<<20)
+	registration, err := db.RegisterDesktopDevice(context.Background(), store.RegisterDesktopDeviceInput{
+		DeviceID: "desktop-expiring", OwnerUserID: "42", PublicHost: "desktop-expiring.m.example.test",
+	})
+	if err != nil {
+		t.Fatalf("register desktop: %v", err)
+	}
+	relay.SetDesktopIdentityVerifier(staticDesktopIdentityVerifier{
+		token: "expiring-jwt",
+		principal: auth.SSOJWTPrincipal{
+			UserID: "42", Scope: "profile tunnel", ExpiresAt: time.Now().Add(250 * time.Millisecond),
+		},
+	}, false)
+	server := httptest.NewServer(http.HandlerFunc(relay.HandleTunnel))
+	defer server.Close()
+
+	ws, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(server.URL, "http"), nil)
+	if err != nil {
+		t.Fatalf("dial tunnel: %v", err)
+	}
+	defer ws.Close()
+	if err := ws.WriteJSON(tunnel.NewStreamRequest(tunnel.NamespaceDesktop, tunnel.FrameRequest, tunnel.TypeTunnelOpen, "tun_expiring", &tunnel.StreamPayload{
+		IdentityToken: "expiring-jwt",
+		DeviceID:      "desktop-expiring",
+	})); err != nil {
+		t.Fatalf("write tunnel.open: %v", err)
+	}
+	var response tunnel.StreamResponse
+	if err := ws.ReadJSON(&response); err != nil {
+		t.Fatalf("read tunnel.open response: %v", err)
+	}
+	session, err := yamux.Client(tunnel.NewWebSocketNetConn(ws), yamux.DefaultConfig())
+	if err != nil {
+		t.Fatalf("start yamux client: %v", err)
+	}
+	defer session.Close()
+	waitForAgentToken(t, manager, registration.Device.TokenID)
+
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, ok := manager.ActiveAgentForToken(registration.Device.TokenID); !ok {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatal("Desktop tunnel remained active after identity JWT expiry")
 }
 
 func TestRelayTunnelTrustedProxyRemoteAddrPersistsToSessionAndManager(t *testing.T) {
 	db := openProxyTestDB(t)
 	manager := NewManager()
 	relay := NewRelay(db, manager, nil, 64<<20)
+	device := configureProxyDesktopIdentity(t, db, relay, "official-jwt", "42", "desktop-1", "profile tunnel")
 	relay.SetTrustedProxyCIDRs("127.0.0.1/32")
 	server := httptest.NewServer(http.HandlerFunc(relay.HandleTunnel))
 	defer server.Close()
 
-	raw, token := createProxyToken(t, db, "desktop")
 	ws, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(server.URL, "http"), http.Header{
 		"X-Real-IP":       []string{"203.0.113.24"},
 		"X-Forwarded-For": []string{"198.51.100.99, 203.0.113.24"},
@@ -158,9 +210,9 @@ func TestRelayTunnelTrustedProxyRemoteAddrPersistsToSessionAndManager(t *testing
 	}
 	defer ws.Close()
 	if err := ws.WriteJSON(tunnel.NewStreamRequest(tunnel.NamespaceDesktop, tunnel.FrameRequest, tunnel.TypeTunnelOpen, "tun_1", &tunnel.StreamPayload{
-		AgentToken: raw,
-		DeviceID:   "desktop-1",
-		Client:     "zenmind-desktop",
+		IdentityToken: "official-jwt",
+		DeviceID:      "desktop-1",
+		Client:        "zenmind-desktop",
 	})); err != nil {
 		t.Fatalf("write tunnel.open: %v", err)
 	}
@@ -176,7 +228,7 @@ func TestRelayTunnelTrustedProxyRemoteAddrPersistsToSessionAndManager(t *testing
 		t.Fatalf("start yamux client: %v", err)
 	}
 	defer session.Close()
-	waitForAgentToken(t, manager, token.ID)
+	waitForAgentToken(t, manager, device.TokenID)
 
 	stored, err := db.GetAgentSession(context.Background(), response.Data.SessionID)
 	if err != nil {
@@ -185,7 +237,7 @@ func TestRelayTunnelTrustedProxyRemoteAddrPersistsToSessionAndManager(t *testing
 	if stored.RemoteAddr != "203.0.113.24" {
 		t.Fatalf("stored RemoteAddr = %q", stored.RemoteAddr)
 	}
-	active, ok := manager.ActiveAgentForToken(token.ID)
+	active, ok := manager.ActiveAgentForToken(device.TokenID)
 	if !ok {
 		t.Fatal("active agent not found")
 	}
@@ -194,10 +246,11 @@ func TestRelayTunnelTrustedProxyRemoteAddrPersistsToSessionAndManager(t *testing
 	}
 }
 
-func TestRelayTunnelFirstFrameInvalidTokenReturnsStandardError(t *testing.T) {
+func TestRelayTunnelFirstFrameInvalidIdentityReturnsStandardError(t *testing.T) {
 	db := openProxyTestDB(t)
 	manager := NewManager()
 	relay := NewRelay(db, manager, nil, 64<<20)
+	configureProxyDesktopIdentity(t, db, relay, "official-jwt", "42", "desktop-1", "profile tunnel")
 	server := httptest.NewServer(http.HandlerFunc(relay.HandleTunnel))
 	defer server.Close()
 
@@ -207,7 +260,8 @@ func TestRelayTunnelFirstFrameInvalidTokenReturnsStandardError(t *testing.T) {
 	}
 	defer ws.Close()
 	if err := ws.WriteJSON(tunnel.NewStreamRequest(tunnel.NamespaceDesktop, tunnel.FrameRequest, tunnel.TypeTunnelOpen, "tun_bad", &tunnel.StreamPayload{
-		AgentToken: "wrong",
+		IdentityToken: "wrong",
+		DeviceID:      "desktop-1",
 	})); err != nil {
 		t.Fatalf("write tunnel.open: %v", err)
 	}
@@ -215,8 +269,57 @@ func TestRelayTunnelFirstFrameInvalidTokenReturnsStandardError(t *testing.T) {
 	if err := ws.ReadJSON(&response); err != nil {
 		t.Fatalf("read tunnel.open error: %v", err)
 	}
-	if response.Frame != tunnel.FrameError || response.Type != tunnel.TypeTunnelOpen || response.ID != "tun_bad" || response.Code != http.StatusUnauthorized || response.Msg != "invalid agent token" {
+	if response.Frame != tunnel.FrameError || response.Type != tunnel.TypeTunnelOpen || response.ID != "tun_bad" || response.Code != http.StatusUnauthorized || response.Msg != "invalid identity token" {
 		t.Fatalf("tunnel.open error = %#v", response)
+	}
+}
+
+func TestRelayTunnelFirstFrameRejectsMissingScopeAndWrongOwner(t *testing.T) {
+	tests := []struct {
+		name     string
+		userID   string
+		scope    string
+		wantCode int
+		wantMsg  string
+	}{
+		{name: "missing scope", userID: "42", scope: "profile", wantCode: http.StatusForbidden, wantMsg: "tunnel scope required"},
+		{name: "wrong owner", userID: "43", scope: "profile tunnel", wantCode: http.StatusForbidden, wantMsg: "desktop device is not registered for this user"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			db := openProxyTestDB(t)
+			manager := NewManager()
+			relay := NewRelay(db, manager, nil, 64<<20)
+			device, err := db.RegisterDesktopDevice(context.Background(), store.RegisterDesktopDeviceInput{
+				DeviceID: "desktop-1", OwnerUserID: "42", PublicHost: "desktop.m.example.test",
+			})
+			if err != nil {
+				t.Fatalf("register desktop: %v", err)
+			}
+			relay.SetDesktopIdentityVerifier(staticDesktopIdentityVerifier{
+				token:     "official-jwt",
+				principal: auth.SSOJWTPrincipal{UserID: tc.userID, Scope: tc.scope, ExpiresAt: time.Now().Add(time.Hour)},
+			}, false)
+			server := httptest.NewServer(http.HandlerFunc(relay.HandleTunnel))
+			defer server.Close()
+			ws, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(server.URL, "http"), nil)
+			if err != nil {
+				t.Fatalf("dial tunnel: %v", err)
+			}
+			defer ws.Close()
+			if err := ws.WriteJSON(tunnel.NewStreamRequest(tunnel.NamespaceDesktop, tunnel.FrameRequest, tunnel.TypeTunnelOpen, "tun_denied", &tunnel.StreamPayload{
+				IdentityToken: "official-jwt", DeviceID: device.Device.DeviceID,
+			})); err != nil {
+				t.Fatalf("write tunnel.open: %v", err)
+			}
+			var response tunnel.StreamResponse
+			if err := ws.ReadJSON(&response); err != nil {
+				t.Fatalf("read tunnel.open error: %v", err)
+			}
+			if response.Code != tc.wantCode || response.Msg != tc.wantMsg {
+				t.Fatalf("tunnel.open error = %#v", response)
+			}
+		})
 	}
 }
 
@@ -405,6 +508,44 @@ func createProxyToken(t *testing.T, db *store.DB, name string) (string, store.Tu
 		t.Fatalf("create token: %v", err)
 	}
 	return raw, token
+}
+
+type staticDesktopIdentityVerifier struct {
+	token     string
+	principal auth.SSOJWTPrincipal
+}
+
+func (v staticDesktopIdentityVerifier) Verify(token string, _ time.Time) (auth.SSOJWTPrincipal, error) {
+	if token != v.token {
+		return auth.SSOJWTPrincipal{}, errors.New("invalid identity token")
+	}
+	return v.principal, nil
+}
+
+func configureProxyDesktopIdentity(t *testing.T, db *store.DB, relay *Relay, identityToken, ownerUserID, deviceID, scope string) store.DesktopDevice {
+	t.Helper()
+	registration, err := db.RegisterDesktopDevice(context.Background(), store.RegisterDesktopDeviceInput{
+		DeviceID: deviceID, OwnerUserID: ownerUserID, PublicHost: deviceID + ".m.example.test",
+	})
+	if err != nil {
+		t.Fatalf("register desktop: %v", err)
+	}
+	relay.SetDesktopIdentityVerifier(staticDesktopIdentityVerifier{
+		token: identityToken,
+		principal: auth.SSOJWTPrincipal{
+			UserID: ownerUserID, Scope: scope, ExpiresAt: time.Now().Add(time.Hour),
+		},
+	}, false)
+	return registration.Device
+}
+
+func configureRegisteredProxyDesktopIdentity(relay *Relay, identityToken string, registration store.RegisterDesktopDeviceResult) {
+	relay.SetDesktopIdentityVerifier(staticDesktopIdentityVerifier{
+		token: identityToken,
+		principal: auth.SSOJWTPrincipal{
+			UserID: registration.Device.OwnerUserID, Scope: "profile tunnel", ExpiresAt: time.Now().Add(time.Hour),
+		},
+	}, false)
 }
 
 func runProxyAgent(ctx context.Context, relayURL, token string) {

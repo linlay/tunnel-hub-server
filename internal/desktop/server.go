@@ -191,7 +191,6 @@ func (s *Server) registerDesktopDevice(r *http.Request, principal auth.SSOJWTPri
 			OwnerName:        principal.Name,
 			PublicHost:       publicHost,
 			TargetURL:        payload.TargetURL,
-			RotateToken:      payload.RotateToken,
 			RotatePublicHost: payload.RotatePublicHost,
 		})
 		if !errors.Is(err, store.ErrDesktopDeviceHostConflict) {
@@ -263,9 +262,6 @@ func (s *Server) addRegistrationEvent(result store.RegisterDesktopDeviceResult) 
 	if result.Created {
 		eventType = "desktop_device.registered"
 		message = "Desktop device registered"
-	} else if result.Rotated {
-		eventType = "desktop_device.token_rotated"
-		message = "Desktop device token rotated"
 	}
 	if err := s.DB.AddEvent(context.Background(), eventType, message, result.Device.PublicHost); err != nil {
 		s.Logger.Error("add desktop device event", "error", err)
@@ -282,9 +278,7 @@ func (s *Server) registrationResponse(result store.RegisterDesktopDeviceResult) 
 		RelayURL:     s.relayURL(),
 		TargetURL:    result.Device.TargetURL,
 		TokenID:      result.Token.ID,
-		AgentToken:   result.AgentToken,
 		Created:      result.Created,
-		Rotated:      result.Rotated,
 	}
 }
 
@@ -366,7 +360,6 @@ type registerPayload struct {
 	DeviceID         string `json:"deviceId"`
 	DeviceName       string `json:"deviceName"`
 	TargetURL        string `json:"targetUrl"`
-	RotateToken      bool   `json:"rotateToken"`
 	RotatePublicHost bool   `json:"rotatePublicHost"`
 }
 
@@ -388,9 +381,7 @@ type registerResponse struct {
 	RelayURL     string `json:"relayUrl"`
 	TargetURL    string `json:"targetUrl"`
 	TokenID      string `json:"tokenId"`
-	AgentToken   string `json:"agentToken,omitempty"`
 	Created      bool   `json:"created"`
-	Rotated      bool   `json:"rotated"`
 }
 
 type webAppPayload struct {
