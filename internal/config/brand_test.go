@@ -62,14 +62,43 @@ func TestLoadBrandConfigValidation(t *testing.T) {
 }
 
 func TestLoadBrandConfigAcceptsExplicitLoopbackEndpoints(t *testing.T) {
-	yaml := strings.Replace(validBrandYAML, "relayPublicUrl: wss://hub.example.test/tunnel", "relayPublicUrl: ws://127.0.0.1:18181/tunnel", 1)
-	yaml = strings.Replace(yaml, "sharePublicBaseUrl: https://share.example.test", "sharePublicBaseUrl: http://localhost:18080/", 1)
-	cfg, err := LoadBrandConfig(writeBrandFixture(t, yaml))
-	if err != nil {
-		t.Fatal(err)
+	for _, test := range []struct {
+		name      string
+		host      string
+		shareHost string
+	}{
+		{name: "localhost", host: "localhost", shareHost: "localhost"},
+		{name: "ipv4", host: "127.0.0.1", shareHost: "127.0.0.1"},
+		{name: "ipv6", host: "[::1]", shareHost: "[::1]"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			yaml := strings.Replace(validBrandYAML, "relayPublicUrl: wss://hub.example.test/tunnel", "relayPublicUrl: ws://"+test.host+":18181/tunnel", 1)
+			yaml = strings.Replace(yaml, "sharePublicBaseUrl: https://share.example.test", "sharePublicBaseUrl: http://"+test.shareHost+":18080/", 1)
+			cfg, err := LoadBrandConfig(writeBrandFixture(t, yaml))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if want := "http://" + test.shareHost + ":18080"; cfg.Endpoints.SharePublicBaseURL != want {
+				t.Fatalf("SharePublicBaseURL = %q, want %q", cfg.Endpoints.SharePublicBaseURL, want)
+			}
+		})
 	}
-	if cfg.Endpoints.SharePublicBaseURL != "http://localhost:18080" {
-		t.Fatalf("SharePublicBaseURL = %q", cfg.Endpoints.SharePublicBaseURL)
+}
+
+func TestLoadBrandConfigRejectsReservedNonCanonicalLocalEndpoints(t *testing.T) {
+	for _, host := range []string{"127.0.0.2", "demo.localhost", "0.0.0.0"} {
+		t.Run("relay_"+host, func(t *testing.T) {
+			yaml := strings.Replace(validBrandYAML, "relayPublicUrl: wss://hub.example.test/tunnel", "relayPublicUrl: wss://"+host+":18181/tunnel", 1)
+			if _, err := LoadBrandConfig(writeBrandFixture(t, yaml)); err == nil {
+				t.Fatalf("reserved local relay host accepted: %s", host)
+			}
+		})
+		t.Run("share_"+host, func(t *testing.T) {
+			yaml := strings.Replace(validBrandYAML, "sharePublicBaseUrl: https://share.example.test", "sharePublicBaseUrl: https://"+host+":18080", 1)
+			if _, err := LoadBrandConfig(writeBrandFixture(t, yaml)); err == nil {
+				t.Fatalf("reserved local share host accepted: %s", host)
+			}
+		})
 	}
 }
 

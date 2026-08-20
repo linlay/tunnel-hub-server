@@ -178,6 +178,9 @@ func validateShareOrigin(value string) (string, error) {
 }
 
 func validateEndpointHostname(field, host string) error {
+	if isForbiddenEndpointHost(host) {
+		return fmt.Errorf("%s must not use a reserved non-canonical local hostname", field)
+	}
 	if net.ParseIP(strings.Trim(host, "[]")) != nil {
 		return nil
 	}
@@ -189,9 +192,17 @@ func validateEndpointHostname(field, host string) error {
 
 func isLoopbackHost(host string) bool {
 	host = strings.Trim(strings.ToLower(host), "[]")
-	if host == "localhost" || strings.HasSuffix(host, ".localhost") {
+	return host == "localhost" || host == "127.0.0.1" || host == "::1"
+}
+
+func isForbiddenEndpointHost(host string) bool {
+	host = strings.Trim(strings.ToLower(host), "[]")
+	if isLoopbackHost(host) {
+		return false
+	}
+	if host == "0.0.0.0" || strings.HasSuffix(host, ".localhost") {
 		return true
 	}
-	ip := net.ParseIP(host)
-	return ip != nil && ip.IsLoopback()
+	ipv4 := net.ParseIP(host).To4()
+	return ipv4 != nil && ipv4[0] == 127
 }

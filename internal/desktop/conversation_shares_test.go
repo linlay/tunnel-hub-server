@@ -19,7 +19,7 @@ const validConversationHTML = "<!doctype html><html><head><title>发布计划</t
 
 func TestConversationShareAPICreateReadExpireAndRevoke(t *testing.T) {
 	cfg := desktopTestConfig(t)
-	cfg.SharePublicBaseURL = "https://share.example.test/"
+	cfg.SharePublicBaseURL = "https://share.example.test"
 	server, _ := newDesktopTestServerWithConfig(t, cfg)
 	now := time.Date(2026, time.August, 17, 1, 2, 3, 0, time.UTC)
 	server.now = func() time.Time { return now }
@@ -360,7 +360,7 @@ func assertPublicConversationShareHeaders(t *testing.T, response *httptest.Respo
 	}
 }
 
-func TestConversationShareURLRequiresExplicitPublicEnvironment(t *testing.T) {
+func TestConversationShareURLUsesNormalizedPublicEnvironment(t *testing.T) {
 	server := &Server{Config: config.RelayConfig{}}
 	if _, err := server.conversationShareBaseURL(); err == nil {
 		t.Fatal("expected missing public share URL to fail")

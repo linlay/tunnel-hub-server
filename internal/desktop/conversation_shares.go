@@ -306,16 +306,8 @@ func conversationShareIDFromPath(path, prefix string) (string, bool) {
 }
 
 func (s *Server) conversationShareBaseURL() (string, error) {
-	base := strings.TrimRight(strings.TrimSpace(s.Config.SharePublicBaseURL), "/")
-	if base == "" {
+	if s.Config.SharePublicBaseURL == "" {
 		return "", errors.New("conversation sharing is not configured")
 	}
-	parsed, err := url.Parse(base)
-	if err != nil || parsed.Host == "" || parsed.RawQuery != "" || parsed.Fragment != "" {
-		return "", errors.New("share public base URL is invalid")
-	}
-	if parsed.Scheme != "https" && !(parsed.Scheme == "http" && (parsed.Hostname() == "localhost" || parsed.Hostname() == "127.0.0.1")) {
-		return "", errors.New("share public base URL must use https")
-	}
-	return base + "/share", nil
+	return s.Config.SharePublicBaseURL + "/share", nil
 }

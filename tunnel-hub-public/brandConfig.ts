@@ -180,17 +180,27 @@ function parsedURL(value: string, field: string) {
 
 function isLoopbackHost(host: string) {
   const normalized = host.toLowerCase().replace(/^\[|\]$/g, '');
-  return normalized === 'localhost' || normalized.endsWith('.localhost') || normalized === '::1' || normalized.startsWith('127.');
+  return normalized === 'localhost' || normalized === '127.0.0.1' || normalized === '::1';
 }
 
 function validateEndpointHostname(host: string, field: string) {
   const normalized = host.toLowerCase().replace(/^\[|\]$/g, '');
+  if (isForbiddenEndpointHost(normalized)) {
+    throw new Error(`${field} must not use a reserved non-canonical local hostname`);
+  }
   if (isIPAddress(normalized)) {
     return;
   }
   if (normalized.length > 253 || normalized.startsWith('.') || normalized.endsWith('.') || normalized.split('.').some((label) => !hostLabelPattern.test(label))) {
     throw new Error(`${field} must use a valid hostname`);
   }
+}
+
+function isForbiddenEndpointHost(host: string) {
+  if (isLoopbackHost(host)) {
+    return false;
+  }
+  return host === '0.0.0.0' || host.endsWith('.localhost') || /^127(?:\.\d{1,3}){3}$/.test(host);
 }
 
 function isIPAddress(host: string) {
