@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 
 	"github.com/linlay/zenmind-tunnel-server/internal/auth"
 	"github.com/linlay/zenmind-tunnel-server/internal/config"
@@ -18,15 +19,17 @@ import (
 
 const registerPath = "/api/desktop/devices/register"
 const conversationSharesPath = "/api/desktop/shares"
-const publicConversationSharesPath = "/api/public/shares/"
+const publicConversationSharePagePath = "/share/"
 const publicHostRetryLimit = 8
 const publicLabelRandomBytes = 8
 
 type Server struct {
-	DB     *store.DB
-	Config config.RelayConfig
-	Logger *slog.Logger
-	ssoJWT *auth.SSOJWTVerifier
+	DB                            *store.DB
+	Config                        config.RelayConfig
+	Logger                        *slog.Logger
+	ssoJWT                        *auth.SSOJWTVerifier
+	now                           func() time.Time
+	recordConversationShareAccess func(context.Context, string, time.Time) error
 }
 
 func NewServer(db *store.DB, cfg config.RelayConfig, logger *slog.Logger) (*Server, error) {
@@ -44,33 +47,46 @@ func NewServer(db *store.DB, cfg config.RelayConfig, logger *slog.Logger) (*Serv
 	if err != nil {
 		return nil, err
 	}
-	return &Server{DB: db, Config: cfg, Logger: logger, ssoJWT: ssoJWT}, nil
+	return &Server{
+		DB:                            db,
+		Config:                        cfg,
+		Logger:                        logger,
+		ssoJWT:                        ssoJWT,
+		now:                           time.Now,
+		recordConversationShareAccess: db.RecordConversationShareAccess,
+	}, nil
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if strings.HasPrefix(r.URL.Path, publicConversationSharePagePath) {
+		if r.Method != http.MethodGet {
+			w.Header().Set("Allow", http.MethodGet)
+			writePublicConversationShareError(w, http.StatusMethodNotAllowed)
+			return
+		}
+		s.handleGetPublicConversationSharePage(w, r)
+		return
+	}
 	if r.Method == http.MethodOptions {
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
 	switch {
 	case r.URL.Path == conversationSharesPath:
-		if r.Method != http.MethodPost {
+		switch r.Method {
+		case http.MethodPost:
+			s.handleCreateConversationShare(w, r)
+		case http.MethodGet:
+			s.handleListConversationShares(w, r)
+		default:
 			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
-			return
 		}
-		s.handleCreateConversationShare(w, r)
 	case strings.HasPrefix(r.URL.Path, conversationSharesPath+"/"):
 		if r.Method != http.MethodDelete {
 			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 			return
 		}
 		s.handleRevokeConversationShare(w, r)
-	case strings.HasPrefix(r.URL.Path, publicConversationSharesPath):
-		if r.Method != http.MethodGet {
-			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
-			return
-		}
-		s.handleGetPublicConversationShare(w, r)
 	case r.URL.Path == registerPath:
 		if r.Method != http.MethodPost {
 			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -325,27 +341,15 @@ func (s *Server) randomWebAppPublicHost() (string, error) {
 }
 
 func (s *Server) baseDomain() string {
-	baseDomain := strings.TrimPrefix(tunnelHost(s.Config.PublicBaseDomain), ".")
-	if baseDomain == "" {
-		baseDomain = "tunnel-hub.zenmind.cc"
-	}
-	return baseDomain
+	return strings.TrimPrefix(tunnelHost(s.Config.PublicBaseDomain), ".")
 }
 
 func (s *Server) desktopPublicBaseDomain() string {
-	baseDomain := strings.TrimPrefix(tunnelHost(s.Config.DesktopPublicBaseDomain), ".")
-	if baseDomain == "" {
-		baseDomain = "m.zenmind.cc"
-	}
-	return baseDomain
+	return strings.TrimPrefix(tunnelHost(s.Config.DesktopPublicBaseDomain), ".")
 }
 
 func (s *Server) webAppPublicBaseDomain() string {
-	baseDomain := strings.TrimPrefix(tunnelHost(s.Config.WebAppPublicBaseDomain), ".")
-	if baseDomain == "" {
-		baseDomain = "wa.zenmind.cc"
-	}
-	return baseDomain
+	return strings.TrimPrefix(tunnelHost(s.Config.WebAppPublicBaseDomain), ".")
 }
 
 func randomPublicLabel() (string, error) {

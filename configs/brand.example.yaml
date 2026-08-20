@@ -1,0 +1,20 @@
+# Brand configuration shared by Relay and the public-site build.
+schemaVersion: 1
+
+brand:
+  # Stable deployment identity. Changing it also changes the mobile session cookie.
+  id: "example"
+  productName: "Example Desktop"
+  publicSiteTitle: "Example Desktop"
+
+domains:
+  # Hostnames only: no scheme, port, path, or wildcard.
+  publicBase: "hub.example.test"
+  desktopPublicBase: "m.example.test"
+  webAppPublicBase: "wa.example.test"
+
+endpoints:
+  # Loopback development may use ws; non-loopback deployments require wss.
+  relayPublicUrl: "wss://hub.example.test/tunnel"
+  # Loopback development may use http; non-loopback deployments require https.
+  sharePublicBaseUrl: "https://share.example.test"

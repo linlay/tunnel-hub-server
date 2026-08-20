@@ -20,7 +20,7 @@ func TestJSONRoundTrip(t *testing.T) {
 			Public: &PublicRequest{
 				Method:  http.MethodPost,
 				Path:    "/api/ping?x=1",
-				Host:    "app.example.com",
+				Host:    "app.example.test",
 				Headers: http.Header{"X-Test": []string{"ok"}},
 			},
 			Upstream: &UpstreamTarget{

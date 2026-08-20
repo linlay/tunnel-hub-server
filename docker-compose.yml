@@ -12,22 +12,23 @@ services:
     environment:
       RELAY_ADDR: ":8080"
       RELAY_DB_PATH: "/data/tunnel.db"
-      DESKTOP_PUBLIC_BASE_DOMAIN: "m.zenmind.cc"
-      WEBAPP_PUBLIC_BASE_DOMAIN: "wa.zenmind.cc"
-      SHARE_PUBLIC_BASE_URL: "${SHARE_PUBLIC_BASE_URL:-https://share.zenmind.cc}"
+      BRAND_CONFIG_FILE: "/configs/brand.yaml"
       SSO_JWT_PUBLIC_KEY_FILE: "/configs/jwt-public.pem"
     ports:
       - "127.0.0.1:${TUNNEL_HUB_RELAY_PORT:-11961}:8080"
     volumes:
       - relay-data:/data
-      - ./configs:/configs:ro
+      - ./.local/brand.yaml:/configs/brand.yaml:ro
+      - ./configs/jwt-public.pem:/configs/jwt-public.pem:ro
 
   public:
     image: tunnel-hub-public
     container_name: tunnel-hub-public
     build:
-      context: ./tunnel-hub-public
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: tunnel-hub-public/Dockerfile
+      args:
+        BRAND_CONFIG_FILE: "${BRAND_CONFIG_FILE:-configs/brand.yaml}"
     ports:
       - "127.0.0.1:${TUNNEL_HUB_PUBLIC_PORT:-11965}:80"
     restart: unless-stopped

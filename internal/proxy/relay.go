@@ -23,6 +23,7 @@ type Relay struct {
 	DB                       *store.DB
 	Manager                  *Manager
 	Logger                   *slog.Logger
+	BrandID                  string
 	MaxRequestBodyBytes      int64
 	DesktopBaseDomain        string
 	WebAppBaseDomain         string
@@ -39,10 +40,7 @@ type webAppRelayOptions struct {
 	ObjectType  string
 }
 
-const secureMobileWebAppSessionCookie = "__Host-zenmind_mobile_session"
-const insecureMobileWebAppSessionCookie = "zenmind_mobile_session"
-
-func NewRelay(db *store.DB, manager *Manager, logger *slog.Logger, maxRequestBodyBytes int64) *Relay {
+func NewRelay(db *store.DB, manager *Manager, logger *slog.Logger, brandID, desktopBaseDomain, webAppBaseDomain string, maxRequestBodyBytes int64) *Relay {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -53,9 +51,10 @@ func NewRelay(db *store.DB, manager *Manager, logger *slog.Logger, maxRequestBod
 		DB:                       db,
 		Manager:                  manager,
 		Logger:                   logger,
+		BrandID:                  brandID,
 		MaxRequestBodyBytes:      maxRequestBodyBytes,
-		DesktopBaseDomain:        "m.zenmind.cc",
-		WebAppBaseDomain:         "wa.zenmind.cc",
+		DesktopBaseDomain:        normalizeBaseDomain(desktopBaseDomain),
+		WebAppBaseDomain:         normalizeBaseDomain(webAppBaseDomain),
 		MobileWebAppCookieSecure: true,
 		uploads:                  newUploadStore(),
 		resources:                newResourceStore(),
@@ -68,18 +67,9 @@ func (r *Relay) SetMobileWebAppCookieSecure(secure bool) {
 
 func (r *Relay) mobileWebAppSessionCookieName() string {
 	if r.MobileWebAppCookieSecure {
-		return secureMobileWebAppSessionCookie
+		return "__Host-" + r.BrandID + "_mobile_session"
 	}
-	return insecureMobileWebAppSessionCookie
-}
-
-func (r *Relay) SetPublicBaseDomains(desktopBaseDomain, webAppBaseDomain string) {
-	if normalized := normalizeBaseDomain(desktopBaseDomain); normalized != "" {
-		r.DesktopBaseDomain = normalized
-	}
-	if normalized := normalizeBaseDomain(webAppBaseDomain); normalized != "" {
-		r.WebAppBaseDomain = normalized
-	}
+	return r.BrandID + "_mobile_session"
 }
 
 func (r *Relay) SetTrustedProxyCIDRs(value string) {

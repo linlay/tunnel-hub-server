@@ -185,9 +185,6 @@ func (db *DB) Migrate(ctx context.Context) error {
 	if err := db.ensureTrafficEventsTable(ctx); err != nil {
 		return err
 	}
-	if err := db.migrateConversationShareStream(ctx); err != nil {
-		return err
-	}
 	return nil
 }
 
@@ -1540,49 +1537,6 @@ func (db *DB) ensureColumn(ctx context.Context, table, column, definition string
 	return err
 }
 
-func (db *DB) migrateConversationShareStream(ctx context.Context) error {
-	columns, err := db.tableColumns(ctx, "conversation_shares")
-	if err != nil {
-		return err
-	}
-	if columns["snapshot_json"] && !columns["event_stream"] {
-		if _, err := db.sql.ExecContext(ctx, `ALTER TABLE conversation_shares RENAME COLUMN snapshot_json TO event_stream`); err != nil {
-			return err
-		}
-	}
-	if columns["transcript_version"] && !columns["stream_version"] {
-		if _, err := db.sql.ExecContext(ctx, `ALTER TABLE conversation_shares RENAME COLUMN transcript_version TO stream_version`); err != nil {
-			return err
-		}
-		// The unreleased transcript format is not the Share SSE version 1 contract.
-		if _, err := db.sql.ExecContext(ctx, `UPDATE conversation_shares SET stream_version = 0`); err != nil {
-			return err
-		}
-	}
-	return db.ensureColumn(ctx, "conversation_shares", "stream_version", "INTEGER NOT NULL DEFAULT 0")
-}
-
-func (db *DB) tableColumns(ctx context.Context, table string) (map[string]bool, error) {
-	rows, err := db.sql.QueryContext(ctx, fmt.Sprintf(`PRAGMA table_info(%s)`, table))
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	columns := make(map[string]bool)
-	for rows.Next() {
-		var cid int
-		var name, columnType string
-		var notNull int
-		var defaultValue any
-		var pk int
-		if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &pk); err != nil {
-			return nil, err
-		}
-		columns[name] = true
-	}
-	return columns, rows.Err()
-}
-
 const schema = `
 CREATE TABLE IF NOT EXISTS admin_users (
 	id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1687,15 +1641,22 @@ CREATE TABLE IF NOT EXISTS events (
 CREATE TABLE IF NOT EXISTS conversation_shares (
 	id TEXT PRIMARY KEY,
 	owner_user_id TEXT NOT NULL,
-	title TEXT NOT NULL,
-	stream_version INTEGER NOT NULL DEFAULT 0,
-	event_stream BLOB NOT NULL,
+	conversation_id TEXT NOT NULL,
+	document_version INTEGER NOT NULL,
+	html_document BLOB NOT NULL,
 	created_at TIMESTAMP NOT NULL,
+	expires_at TIMESTAMP,
 	revoked_at TIMESTAMP
 );
 
-CREATE INDEX IF NOT EXISTS idx_conversation_shares_owner_created
-	ON conversation_shares(owner_user_id, created_at DESC);
+CREATE TABLE IF NOT EXISTS conversation_share_access (
+	share_id TEXT PRIMARY KEY,
+	last_accessed_at TIMESTAMP NOT NULL,
+	FOREIGN KEY (share_id) REFERENCES conversation_shares(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_conversation_shares_owner_conversation_created
+	ON conversation_shares(owner_user_id, conversation_id, created_at DESC);
 
 CREATE TABLE IF NOT EXISTS traffic_events (
 	id INTEGER PRIMARY KEY AUTOINCREMENT,

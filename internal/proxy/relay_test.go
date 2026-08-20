@@ -3,13 +3,38 @@ package proxy
 import "testing"
 
 func TestMobileWebAppSessionCookieNameUsesHostPrefixOnlyForSecureCookies(t *testing.T) {
-	relay := &Relay{MobileWebAppCookieSecure: true}
-	if got := relay.mobileWebAppSessionCookieName(); got != secureMobileWebAppSessionCookie {
+	relay := &Relay{BrandID: "example", MobileWebAppCookieSecure: true}
+	if got := relay.mobileWebAppSessionCookieName(); got != "__Host-example_mobile_session" {
 		t.Fatalf("secure cookie name = %q", got)
 	}
 	relay.SetMobileWebAppCookieSecure(false)
-	if got := relay.mobileWebAppSessionCookieName(); got != insecureMobileWebAppSessionCookie {
+	if got := relay.mobileWebAppSessionCookieName(); got != "example_mobile_session" {
 		t.Fatalf("insecure cookie name = %q", got)
+	}
+}
+
+func TestMobileWebAppSessionCookieNamePreservesCurrentBrandCompatibility(t *testing.T) {
+	relay := &Relay{BrandID: "zenmind", MobileWebAppCookieSecure: true}
+	if got := relay.mobileWebAppSessionCookieName(); got != "__Host-zenmind_mobile_session" {
+		t.Fatalf("secure cookie name = %q", got)
+	}
+	relay.SetMobileWebAppCookieSecure(false)
+	if got := relay.mobileWebAppSessionCookieName(); got != "zenmind_mobile_session" {
+		t.Fatalf("insecure cookie name = %q", got)
+	}
+}
+
+func TestNewRelayKeepsValidatedBrandRoutingIsolated(t *testing.T) {
+	alpha := NewRelay(nil, nil, nil, "alpha", "m.alpha.example.test", "wa.alpha.example.test", 1)
+	beta := NewRelay(nil, nil, nil, "beta", "m.beta.example.test", "wa.beta.example.test", 1)
+	if alpha.DesktopBaseDomain != "m.alpha.example.test" || alpha.WebAppBaseDomain != "wa.alpha.example.test" {
+		t.Fatalf("alpha domains = %q %q", alpha.DesktopBaseDomain, alpha.WebAppBaseDomain)
+	}
+	if beta.DesktopBaseDomain != "m.beta.example.test" || beta.WebAppBaseDomain != "wa.beta.example.test" {
+		t.Fatalf("beta domains = %q %q", beta.DesktopBaseDomain, beta.WebAppBaseDomain)
+	}
+	if alpha.mobileWebAppSessionCookieName() == beta.mobileWebAppSessionCookieName() {
+		t.Fatalf("brand cookie names must be isolated")
 	}
 }
 

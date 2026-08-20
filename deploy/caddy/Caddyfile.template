@@ -1,17 +1,14 @@
+# Replace every uppercase brace-delimited placeholder before loading this template.
 {
-	email admin@tunnel-hub.zenmind.cc
+	email {{ACME_EMAIL}}
 }
 
-tunnel-hub.zenmind.cc {
+{{PUBLIC_BASE}} {
 	handle /api/admin* {
 		reverse_proxy relay:8080
 	}
 
 	handle /api/desktop* {
-		reverse_proxy relay:8080
-	}
-
-	handle /api/public/shares/* {
 		reverse_proxy relay:8080
 	}
 
@@ -39,6 +36,10 @@ tunnel-hub.zenmind.cc {
 		reverse_proxy relay:8080
 	}
 
+	handle /assets/conversation-export/* {
+		reverse_proxy relay:8080
+	}
+
 	handle /tunnel {
 		reverse_proxy relay:8080
 	}
@@ -48,10 +49,24 @@ tunnel-hub.zenmind.cc {
 	}
 }
 
-# Public wildcard routes require DNS for *.m.zenmind.cc and *.wa.zenmind.cc.
+{{SHARE_HOST}} {
+	handle /assets/conversation-export/* {
+		reverse_proxy relay:8080
+	}
+
+	handle /share/* {
+		reverse_proxy relay:8080
+	}
+
+	handle {
+		respond 404
+	}
+}
+
+# Public wildcard routes require DNS for *.{{DESKTOP_PUBLIC_BASE}} and *.{{WEBAPP_PUBLIC_BASE}}.
 # Public ACME wildcard certificates usually require a DNS challenge provider.
-*.m.zenmind.cc {
-	@mobileWebApp host_regexp mobileWebApp ^[^.]+-[0-9]+\.m\.zenmind\.cc$
+*.{{DESKTOP_PUBLIC_BASE}} {
+	@mobileWebApp host_regexp mobileWebApp ^[^.]+-[0-9]+\.{{DESKTOP_PUBLIC_BASE_REGEX}}$
 	handle @mobileWebApp {
 		reverse_proxy relay:8080
 	}
@@ -92,6 +107,6 @@ tunnel-hub.zenmind.cc {
 	}
 }
 
-*.wa.zenmind.cc {
+*.{{WEBAPP_PUBLIC_BASE}} {
 	reverse_proxy relay:8080
 }

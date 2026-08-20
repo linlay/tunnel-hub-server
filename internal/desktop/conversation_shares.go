@@ -1,8 +1,6 @@
 package desktop
 
 import (
-	"bytes"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -11,36 +9,50 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"github.com/linlay/zenmind-tunnel-server/internal/store"
 )
 
-const maxConversationShareBytes int64 = 2 << 20
-const maxConversationShareEvents = 2000
-const maxConversationShareContentBytes = 200_000
-const maxConversationShareTitleBytes = 300
-const maxConversationShareLabelBytes = 300
+const maxConversationShareBytes int64 = 20 * 1024 * 1024
+const conversationDocumentVersion = "1"
+const conversationDocumentVersionHeader = "X-Conversation-Document-Version"
+const conversationShareExpirationHeader = "X-Conversation-Share-Expiration"
+const conversationShareConversationIDHeader = "X-Conversation-ID"
 
-var errConversationShareTooLarge = errors.New("share event stream is too large")
+var errConversationShareTooLarge = errors.New("conversation HTML document is too large")
 
-var conversationShareFramePrefix = []byte("event: message\ndata: ")
-
-type conversationShareEvent struct {
-	Seq            int64   `json:"seq"`
-	Type           string  `json:"type"`
-	ShareVersion   *int    `json:"shareVersion,omitempty"`
-	ChatName       *string `json:"chatName,omitempty"`
-	Message        *string `json:"message,omitempty"`
-	Text           *string `json:"text,omitempty"`
-	ReasoningLabel *string `json:"reasoningLabel,omitempty"`
-	Timestamp      int64   `json:"timestamp"`
+type conversationShareSizeError struct {
+	actual int64
 }
 
-type conversationShareCreateResponse struct {
-	ID        string `json:"id"`
-	URL       string `json:"url"`
-	CreatedAt string `json:"createdAt"`
+func (e *conversationShareSizeError) Error() string {
+	return fmt.Sprintf(
+		"conversation HTML document is %d bytes; limit is %d bytes (20 MiB)",
+		e.actual,
+		maxConversationShareBytes,
+	)
+}
+
+func (e *conversationShareSizeError) Unwrap() error {
+	return errConversationShareTooLarge
+}
+
+func newConversationShareSizeError(actual int64) error {
+	return &conversationShareSizeError{actual: actual}
+}
+
+type conversationShareRecordResponse struct {
+	ID             string  `json:"id"`
+	URL            string  `json:"url"`
+	CreatedAt      string  `json:"createdAt"`
+	ExpiresAt      *string `json:"expiresAt"`
+	LastAccessedAt *string `json:"lastAccessedAt"`
+}
+
+type conversationShareListResponse struct {
+	Items []conversationShareRecordResponse `json:"items"`
 }
 
 func (s *Server) handleCreateConversationShare(w http.ResponseWriter, r *http.Request) {
@@ -48,7 +60,17 @@ func (s *Server) handleCreateConversationShare(w http.ResponseWriter, r *http.Re
 	if !ok {
 		return
 	}
-	title, eventStream, err := decodeConversationShareEventStream(w, r)
+	expiration, err := parseConversationShareExpiration(r.Header.Get(conversationShareExpirationHeader))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	conversationID := strings.TrimSpace(r.Header.Get(conversationShareConversationIDHeader))
+	if !store.ValidConversationShareConversationID(conversationID) {
+		writeError(w, http.StatusBadRequest, "invalid conversation id")
+		return
+	}
+	html, err := decodeConversationHTML(r)
 	if err != nil {
 		status := http.StatusBadRequest
 		if errors.Is(err, errConversationShareTooLarge) {
@@ -57,21 +79,113 @@ func (s *Server) handleCreateConversationShare(w http.ResponseWriter, r *http.Re
 		writeError(w, status, err.Error())
 		return
 	}
-	shareURL, err := s.conversationShareURL("")
+	shareURL, err := s.conversationShareBaseURL()
 	if err != nil {
 		writeError(w, http.StatusServiceUnavailable, err.Error())
 		return
 	}
-	share, err := s.DB.CreateConversationShare(r.Context(), principal.UserID, title, eventStream)
+	now := s.now().UTC()
+	var expiresAt *time.Time
+	if expiration != nil {
+		value := now.Add(*expiration)
+		expiresAt = &value
+	}
+	share, err := s.DB.CreateConversationShare(
+		r.Context(),
+		principal.UserID,
+		conversationID,
+		store.ConversationDocumentVersion,
+		html,
+		now,
+		expiresAt,
+	)
 	if err != nil {
 		s.writeInternal(w, "create conversation share", err)
 		return
 	}
-	writeJSON(w, http.StatusCreated, conversationShareCreateResponse{
-		ID:        share.ID,
-		URL:       strings.TrimSuffix(shareURL, "/") + "/" + url.PathEscape(share.ID),
-		CreatedAt: share.CreatedAt.Format("2006-01-02T15:04:05.000Z07:00"),
-	})
+	writeJSON(w, http.StatusCreated, conversationShareRecordResponseFromStore(share, shareURL))
+}
+
+func (s *Server) handleListConversationShares(w http.ResponseWriter, r *http.Request) {
+	principal, ok := s.authorizeRegistration(w, r)
+	if !ok {
+		return
+	}
+	conversationID := strings.TrimSpace(r.URL.Query().Get("conversationId"))
+	if !store.ValidConversationShareConversationID(conversationID) {
+		writeError(w, http.StatusBadRequest, "invalid conversation id")
+		return
+	}
+	shareURL, err := s.conversationShareBaseURL()
+	if err != nil {
+		writeError(w, http.StatusServiceUnavailable, err.Error())
+		return
+	}
+	shares, err := s.DB.ListConversationShares(r.Context(), principal.UserID, conversationID, s.now().UTC())
+	if err != nil {
+		s.writeInternal(w, "list conversation shares", err)
+		return
+	}
+	items := make([]conversationShareRecordResponse, 0, len(shares))
+	for _, share := range shares {
+		items = append(items, conversationShareRecordResponseFromStore(share, shareURL))
+	}
+	writeJSON(w, http.StatusOK, conversationShareListResponse{Items: items})
+}
+
+func parseConversationShareExpiration(value string) (*time.Duration, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return nil, errors.New("conversation share expiration is required")
+	}
+	var duration time.Duration
+	switch value {
+	case "5m":
+		duration = 5 * time.Minute
+	case "30m":
+		duration = 30 * time.Minute
+	case "1h":
+		duration = time.Hour
+	case "3h":
+		duration = 3 * time.Hour
+	case "1d":
+		duration = 24 * time.Hour
+	case "5d":
+		duration = 5 * 24 * time.Hour
+	case "15d":
+		duration = 15 * 24 * time.Hour
+	case "30d":
+		duration = 30 * 24 * time.Hour
+	case "permanent":
+		return nil, nil
+	default:
+		return nil, errors.New("unsupported conversation share expiration")
+	}
+	if duration <= 0 {
+		return nil, errors.New("conversation share expiration must be positive")
+	}
+	return &duration, nil
+}
+
+func formatConversationShareExpiration(value *time.Time) *string {
+	if value == nil {
+		return nil
+	}
+	formatted := value.Format("2006-01-02T15:04:05.000Z07:00")
+	return &formatted
+}
+
+func conversationShareRecordResponseFromStore(
+	share store.ConversationShare,
+	shareURL string,
+) conversationShareRecordResponse {
+	return conversationShareRecordResponse{
+		ID:             share.ID,
+		URL:            strings.TrimSuffix(shareURL, "/") + "/" + url.PathEscape(share.ID),
+		CreatedAt:      share.CreatedAt.Format("2006-01-02T15:04:05.000Z07:00"),
+		ExpiresAt:      formatConversationShareExpiration(share.ExpiresAt),
+		LastAccessedAt: formatConversationShareExpiration(share.LastAccessedAt),
+	}
 }
 
 func (s *Server) handleRevokeConversationShare(w http.ResponseWriter, r *http.Request) {
@@ -81,10 +195,10 @@ func (s *Server) handleRevokeConversationShare(w http.ResponseWriter, r *http.Re
 	}
 	id, ok := conversationShareIDFromPath(r.URL.Path, conversationSharesPath+"/")
 	if !ok {
-		writeError(w, http.StatusNotFound, "not found")
+		writeError(w, http.StatusNotFound, "share not found")
 		return
 	}
-	if err := s.DB.RevokeConversationShare(r.Context(), id, principal.UserID); err != nil {
+	if err := s.DB.RevokeConversationShare(r.Context(), id, principal.UserID, s.now().UTC()); err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			writeError(w, http.StatusNotFound, "share not found")
 			return
@@ -95,200 +209,86 @@ func (s *Server) handleRevokeConversationShare(w http.ResponseWriter, r *http.Re
 	w.WriteHeader(http.StatusNoContent)
 }
 
-func (s *Server) handleGetPublicConversationShare(w http.ResponseWriter, r *http.Request) {
-	id, ok := conversationShareIDFromPath(r.URL.Path, publicConversationSharesPath)
+func (s *Server) handleGetPublicConversationSharePage(w http.ResponseWriter, r *http.Request) {
+	id, ok := conversationShareIDFromPath(r.URL.Path, publicConversationSharePagePath)
 	if !ok {
-		writeError(w, http.StatusNotFound, "not found")
+		writePublicConversationShareError(w, http.StatusNotFound)
 		return
 	}
-	share, err := s.DB.GetPublicConversationShare(r.Context(), id)
+	now := s.now().UTC()
+	share, err := s.DB.GetPublicConversationShare(r.Context(), id, now)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
-			writeError(w, http.StatusNotFound, "share not found")
+			writePublicConversationShareError(w, http.StatusNotFound)
 			return
 		}
-		s.writeInternal(w, "get conversation share", err)
+		s.Logger.Error("get conversation share", "error", err)
+		writePublicConversationShareError(w, http.StatusInternalServerError)
 		return
 	}
-	w.Header().Set("Cache-Control", "no-store")
-	w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
-	w.Header().Set("Content-Length", strconv.Itoa(len(share.EventStream)))
-	w.Header().Set("X-Content-Type-Options", "nosniff")
+	recordAccess := s.recordConversationShareAccess
+	if recordAccess == nil {
+		recordAccess = s.DB.RecordConversationShareAccess
+	}
+	if err := recordAccess(r.Context(), share.ID, now); err != nil {
+		s.Logger.Error("record conversation share access", "shareId", share.ID, "error", err)
+	}
+	setPublicConversationShareHeaders(w.Header())
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Content-Length", strconv.Itoa(len(share.HTMLDocument)))
 	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write(share.EventStream)
+	_, _ = w.Write(share.HTMLDocument)
 }
 
-// decodeConversationShareEventStream implements only the finite Share SSE Profile.
-// It deliberately does not accept the broader SSE grammar used by live streams.
-func decodeConversationShareEventStream(w http.ResponseWriter, r *http.Request) (string, []byte, error) {
+func writePublicConversationShareError(w http.ResponseWriter, status int) {
+	body := publicConversationShareErrorDocument(status)
+	setPublicConversationShareHeaders(w.Header())
+	w.Header().Set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'")
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Content-Language", "zh-CN")
+	w.Header().Set("Content-Length", strconv.Itoa(len(body)))
+	w.WriteHeader(status)
+	_, _ = w.Write(body)
+}
+
+func setPublicConversationShareHeaders(header http.Header) {
+	header.Set("Cache-Control", "no-store")
+	header.Set("X-Content-Type-Options", "nosniff")
+	header.Set("X-Robots-Tag", "noindex, nofollow, noarchive")
+	header.Set("Referrer-Policy", "no-referrer")
+}
+
+func decodeConversationHTML(r *http.Request) ([]byte, error) {
 	mediaType, params, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
-	if err != nil || mediaType != "text/event-stream" {
-		return "", nil, errors.New("Content-Type must be text/event-stream")
+	if err != nil || mediaType != "text/html" {
+		return nil, errors.New("Content-Type must be text/html")
 	}
 	for name := range params {
 		if name != "charset" {
-			return "", nil, errors.New("share event stream has unsupported media type parameters")
+			return nil, errors.New("HTML document has unsupported media type parameters")
 		}
 	}
 	if charset, ok := params["charset"]; ok && !strings.EqualFold(charset, "utf-8") {
-		return "", nil, errors.New("share event stream charset must be utf-8")
+		return nil, errors.New("HTML document charset must be utf-8")
 	}
-	limited := http.MaxBytesReader(w, r.Body, maxConversationShareBytes)
-	defer limited.Close()
-	eventStream, err := io.ReadAll(limited)
+	if r.Header.Get(conversationDocumentVersionHeader) != conversationDocumentVersion {
+		return nil, errors.New("unsupported conversation document version")
+	}
+	if r.ContentLength > maxConversationShareBytes {
+		return nil, newConversationShareSizeError(r.ContentLength)
+	}
+	limited := io.LimitReader(r.Body, maxConversationShareBytes+1)
+	html, err := io.ReadAll(limited)
 	if err != nil {
-		var maxBytesError *http.MaxBytesError
-		if errors.As(err, &maxBytesError) {
-			return "", nil, errConversationShareTooLarge
-		}
-		return "", nil, errors.New("invalid share event stream")
+		return nil, errors.New("invalid HTML document")
 	}
-	if len(eventStream) == 0 || !utf8.Valid(eventStream) || !bytes.HasSuffix(eventStream, []byte("\n\n")) {
-		return "", nil, errors.New("invalid share event stream encoding")
+	if int64(len(html)) > maxConversationShareBytes {
+		return nil, newConversationShareSizeError(int64(len(html)))
 	}
-
-	remaining := eventStream
-	expectedSeq := int64(1)
-	eventCount := 0
-	queryCount := 0
-	turnOpen := false
-	runStarted := false
-	snapshotsStarted := false
-	var lastTurnTimestamp int64
-	var title string
-	done := false
-
-	for len(remaining) > 0 {
-		boundary := bytes.Index(remaining, []byte("\n\n"))
-		if boundary < 0 {
-			return "", nil, errors.New("unterminated share event frame")
-		}
-		frame := remaining[:boundary]
-		remaining = remaining[boundary+2:]
-		if !bytes.HasPrefix(frame, conversationShareFramePrefix) {
-			return "", nil, errors.New("invalid share event frame")
-		}
-		data := frame[len(conversationShareFramePrefix):]
-		if len(data) == 0 || bytes.IndexByte(data, '\n') >= 0 || bytes.IndexByte(data, '\r') >= 0 {
-			return "", nil, errors.New("invalid share event data")
-		}
-		if bytes.Equal(data, []byte("[DONE]")) {
-			if len(remaining) != 0 || expectedSeq == 1 || queryCount == 0 {
-				return "", nil, errors.New("invalid share event completion")
-			}
-			done = true
-			break
-		}
-
-		var event conversationShareEvent
-		if err := decodeStrictShareEvent(data, &event); err != nil {
-			return "", nil, errors.New("invalid share event payload")
-		}
-		if event.Seq != expectedSeq || !isEpochMilliseconds(event.Timestamp) {
-			return "", nil, errors.New("invalid share event sequence or time")
-		}
-		expectedSeq++
-
-		if event.Seq == 1 {
-			if err := validateConversationStart(event); err != nil {
-				return "", nil, err
-			}
-			title = strings.TrimSpace(*event.ChatName)
-			continue
-		}
-		eventCount++
-		if eventCount > maxConversationShareEvents {
-			return "", nil, fmt.Errorf("share event stream must contain at most %d conversation events", maxConversationShareEvents)
-		}
-
-		switch event.Type {
-		case "request.query":
-			if turnOpen || !onlyEventFields(event, false, false, true, false, false) || !validShareContent(event.Message) {
-				return "", nil, errors.New("invalid request.query event")
-			}
-			turnOpen = true
-			runStarted = false
-			snapshotsStarted = false
-			lastTurnTimestamp = event.Timestamp
-			queryCount++
-		case "run.start":
-			if !turnOpen || runStarted || snapshotsStarted || event.Timestamp < lastTurnTimestamp || !onlyEventFields(event, false, false, false, false, false) {
-				return "", nil, errors.New("invalid run.start event")
-			}
-			runStarted = true
-			lastTurnTimestamp = event.Timestamp
-		case "reasoning.snapshot":
-			if !turnOpen || event.Timestamp < lastTurnTimestamp || !onlyReasoningEventFields(event) || !validShareContent(event.Text) {
-				return "", nil, errors.New("invalid reasoning.snapshot event")
-			}
-			if event.ReasoningLabel != nil && len([]byte(*event.ReasoningLabel)) > maxConversationShareLabelBytes {
-				return "", nil, errors.New("reasoning label is too large")
-			}
-			snapshotsStarted = true
-			lastTurnTimestamp = event.Timestamp
-		case "content.snapshot":
-			if !turnOpen || event.Timestamp < lastTurnTimestamp || !onlyEventFields(event, false, false, false, true, false) || !validShareContent(event.Text) {
-				return "", nil, errors.New("invalid content.snapshot event")
-			}
-			snapshotsStarted = true
-			lastTurnTimestamp = event.Timestamp
-		case "run.complete", "run.cancel", "run.error":
-			if !turnOpen || event.Timestamp < lastTurnTimestamp || !onlyEventFields(event, false, false, false, false, false) {
-				return "", nil, errors.New("invalid terminal event")
-			}
-			turnOpen = false
-		default:
-			return "", nil, errors.New("unsupported share event type")
-		}
+	if len(html) == 0 || !utf8.Valid(html) {
+		return nil, errors.New("HTML document must be non-empty UTF-8")
 	}
-	if !done {
-		return "", nil, errors.New("share event stream must end with [DONE]")
-	}
-	return title, eventStream, nil
-}
-
-func decodeStrictShareEvent(data []byte, event *conversationShareEvent) error {
-	decoder := json.NewDecoder(bytes.NewReader(data))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(event); err != nil {
-		return err
-	}
-	var extra any
-	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
-		return errors.New("multiple JSON values")
-	}
-	return nil
-}
-
-func validateConversationStart(event conversationShareEvent) error {
-	if event.Type != "chat.start" || event.ShareVersion == nil || *event.ShareVersion != 1 || event.ChatName == nil || !onlyEventFields(event, true, true, false, false, false) {
-		return errors.New("share event stream must start with chat.start version 1")
-	}
-	title := strings.TrimSpace(*event.ChatName)
-	if title == "" || len([]byte(*event.ChatName)) > maxConversationShareTitleBytes {
-		return errors.New("chat name must be between 1 and 300 bytes")
-	}
-	return nil
-}
-
-func onlyEventFields(event conversationShareEvent, shareVersion, chatName, message, text, reasoningLabel bool) bool {
-	return (event.ShareVersion != nil) == shareVersion &&
-		(event.ChatName != nil) == chatName &&
-		(event.Message != nil) == message &&
-		(event.Text != nil) == text &&
-		(event.ReasoningLabel != nil) == reasoningLabel
-}
-
-func onlyReasoningEventFields(event conversationShareEvent) bool {
-	return event.ShareVersion == nil && event.ChatName == nil && event.Message == nil && event.Text != nil
-}
-
-func validShareContent(value *string) bool {
-	return value != nil && strings.TrimSpace(*value) != "" && len([]byte(*value)) <= maxConversationShareContentBytes
-}
-
-func isEpochMilliseconds(value int64) bool {
-	return value >= 1_000_000_000_000
+	return html, nil
 }
 
 func conversationShareIDFromPath(path, prefix string) (string, bool) {
@@ -305,7 +305,7 @@ func conversationShareIDFromPath(path, prefix string) (string, bool) {
 	return id, true
 }
 
-func (s *Server) conversationShareURL(id string) (string, error) {
+func (s *Server) conversationShareBaseURL() (string, error) {
 	base := strings.TrimRight(strings.TrimSpace(s.Config.SharePublicBaseURL), "/")
 	if base == "" {
 		return "", errors.New("conversation sharing is not configured")
@@ -317,9 +317,5 @@ func (s *Server) conversationShareURL(id string) (string, error) {
 	if parsed.Scheme != "https" && !(parsed.Scheme == "http" && (parsed.Hostname() == "localhost" || parsed.Hostname() == "127.0.0.1")) {
 		return "", errors.New("share public base URL must use https")
 	}
-	shareBase := base + "/share"
-	if id == "" {
-		return shareBase, nil
-	}
-	return shareBase + "/" + url.PathEscape(id), nil
+	return base + "/share", nil
 }

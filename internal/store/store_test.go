@@ -13,18 +13,18 @@ func TestRouteCRUDAndHostNormalization(t *testing.T) {
 	ctx := context.Background()
 	token := createTestToken(t, db, "laptop")
 
-	route, err := db.CreateRoute(ctx, "App.Example.COM:443", "http://127.0.0.1:3000", true, token.ID)
+	route, err := db.CreateRoute(ctx, "App.Example.TEST:443", "http://127.0.0.1:3000", true, token.ID)
 	if err != nil {
 		t.Fatalf("create route: %v", err)
 	}
-	if route.PublicHost != "app.example.com" {
+	if route.PublicHost != "app.example.test" {
 		t.Fatalf("host was not normalized: %q", route.PublicHost)
 	}
 	if route.TokenID != token.ID {
 		t.Fatalf("route token id = %q", route.TokenID)
 	}
 
-	found, err := db.GetActiveRouteByHost(ctx, "app.example.com")
+	found, err := db.GetActiveRouteByHost(ctx, "app.example.test")
 	if err != nil {
 		t.Fatalf("get route: %v", err)
 	}
@@ -32,14 +32,14 @@ func TestRouteCRUDAndHostNormalization(t *testing.T) {
 		t.Fatalf("unexpected target: %q", found.TargetURL)
 	}
 
-	updated, err := db.UpdateRoute(ctx, route.ID, "api.example.com", "http://127.0.0.1:8080", false, token.ID)
+	updated, err := db.UpdateRoute(ctx, route.ID, "api.example.test", "http://127.0.0.1:8080", false, token.ID)
 	if err != nil {
 		t.Fatalf("update route: %v", err)
 	}
 	if updated.Active {
 		t.Fatal("route should be inactive")
 	}
-	if _, err := db.GetActiveRouteByHost(ctx, "api.example.com"); err != ErrNotFound {
+	if _, err := db.GetActiveRouteByHost(ctx, "api.example.test"); err != ErrNotFound {
 		t.Fatalf("inactive route should not match, got %v", err)
 	}
 }
@@ -48,13 +48,13 @@ func TestUnassignedRoutesAreNotActive(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
 
-	if _, err := db.CreateRoute(ctx, "legacy.example.com", "http://127.0.0.1:3000", true, ""); err != nil {
+	if _, err := db.CreateRoute(ctx, "legacy.example.test", "http://127.0.0.1:3000", true, ""); err != nil {
 		t.Fatalf("create legacy route: %v", err)
 	}
-	if _, err := db.GetRouteByHost(ctx, "legacy.example.com"); err != nil {
+	if _, err := db.GetRouteByHost(ctx, "legacy.example.test"); err != nil {
 		t.Fatalf("legacy route should remain listable: %v", err)
 	}
-	if _, err := db.GetActiveRouteByHost(ctx, "legacy.example.com"); err != ErrNotFound {
+	if _, err := db.GetActiveRouteByHost(ctx, "legacy.example.test"); err != ErrNotFound {
 		t.Fatalf("unassigned route should not be active, got %v", err)
 	}
 }
@@ -96,7 +96,7 @@ func TestRegisterDesktopDeviceOwnership(t *testing.T) {
 		DeviceID:    "mac-mini",
 		OwnerUserID: "42",
 		OwnerEmail:  "desktop.test",
-		PublicHost:  "mac-mini.tunnel-hub.zenmind.cc",
+		PublicHost:  "mac-mini.hub.example.test",
 	})
 	if err != nil {
 		t.Fatalf("register desktop device: %v", err)
@@ -109,7 +109,7 @@ func TestRegisterDesktopDeviceOwnership(t *testing.T) {
 		DeviceID:    "mac-mini",
 		OwnerUserID: "42",
 		OwnerEmail:  "desktop.test",
-		PublicHost:  "mac-mini.tunnel-hub.zenmind.cc",
+		PublicHost:  "mac-mini.hub.example.test",
 	})
 	if err != nil {
 		t.Fatalf("update desktop device: %v", err)
@@ -122,7 +122,7 @@ func TestRegisterDesktopDeviceOwnership(t *testing.T) {
 		DeviceID:    "mac-mini",
 		OwnerUserID: "43",
 		OwnerEmail:  "other.test",
-		PublicHost:  "random.m.zenmind.cc",
+		PublicHost:  "random.m.example.test",
 	})
 	if err != nil {
 		t.Fatalf("different owner with same display device id should register independently: %v", err)
@@ -130,7 +130,7 @@ func TestRegisterDesktopDeviceOwnership(t *testing.T) {
 	if !other.Created || other.Device.DeviceID != "mac-mini" || other.Device.OwnerUserID != "43" {
 		t.Fatalf("unexpected different owner registration: %+v", other)
 	}
-	if _, err := db.GetRouteByHost(ctx, "mac-mini.tunnel-hub.zenmind.cc"); err != ErrNotFound {
+	if _, err := db.GetRouteByHost(ctx, "mac-mini.hub.example.test"); err != ErrNotFound {
 		t.Fatalf("desktop registration should not create route, got %v", err)
 	}
 
@@ -138,7 +138,7 @@ func TestRegisterDesktopDeviceOwnership(t *testing.T) {
 		DeviceID:    "mac-mini",
 		OwnerUserID: "42",
 		OwnerEmail:  "desktop.test",
-		PublicHost:  "mac-mini.tunnel-hub.zenmind.cc",
+		PublicHost:  "mac-mini.hub.example.test",
 	})
 	if err != nil {
 		t.Fatalf("same owner should update without device secret: %v", err)
@@ -152,7 +152,7 @@ func TestRegisterDesktopDeviceClaimsLegacyDevice(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
 	token := createTestToken(t, db, "desktop:legacy")
-	route, err := db.CreateRoute(ctx, "legacy.tunnel-hub.zenmind.cc", "http://127.0.0.1:7082", true, token.ID)
+	route, err := db.CreateRoute(ctx, "legacy.hub.example.test", "http://127.0.0.1:7082", true, token.ID)
 	if err != nil {
 		t.Fatalf("create route: %v", err)
 	}
@@ -172,7 +172,7 @@ func TestRegisterDesktopDeviceClaimsLegacyDevice(t *testing.T) {
 		DeviceID:    "legacy",
 		OwnerUserID: "42",
 		OwnerEmail:  "desktop.test",
-		PublicHost:  "legacy.tunnel-hub.zenmind.cc",
+		PublicHost:  "legacy.hub.example.test",
 	})
 	if err != nil {
 		t.Fatalf("claim legacy device: %v", err)
@@ -185,7 +185,7 @@ func TestRegisterDesktopDeviceClaimsLegacyDevice(t *testing.T) {
 		DeviceID:    "legacy",
 		OwnerUserID: "43",
 		OwnerEmail:  "other.test",
-		PublicHost:  "other-legacy.m.zenmind.cc",
+		PublicHost:  "other-legacy.m.example.test",
 	})
 	if err != nil {
 		t.Fatalf("different owner should register independent legacy display id: %v", err)
@@ -202,7 +202,7 @@ func TestRegisterDesktopWebAppCreatesRoute(t *testing.T) {
 		DeviceID:    "mac-mini",
 		OwnerUserID: "42",
 		OwnerEmail:  "desktop.test",
-		PublicHost:  "desktop.m.zenmind.cc",
+		PublicHost:  "desktop.m.example.test",
 	})
 	if err != nil {
 		t.Fatalf("register desktop: %v", err)
@@ -212,7 +212,7 @@ func TestRegisterDesktopWebAppCreatesRoute(t *testing.T) {
 		OwnerUserID: "42",
 		DeviceID:    "mac-mini",
 		Name:        "notes",
-		PublicHost:  "notes.wa.zenmind.cc",
+		PublicHost:  "notes.wa.example.test",
 		TargetURL:   "http://127.0.0.1:5173",
 		Active:      true,
 	})
@@ -230,14 +230,14 @@ func TestRegisterDesktopWebAppCreatesRoute(t *testing.T) {
 		OwnerUserID: "42",
 		DeviceID:    "mac-mini",
 		Name:        "notes",
-		PublicHost:  "ignored.wa.zenmind.cc",
+		PublicHost:  "ignored.wa.example.test",
 		TargetURL:   "http://127.0.0.1:8080",
 		Active:      false,
 	})
 	if err != nil {
 		t.Fatalf("update webapp: %v", err)
 	}
-	if updated.Route.PublicHost != "notes.wa.zenmind.cc" || updated.Route.TargetURL != "http://127.0.0.1:8080" || updated.Route.Active {
+	if updated.Route.PublicHost != "notes.wa.example.test" || updated.Route.TargetURL != "http://127.0.0.1:8080" || updated.Route.Active {
 		t.Fatalf("webapp update should reuse host and route: %+v", updated.Route)
 	}
 }
@@ -249,7 +249,7 @@ func TestRotateDesktopTokenUpdatesWebAppRoutes(t *testing.T) {
 		DeviceID:    "mac-mini",
 		OwnerUserID: "42",
 		OwnerEmail:  "desktop.test",
-		PublicHost:  "desktop.m.zenmind.cc",
+		PublicHost:  "desktop.m.example.test",
 	})
 	if err != nil {
 		t.Fatalf("register desktop: %v", err)
@@ -258,7 +258,7 @@ func TestRotateDesktopTokenUpdatesWebAppRoutes(t *testing.T) {
 		OwnerUserID: "42",
 		DeviceID:    "mac-mini",
 		Name:        "notes",
-		PublicHost:  "notes.wa.zenmind.cc",
+		PublicHost:  "notes.wa.example.test",
 		TargetURL:   "http://127.0.0.1:5173",
 		Active:      true,
 	})
@@ -273,7 +273,7 @@ func TestRotateDesktopTokenUpdatesWebAppRoutes(t *testing.T) {
 		DeviceID:    "mac-mini",
 		OwnerUserID: "42",
 		OwnerEmail:  "desktop.test",
-		PublicHost:  "desktop.m.zenmind.cc",
+		PublicHost:  "desktop.m.example.test",
 		RotateToken: true,
 	})
 	if err != nil {
@@ -282,7 +282,7 @@ func TestRotateDesktopTokenUpdatesWebAppRoutes(t *testing.T) {
 	if rotated.Token.ID == device.Token.ID {
 		t.Fatal("token did not rotate")
 	}
-	route, err := db.GetActiveRouteByHost(ctx, "notes.wa.zenmind.cc")
+	route, err := db.GetActiveRouteByHost(ctx, "notes.wa.example.test")
 	if err != nil {
 		t.Fatalf("get webapp route: %v", err)
 	}

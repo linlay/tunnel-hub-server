@@ -1,20 +1,21 @@
+# Replace every uppercase brace-delimited placeholder before loading this template.
 map $http_upgrade $tunnel_hub_connection_upgrade {
     default upgrade;
     "" close;
 }
 
 map "$host:$http_upgrade" $tunnel_hub_desktop_public_backend {
-    ~^[^.]+-[0-9]+\.m\.zenmind\.cc: http://127.0.0.1:11961;
+    ~^[^.]+-[0-9]+\.{{DESKTOP_PUBLIC_BASE_REGEX}}: http://127.0.0.1:11961;
     ~^.+:.+$ http://127.0.0.1:11961;
     default http://127.0.0.1:11965;
 }
 
 server {
     listen 443 ssl http2;
-    server_name tunnel-hub.zenmind.cc;
+    server_name {{PUBLIC_BASE}};
 
-    ssl_certificate /etc/letsencrypt/live/tunnel-hub.zenmind.cc/fullchain.pem;
-    ssl_certificate_key /etc/letsencrypt/live/tunnel-hub.zenmind.cc/privkey.pem;
+    ssl_certificate {{PUBLIC_CERTIFICATE}};
+    ssl_certificate_key {{PUBLIC_CERTIFICATE_KEY}};
 
     client_max_body_size 100m;
 
@@ -68,15 +69,6 @@ server {
         proxy_set_header X-Forwarded-Proto https;
     }
 
-    location /api/public/shares/ {
-        proxy_pass http://127.0.0.1:11961;
-        proxy_http_version 1.1;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto https;
-    }
-
     location = /api/upload {
         return 404;
     }
@@ -111,6 +103,18 @@ server {
         proxy_set_header X-Forwarded-Proto https;
     }
 
+    # HTML exports may be opened from disk, so Platform injects the configured
+    # Tunnel origin instead of a fixed share host. Keep assets available here
+    # as well as on the configured conversation share host.
+    location /assets/conversation-export/ {
+        proxy_pass http://127.0.0.1:11961;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto https;
+    }
+
     location / {
         proxy_pass http://127.0.0.1:11963;
         proxy_http_version 1.1;
@@ -123,10 +127,41 @@ server {
 
 server {
     listen 443 ssl http2;
-    server_name m.zenmind.cc *.m.zenmind.cc;
+    server_name {{SHARE_HOST}};
 
-    ssl_certificate /etc/letsencrypt/live/m.zenmind.cc/fullchain.pem;
-    ssl_certificate_key /etc/letsencrypt/live/m.zenmind.cc/privkey.pem;
+    ssl_certificate {{SHARE_CERTIFICATE}};
+    ssl_certificate_key {{SHARE_CERTIFICATE_KEY}};
+
+    location /assets/conversation-export/ {
+        proxy_pass http://127.0.0.1:11961;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto https;
+    }
+
+    location /share/ {
+        proxy_pass http://127.0.0.1:11961;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_buffering off;
+    }
+
+    location / {
+        return 404;
+    }
+}
+
+server {
+    listen 443 ssl http2;
+    server_name {{DESKTOP_PUBLIC_BASE}} *.{{DESKTOP_PUBLIC_BASE}};
+
+    ssl_certificate {{DESKTOP_CERTIFICATE}};
+    ssl_certificate_key {{DESKTOP_CERTIFICATE_KEY}};
 
     client_max_body_size 100m;
 
@@ -197,10 +232,10 @@ server {
 
 server {
     listen 443 ssl http2;
-    server_name wa.zenmind.cc *.wa.zenmind.cc;
+    server_name {{WEBAPP_PUBLIC_BASE}} *.{{WEBAPP_PUBLIC_BASE}};
 
-    ssl_certificate /etc/letsencrypt/live/wa.zenmind.cc/fullchain.pem;
-    ssl_certificate_key /etc/letsencrypt/live/wa.zenmind.cc/privkey.pem;
+    ssl_certificate {{WEBAPP_CERTIFICATE}};
+    ssl_certificate_key {{WEBAPP_CERTIFICATE_KEY}};
 
     client_max_body_size 100m;
 
@@ -222,6 +257,6 @@ server {
 
 server {
     listen 80;
-    server_name tunnel-hub.zenmind.cc m.zenmind.cc *.m.zenmind.cc wa.zenmind.cc *.wa.zenmind.cc;
+    server_name {{PUBLIC_BASE}} {{DESKTOP_PUBLIC_BASE}} *.{{DESKTOP_PUBLIC_BASE}} {{WEBAPP_PUBLIC_BASE}} *.{{WEBAPP_PUBLIC_BASE}};
     return 301 https://$host$request_uri;
 }

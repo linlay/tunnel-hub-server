@@ -140,7 +140,9 @@ export function App() {
   const wsURL = useMemo(() => desktopWsUrlFromLocation(window.location), []);
   const isConnected = connectionState === 'open';
   const allAgents = useMemo(() => mergeAgents(desktopAgents, platformAgents), [desktopAgents, platformAgents]);
-  const selectedAgent = selectedAgentKey || allAgents[0]?.agentKey || 'zenmi';
+  const selectedAgent = allAgents.some((agent) => agent.agentKey === selectedAgentKey)
+    ? selectedAgentKey
+    : allAgents[0]?.agentKey || '';
   const selectedAgentSummary = allAgents.find((agent) => agent.agentKey === selectedAgent);
   const selectedAgentRecentChats = selectedAgentSummary?.recentChats ?? [];
   const selectedAgentWonders = useMemo(
@@ -159,10 +161,10 @@ export function App() {
   }, [token]);
 
   useEffect(() => {
-    if (!selectedAgentKey && allAgents[0]?.agentKey) {
-      setSelectedAgentKey(allAgents[0].agentKey);
+    if (selectedAgentKey !== selectedAgent) {
+      setSelectedAgentKey(selectedAgent);
     }
-  }, [allAgents, selectedAgentKey]);
+  }, [selectedAgent, selectedAgentKey]);
 
   function selectAgentKey(agentKey: string) {
     setSelectedAgentKey(agentKey);
@@ -255,15 +257,20 @@ export function App() {
         request('d', 'agent.list', {}, { silent: true, timeoutMs: 3_500 }),
         request('ap', '/api/agents?includeChats=20&scope=nav', {}, { silent: false, timeoutMs: 16_000 })
       ]);
+      let desktopCount = 0;
+      let platformCount = 0;
       if (desktop.status === 'fulfilled') {
-        setDesktopAgents(normalizeAgents(desktop.value, 'desktop'));
+        const agents = normalizeAgents(desktop.value, 'desktop');
+        desktopCount = agents.length;
+        setDesktopAgents(agents);
       } else {
+        setDesktopAgents([]);
         addLog('system', 'Desktop agent.list skipped', desktop.reason instanceof Error ? desktop.reason.message : String(desktop.reason));
       }
-      let platformResolved = false;
       if (platformNav.status === 'fulfilled') {
-        setPlatformAgents(normalizeAgents(platformNav.value, 'agent-platform'));
-        platformResolved = true;
+        const agents = normalizeAgents(platformNav.value, 'agent-platform');
+        platformCount = agents.length;
+        setPlatformAgents(agents);
       } else {
         addLog('system', 'Agent platform nav list failed', platformNav.reason instanceof Error ? platformNav.reason.message : String(platformNav.reason));
         const platformFallback = await request('ap', '/api/agents', {}, { silent: false, timeoutMs: 16_000 }).then(
@@ -271,27 +278,25 @@ export function App() {
           (reason) => ({ status: 'rejected' as const, reason })
         );
         if (platformFallback.status === 'fulfilled') {
-          setPlatformAgents(normalizeAgents(platformFallback.value, 'agent-platform'));
-          platformResolved = true;
+          const agents = normalizeAgents(platformFallback.value, 'agent-platform');
+          platformCount = agents.length;
+          setPlatformAgents(agents);
         } else {
+          setPlatformAgents([]);
           addLog('system', 'Agent platform list failed', platformFallback.reason instanceof Error ? platformFallback.reason.message : String(platformFallback.reason));
         }
       }
-      if (desktop.status === 'rejected' && !platformResolved) {
-        setPlatformAgents((current) => current.length ? current : [createFallbackAgent()]);
-        if (!options.quiet) {
-          setFeedback({ tone: 'info', message: '暂时使用默认智能体 zenmi' });
-        }
-        return;
-      }
       if (!options.quiet) {
-        setFeedback({ tone: 'success', message: '智能体已刷新' });
+        setFeedback(desktopCount + platformCount > 0
+          ? { tone: 'success', message: '智能体已刷新' }
+          : { tone: 'info', message: '暂无可用智能体' });
       }
     } catch (error) {
-      setPlatformAgents((current) => current.length ? current : [createFallbackAgent()]);
+      setDesktopAgents([]);
+      setPlatformAgents([]);
       addLog('system', 'Agent refresh failed', error instanceof Error ? error.message : String(error));
       if (!options.quiet) {
-        setFeedback({ tone: 'info', message: '暂时使用默认智能体 zenmi' });
+        setFeedback({ tone: 'info', message: '暂无可用智能体' });
       }
     } finally {
       if (!options.quiet) {
@@ -454,6 +459,10 @@ export function App() {
       setFeedback({ tone: 'error', message: '请输入消息' });
       return;
     }
+    if (!selectedAgent) {
+      setFeedback({ tone: 'error', message: '暂无可用智能体' });
+      return;
+    }
     setActiveView('copilot');
     setBusyAction('agent-query');
     addMessage({ role: 'user', content: message, agentKey: selectedAgent, status: 'done' });
@@ -535,6 +544,12 @@ export function App() {
   }
 
   async function refreshChatHistory(force = false) {
+    if (!selectedAgent) {
+      setHistoryStatus('idle');
+      setHistoryError('');
+      setChatHistory([]);
+      return;
+    }
     const cached = selectedAgentRecentChats;
     if (cached.length > 0) {
       setChatHistory(cached);
@@ -572,6 +587,10 @@ export function App() {
   }
 
   function openHistory() {
+    if (!selectedAgent) {
+      setFeedback({ tone: 'error', message: '暂无可用智能体' });
+      return;
+    }
     setHistoryOpen(true);
     void refreshChatHistory(false);
   }
@@ -698,7 +717,7 @@ export function App() {
           chats={chatHistory}
           historyError={historyError}
           historyStatus={historyStatus}
-          selectedAgentLabel={selectedAgentSummary?.displayName || selectedAgent}
+          selectedAgentLabel={selectedAgentSummary?.displayName || '暂无可用智能体'}
           onClose={() => setHistoryOpen(false)}
           onLoadChat={loadHistoryChat}
           onRefresh={() => void refreshChatHistory(true)}
@@ -792,7 +811,7 @@ function SidePanel({
           </button>
         </div>
         <div className="agent-list">
-          {agents.length === 0 ? <div className="empty-panel"><Bot size={18} /> No agents loaded</div> : null}
+          {agents.length === 0 ? <div className="empty-panel"><Bot size={18} /> 暂无可用智能体</div> : null}
           {agents.map((agent) => (
             <button
               className={`agent-row ${selectedAgent === agent.agentKey ? 'selected' : ''}`}
@@ -888,8 +907,8 @@ function CopilotPanel({
       <div className="copilot-header">
         <div className="copilot-tools">
           <span className="agent-inline-label"><Bot size={15} />{selectedAgentSummary?.role || 'Agent'}</span>
-          <select value={selectedAgent} onChange={(event) => setSelectedAgentKey(event.target.value)} aria-label="选择智能体">
-            {agents.length === 0 ? <option value="zenmi">zenmi</option> : null}
+          <select value={selectedAgent} onChange={(event) => setSelectedAgentKey(event.target.value)} aria-label="选择智能体" disabled={agents.length === 0}>
+            {agents.length === 0 ? <option value="">暂无可用智能体</option> : null}
             {agents.map((agent) => (
               <option key={`${agent.source || 'default'}:${agent.agentKey}`} value={agent.agentKey}>
                 {agent.displayName}
@@ -899,10 +918,10 @@ function CopilotPanel({
           <button className="icon-button" type="button" onClick={onRefreshAgents} disabled={!isConnected || busyAction === 'refresh-agents'} aria-label="刷新智能体">
             <RefreshCcw size={17} className={busyAction === 'refresh-agents' ? 'spin' : ''} />
           </button>
-          <button className="icon-button" type="button" onClick={onNewConversation} aria-label="新建对话">
+          <button className="icon-button" type="button" onClick={onNewConversation} disabled={agents.length === 0} aria-label="新建对话">
             <MessageSquarePlus size={17} />
           </button>
-          <button className="icon-button" type="button" onClick={onHistoryOpen} disabled={!isConnected} aria-label="历史对话">
+          <button className="icon-button" type="button" onClick={onHistoryOpen} disabled={!isConnected || agents.length === 0} aria-label="历史对话">
             <History size={17} />
           </button>
         </div>
@@ -930,7 +949,7 @@ function CopilotPanel({
                 ))}
               </div>
             ) : (
-              <p className="empty-chat-hint">向 {selectedAgentSummary?.displayName || selectedAgent} 发送第一条消息。</p>
+              <p className="empty-chat-hint">{selectedAgent ? `向 ${selectedAgentSummary?.displayName || selectedAgent} 发送第一条消息。` : '暂无可用智能体'}</p>
             )}
           </div>
         ) : null}
@@ -964,9 +983,10 @@ function CopilotPanel({
             value={agentQuery}
             onChange={(event) => setAgentQuery(event.target.value)}
             onKeyDown={onKeyDown}
-            placeholder={isConnected ? '向智能体发送消息' : '等待 Desktop 连接'}
+            placeholder={!isConnected ? '等待 Desktop 连接' : selectedAgent ? '向智能体发送消息' : '暂无可用智能体'}
+            disabled={!selectedAgent}
           />
-          <button className="primary composer-send" type="submit" disabled={!isConnected || busyAction === 'agent-query'} aria-label="发送">
+          <button className="primary composer-send" type="submit" disabled={!isConnected || !selectedAgent || busyAction === 'agent-query'} aria-label="发送">
             {busyAction === 'agent-query' ? <Loader2 className="spin" size={16} /> : <Send size={16} />}
           </button>
         </div>
@@ -1585,19 +1605,10 @@ function summarizeBoard(issues: TaskBoardIssue[]): BoardSummary {
 
 function mergeAgents(desktop: AgentSummary[], platform: AgentSummary[]) {
   const byKey = new Map<string, AgentSummary>();
-  for (const agent of [createFallbackAgent(), ...desktop, ...platform]) {
+  for (const agent of [...desktop, ...platform]) {
     byKey.set(agent.agentKey, { ...byKey.get(agent.agentKey), ...agent });
   }
   return [...byKey.values()].sort((left, right) => left.displayName.localeCompare(right.displayName));
-}
-
-function createFallbackAgent(): AgentSummary {
-  return {
-    agentKey: 'zenmi',
-    displayName: 'zenmi',
-    role: 'Desktop Copilot',
-    source: 'agent-platform'
-  };
 }
 
 function frameTitle(frame: DesktopFrame) {

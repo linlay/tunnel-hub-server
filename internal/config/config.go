@@ -1,12 +1,18 @@
 package config
 
 import (
+	"fmt"
+	"net"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 )
 
 type RelayConfig struct {
+	BrandID                  string
+	ProductName              string
+	PublicSiteTitle          string
 	Addr                     string
 	DatabasePath             string
 	RelayPublicURL           string
@@ -40,35 +46,83 @@ type AgentConfig struct {
 	ReconnectInterval  time.Duration
 }
 
-func LoadRelayConfig() RelayConfig {
+func LoadRelayConfigStrict() (RelayConfig, error) {
 	loadDotEnv()
-
+	brandPath, err := requiredEnv("BRAND_CONFIG_FILE")
+	if err != nil {
+		return RelayConfig{}, err
+	}
+	brand, err := LoadBrandConfig(brandPath)
+	if err != nil {
+		return RelayConfig{}, err
+	}
+	addr, err := requiredEnv("RELAY_ADDR")
+	if err != nil {
+		return RelayConfig{}, err
+	}
+	_, port, err := net.SplitHostPort(addr)
+	portNumber, portErr := strconv.Atoi(port)
+	if err != nil || portErr != nil || portNumber < 1 || portNumber > 65535 {
+		return RelayConfig{}, fmt.Errorf("RELAY_ADDR is invalid")
+	}
+	databasePath, err := requiredEnv("RELAY_DB_PATH")
+	if err != nil {
+		return RelayConfig{}, err
+	}
+	issuer, err := requiredEnv("SSO_JWT_ISSUER")
+	if err != nil {
+		return RelayConfig{}, err
+	}
+	audience, err := requiredEnv("SSO_JWT_AUDIENCE")
+	if err != nil {
+		return RelayConfig{}, err
+	}
+	userIDClaim, err := requiredEnv("SSO_JWT_USER_ID_CLAIM")
+	if err != nil {
+		return RelayConfig{}, err
+	}
+	publicKeyFile := strings.TrimSpace(os.Getenv("SSO_JWT_PUBLIC_KEY_FILE"))
+	publicKeyPEM := strings.TrimSpace(os.Getenv("SSO_JWT_PUBLIC_KEY_PEM"))
+	if publicKeyFile == "" && publicKeyPEM == "" {
+		return RelayConfig{}, fmt.Errorf("SSO_JWT_PUBLIC_KEY_FILE or SSO_JWT_PUBLIC_KEY_PEM is required")
+	}
 	return RelayConfig{
-		Addr:                     env("RELAY_ADDR", ":11961"),
-		DatabasePath:             env("RELAY_DB_PATH", "tunnel.db"),
-		RelayPublicURL:           env("RELAY_PUBLIC_URL", ""),
+		BrandID:                  brand.Brand.ID,
+		ProductName:              brand.Brand.ProductName,
+		PublicSiteTitle:          brand.Brand.PublicSiteTitle,
+		Addr:                     addr,
+		DatabasePath:             databasePath,
+		RelayPublicURL:           brand.Endpoints.RelayPublicURL,
 		AdminHost:                env("ADMIN_HOST", ""),
 		WebsiteDist:              env("WEBSITE_DIST", ""),
-		SharePublicBaseURL:       env("SHARE_PUBLIC_BASE_URL", ""),
-		PublicBaseDomain:         env("PUBLIC_BASE_DOMAIN", "tunnel-hub.zenmind.cc"),
-		DesktopPublicBaseDomain:  env("DESKTOP_PUBLIC_BASE_DOMAIN", "m.zenmind.cc"),
-		WebAppPublicBaseDomain:   env("WEBAPP_PUBLIC_BASE_DOMAIN", "wa.zenmind.cc"),
+		SharePublicBaseURL:       brand.Endpoints.SharePublicBaseURL,
+		PublicBaseDomain:         brand.Domains.PublicBase,
+		DesktopPublicBaseDomain:  brand.Domains.DesktopPublicBase,
+		WebAppPublicBaseDomain:   brand.Domains.WebAppPublicBase,
 		AdminUsername:            env("ADMIN_USERNAME", env("BOOTSTRAP_ADMIN_USERNAME", "admin")),
 		AdminPassword:            env("ADMIN_PASSWORD", os.Getenv("BOOTSTRAP_ADMIN_PASSWORD")),
 		AdminSessionTTL:          envDuration("ADMIN_SESSION_TTL", 24*time.Hour),
 		CookieSecure:             envBool("COOKIE_SECURE", false),
 		MobileWebAppCookieSecure: envBool("MOBILE_WEBAPP_COOKIE_SECURE", true),
-		SSOJWTIssuer:             env("SSO_JWT_ISSUER", ""),
-		SSOJWTPublicKeyFile:      env("SSO_JWT_PUBLIC_KEY_FILE", ""),
-		SSOJWTPublicKeyPEM:       env("SSO_JWT_PUBLIC_KEY_PEM", ""),
-		SSOJWTAudience:           env("SSO_JWT_AUDIENCE", "tunnel"),
-		SSOJWTUserIDClaim:        env("SSO_JWT_USER_ID_CLAIM", "sub"),
+		SSOJWTIssuer:             issuer,
+		SSOJWTPublicKeyFile:      publicKeyFile,
+		SSOJWTPublicKeyPEM:       publicKeyPEM,
+		SSOJWTAudience:           audience,
+		SSOJWTUserIDClaim:        userIDClaim,
 		SSOJWTAllowAnyAudience:   envBool("SSO_JWT_ALLOW_ANY_AUDIENCE", false),
 		SSOJWTAllowAnyAdminRole:  envBool("SSO_JWT_ALLOW_ANY_ADMIN_ROLE", false),
 		SSOJWTAllowMissingScope:  envBool("SSO_JWT_ALLOW_MISSING_TUNNEL_SCOPE", false),
 		MaxRequestBodyBytes:      envInt64("MAX_REQUEST_BODY_BYTES", 64<<20),
 		TrustedProxyCIDRs:        env("TRUSTED_PROXY_CIDRS", ""),
+	}, nil
+}
+
+func requiredEnv(key string) (string, error) {
+	value := strings.TrimSpace(os.Getenv(key))
+	if value == "" {
+		return "", fmt.Errorf("%s is required", key)
 	}
+	return value, nil
 }
 
 func LoadAgentConfig() AgentConfig {
