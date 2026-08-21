@@ -252,7 +252,7 @@ curl -X POST https://hub.example.test/api/desktop/devices/register \
 
 创建、读取和撤销对话分享：
 
-Relay 把 Agent Platform 已渲染的完整 HTML 当作不透明字节保存，不解析 DOM、标题、消息或事件。正文最大 20 MiB，必须是非空 UTF-8。创建请求必须同时提供 `X-Conversation-Document-Version: 1`、非空 `X-Conversation-ID` 和 `X-Conversation-Share-Expiration`；时效只接受 `5m`、`30m`、`1h`、`3h`、`1d`、`5d`、`15d`、`30d`、`permanent`。任一 Header 缺失或非法都会在读取正文前返回 400。生产链路由 Desktop 经 Platform 调用，下面命令只用于服务端联调。
+Relay 把 Agent Platform 已渲染、由 Desktop main 原样转发的完整 HTML 当作不透明字节保存，不解析 DOM、标题、消息或事件。正文最大 20 MiB，必须是非空 UTF-8。创建请求必须同时提供 `X-Conversation-Document-Version: 1`、非空 `X-Conversation-ID` 和 `X-Conversation-Share-Expiration`；时效只接受 `5m`、`30m`、`1h`、`3h`、`1d`、`5d`、`15d`、`30d`、`permanent`。任一 Header 缺失或非法都会在读取正文前返回 400。生产调用方是 Desktop main：创建前向 Platform 请求 HTML，创建、列表和撤销直接调用本 API；Platform 不接收 Tunnel token，也不感知分享生命周期。下面命令只用于服务端联调。
 
 ```bash
 curl -X POST https://hub.example.test/api/desktop/shares \
