@@ -31,10 +31,10 @@ type fakeUploadResult struct {
 }
 
 func TestRelayUploadRejectsMainHost(t *testing.T) {
-	relay := NewRelay(nil, NewManager(), nil, 64<<20)
+	relay := NewRelay(nil, NewManager(), nil, "example", "m.example.test", "wa.example.test", 64<<20)
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/api/upload", nil)
-	req.Host = "tunnel-hub.zenmind.cc"
+	req.Host = "hub.example.test"
 	relay.HandleUpload(rec, req)
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
@@ -44,12 +44,11 @@ func TestRelayUploadRejectsMainHost(t *testing.T) {
 func TestRelayUploadForwardsToDesktopAndServesPull(t *testing.T) {
 	db := openProxyTestDB(t)
 	manager := NewManager()
-	relay := NewRelay(db, manager, nil, 64<<20)
-	relay.SetPublicBaseDomains("m.zenmind.cc", "wa.zenmind.cc")
+	relay := NewRelay(db, manager, nil, "example", "m.example.test", "wa.example.test", 64<<20)
 	server := newUploadRelayTestServer(t, relay)
 	defer server.Close()
 
-	registration := registerUploadDesktop(t, db, "desk.m.zenmind.cc")
+	registration := registerUploadDesktop(t, db, "desk.m.example.test")
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	resultCh := make(chan fakeUploadResult, 1)
@@ -120,11 +119,10 @@ func TestRelayUploadForwardsToDesktopAndServesPull(t *testing.T) {
 func TestRelayUploadRequiresFieldsAndDesktopOnline(t *testing.T) {
 	db := openProxyTestDB(t)
 	manager := NewManager()
-	relay := NewRelay(db, manager, nil, 64<<20)
-	relay.SetPublicBaseDomains("m.zenmind.cc", "wa.zenmind.cc")
+	relay := NewRelay(db, manager, nil, "example", "m.example.test", "wa.example.test", 64<<20)
 	server := newUploadRelayTestServer(t, relay)
 	defer server.Close()
-	registration := registerUploadDesktop(t, db, "desk.m.zenmind.cc")
+	registration := registerUploadDesktop(t, db, "desk.m.example.test")
 
 	tests := []struct {
 		name       string
@@ -193,7 +191,7 @@ func TestRelayUploadRequiresFieldsAndDesktopOnline(t *testing.T) {
 }
 
 func TestRelayPullRejectsInvalidAndExpiredTickets(t *testing.T) {
-	relay := NewRelay(nil, NewManager(), nil, 64<<20)
+	relay := NewRelay(nil, NewManager(), nil, "example", "m.example.test", "wa.example.test", 64<<20)
 	path := writePullFixture(t, "pull body")
 	relay.uploads.add(&pendingUpload{
 		ID:        "upload_ok",
@@ -237,12 +235,11 @@ func TestRelayPullRejectsInvalidAndExpiredTickets(t *testing.T) {
 func TestRelayUploadCleansPendingFileAfterDesktopError(t *testing.T) {
 	db := openProxyTestDB(t)
 	manager := NewManager()
-	relay := NewRelay(db, manager, nil, 64<<20)
-	relay.SetPublicBaseDomains("m.zenmind.cc", "wa.zenmind.cc")
+	relay := NewRelay(db, manager, nil, "example", "m.example.test", "wa.example.test", 64<<20)
 	server := newUploadRelayTestServer(t, relay)
 	defer server.Close()
 
-	registration := registerUploadDesktop(t, db, "desk.m.zenmind.cc")
+	registration := registerUploadDesktop(t, db, "desk.m.example.test")
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go runFakeUploadDesktop(t, ctx, server.URL, registration.AgentToken, nil, func(stream *yamux.Stream, frame desktopBusinessRequest) {

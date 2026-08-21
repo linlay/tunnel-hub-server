@@ -29,12 +29,11 @@ type fakeResourceResult struct {
 func TestRelayResourceRequestsDesktopAndReturnsPushedFile(t *testing.T) {
 	db := openProxyTestDB(t)
 	manager := NewManager()
-	relay := NewRelay(db, manager, nil, 64<<20)
-	relay.SetPublicBaseDomains("m.zenmind.cc", "wa.zenmind.cc")
+	relay := NewRelay(db, manager, nil, "example", "m.example.test", "wa.example.test", 64<<20)
 	server := newResourceRelayTestServer(t, relay)
 	defer server.Close()
 
-	registration := registerUploadDesktop(t, db, "desk.m.zenmind.cc")
+	registration := registerUploadDesktop(t, db, "desk.m.example.test")
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	resultCh := make(chan fakeResourceResult, 1)
@@ -100,9 +99,8 @@ func TestRelayResourceRequestsDesktopAndReturnsPushedFile(t *testing.T) {
 func TestRelayResourceEnforcesDesktopHostAuthAndSafeFile(t *testing.T) {
 	db := openProxyTestDB(t)
 	manager := NewManager()
-	relay := NewRelay(db, manager, nil, 64<<20)
-	relay.SetPublicBaseDomains("m.zenmind.cc", "wa.zenmind.cc")
-	registration := registerUploadDesktop(t, db, "desk.m.zenmind.cc")
+	relay := NewRelay(db, manager, nil, "example", "m.example.test", "wa.example.test", 64<<20)
+	registration := registerUploadDesktop(t, db, "desk.m.example.test")
 
 	tests := []struct {
 		name   string
@@ -111,7 +109,7 @@ func TestRelayResourceEnforcesDesktopHostAuthAndSafeFile(t *testing.T) {
 		target string
 		status int
 	}{
-		{name: "main host", host: "tunnel-hub.zenmind.cc", auth: "desktop-token", target: "/api/resource?file=chat%2Fa.txt", status: http.StatusNotFound},
+		{name: "main host", host: "hub.example.test", auth: "desktop-token", target: "/api/resource?file=chat%2Fa.txt", status: http.StatusNotFound},
 		{name: "missing token", host: registration.Device.PublicHost, target: "/api/resource?file=chat%2Fa.txt", status: http.StatusUnauthorized},
 		{name: "missing file", host: registration.Device.PublicHost, auth: "desktop-token", target: "/api/resource", status: http.StatusBadRequest},
 		{name: "absolute file", host: registration.Device.PublicHost, auth: "desktop-token", target: "/api/resource?file=%2Ftmp%2Fa.txt", status: http.StatusBadRequest},
@@ -138,10 +136,10 @@ func TestRelayResourceEnforcesDesktopHostAuthAndSafeFile(t *testing.T) {
 func TestRelayResourcePropagatesDesktopTokenRejection(t *testing.T) {
 	db := openProxyTestDB(t)
 	manager := NewManager()
-	relay := NewRelay(db, manager, nil, 64<<20)
+	relay := NewRelay(db, manager, nil, "example", "m.example.test", "wa.example.test", 64<<20)
 	server := newResourceRelayTestServer(t, relay)
 	defer server.Close()
-	registration := registerUploadDesktop(t, db, "desk.m.zenmind.cc")
+	registration := registerUploadDesktop(t, db, "desk.m.example.test")
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go runFakeResourceDesktop(t, ctx, server.URL, registration.AgentToken, nil, nil, "", true, nil)
@@ -162,7 +160,7 @@ func TestRelayResourcePropagatesDesktopTokenRejection(t *testing.T) {
 }
 
 func TestRelayPushValidatesTicketExpiryAndSizeWithoutFileNameHeader(t *testing.T) {
-	relay := NewRelay(nil, NewManager(), nil, 4)
+	relay := NewRelay(nil, NewManager(), nil, "example", "m.example.test", "wa.example.test", 4)
 	relay.resources.add(&pendingResource{
 		ID: "resource_ok", Ticket: "ticket_ok", FileName: "note.txt",
 		ExpiresAt: time.Now().Add(time.Minute), Ready: make(chan struct{}),
@@ -212,10 +210,10 @@ func TestWaitResourceReadyReturnsContextError(t *testing.T) {
 func TestRelayResourceCleansPendingStateAfterDesktopError(t *testing.T) {
 	db := openProxyTestDB(t)
 	manager := NewManager()
-	relay := NewRelay(db, manager, nil, 64<<20)
+	relay := NewRelay(db, manager, nil, "example", "m.example.test", "wa.example.test", 64<<20)
 	server := newResourceRelayTestServer(t, relay)
 	defer server.Close()
-	registration := registerUploadDesktop(t, db, "desk.m.zenmind.cc")
+	registration := registerUploadDesktop(t, db, "desk.m.example.test")
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go runFakeResourceDesktop(t, ctx, server.URL, registration.AgentToken, nil, nil, "", false, func(stream *yamux.Stream, frame desktopResourceBusinessRequest) {

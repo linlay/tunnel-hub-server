@@ -2,7 +2,8 @@
 .DS_Store
 .env
 .env.local
-.local
+.local/*
+!.local/brand.yaml
 data/*
 !data/.gitkeep
 configs/*.pem

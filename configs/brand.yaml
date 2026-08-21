@@ -1,0 +1,15 @@
+schemaVersion: 1
+
+brand:
+  id: ""
+  productName: ""
+  publicSiteTitle: ""
+
+domains:
+  publicBase: ""
+  desktopPublicBase: ""
+  webAppPublicBase: ""
+
+endpoints:
+  relayPublicUrl: ""
+  sharePublicBaseUrl: ""

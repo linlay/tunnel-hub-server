@@ -15,13 +15,17 @@ import (
 	"github.com/linlay/zenmind-tunnel-server/internal/config"
 	desktopapi "github.com/linlay/zenmind-tunnel-server/internal/desktop"
 	"github.com/linlay/zenmind-tunnel-server/internal/proxy"
+	"github.com/linlay/zenmind-tunnel-server/internal/shareassets"
 	"github.com/linlay/zenmind-tunnel-server/internal/store"
 	"github.com/linlay/zenmind-tunnel-server/internal/tunnel"
 )
 
 func main() {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
-	cfg := config.LoadRelayConfig()
+	cfg, err := config.LoadRelayConfigStrict()
+	if err != nil {
+		log.Fatalf("load config: %v", err)
+	}
 
 	db, err := store.Open(cfg.DatabasePath)
 	if err != nil {
@@ -43,8 +47,7 @@ func main() {
 		logger.Info("no local admin users configured; set ADMIN_USERNAME and ADMIN_PASSWORD to enable direct admin login")
 	}
 	manager := proxy.NewManager()
-	relay := proxy.NewRelay(db, manager, logger, cfg.MaxRequestBodyBytes)
-	relay.SetPublicBaseDomains(cfg.DesktopPublicBaseDomain, cfg.WebAppPublicBaseDomain)
+	relay := proxy.NewRelay(db, manager, logger, cfg.BrandID, cfg.DesktopPublicBaseDomain, cfg.WebAppPublicBaseDomain, cfg.MaxRequestBodyBytes)
 	relay.SetMobileWebAppCookieSecure(cfg.MobileWebAppCookieSecure)
 	relay.SetTrustedProxyCIDRs(cfg.TrustedProxyCIDRs)
 	adminServer, err := admin.NewServer(db, manager, cfg, logger)
@@ -55,6 +58,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("configure desktop server: %v", err)
 	}
+	conversationAssetHandler := shareassets.NewHandler()
 	static := staticHandler(cfg.WebsiteDist)
 
 	root := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -73,7 +77,9 @@ func main() {
 			http.NotFound(w, r)
 		case r.URL.Path == "/api/components":
 			adminServer.ServeComponents(w, r)
-		case strings.HasPrefix(r.URL.Path, "/api/desktop") || strings.HasPrefix(r.URL.Path, "/api/public/shares/"):
+		case strings.HasPrefix(r.URL.Path, shareassets.PublicPathPrefix):
+			conversationAssetHandler.ServeHTTP(w, r)
+		case strings.HasPrefix(r.URL.Path, "/api/desktop") || strings.HasPrefix(r.URL.Path, "/share/"):
 			desktopServer.ServeHTTP(w, r)
 		case strings.HasPrefix(r.URL.Path, "/api/admin"):
 			adminServer.ServeHTTP(w, r)

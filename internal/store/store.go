@@ -1641,14 +1641,22 @@ CREATE TABLE IF NOT EXISTS events (
 CREATE TABLE IF NOT EXISTS conversation_shares (
 	id TEXT PRIMARY KEY,
 	owner_user_id TEXT NOT NULL,
-	title TEXT NOT NULL,
-	snapshot_json BLOB NOT NULL,
+	conversation_id TEXT NOT NULL,
+	document_version INTEGER NOT NULL,
+	html_document BLOB NOT NULL,
 	created_at TIMESTAMP NOT NULL,
+	expires_at TIMESTAMP,
 	revoked_at TIMESTAMP
 );
 
-CREATE INDEX IF NOT EXISTS idx_conversation_shares_owner_created
-	ON conversation_shares(owner_user_id, created_at DESC);
+CREATE TABLE IF NOT EXISTS conversation_share_access (
+	share_id TEXT PRIMARY KEY,
+	last_accessed_at TIMESTAMP NOT NULL,
+	FOREIGN KEY (share_id) REFERENCES conversation_shares(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_conversation_shares_owner_conversation_created
+	ON conversation_shares(owner_user_id, conversation_id, created_at DESC);
 
 CREATE TABLE IF NOT EXISTS traffic_events (
 	id INTEGER PRIMARY KEY AUTOINCREMENT,

@@ -52,14 +52,14 @@ class FakeWebSocket {
 
 describe('desktopWsClient', () => {
   it('consumes URL tokens and returns a clean URL', () => {
-    const result = consumeTokenFromURL('https://zm123.m.zenmind.cc/?token=secret&view=board');
+    const result = consumeTokenFromURL('https://device.m.example.test/?token=secret&view=board');
     expect(result.token).toBe('secret');
-    expect(result.cleanURL).toBe('https://zm123.m.zenmind.cc/?view=board');
+    expect(result.cleanURL).toBe('https://device.m.example.test/?view=board');
   });
 
   it('builds same-host desktop ws URLs', () => {
-    expect(desktopWsUrlFromLocation({ protocol: 'https:', host: 'zm123.m.zenmind.cc' } as Location, 'secret')).toBe(
-      'wss://zm123.m.zenmind.cc/ws?token=secret'
+    expect(desktopWsUrlFromLocation({ protocol: 'https:', host: 'device.m.example.test' } as Location, 'secret')).toBe(
+      'wss://device.m.example.test/ws?token=secret'
     );
     expect(desktopWsUrlFromLocation({ protocol: 'http:', host: '127.0.0.1:11965' } as Location)).toBe(
       'ws://127.0.0.1:11965/ws'
@@ -75,7 +75,7 @@ describe('desktopWsClient', () => {
     vi.useFakeTimers();
     FakeWebSocket.instances = [];
     const session = new DesktopWsSession({
-      url: 'wss://zm123.m.zenmind.cc/ws',
+      url: 'wss://device.m.example.test/ws',
       token: 'secret',
       WebSocketCtor: FakeWebSocket,
       requestTimeoutMs: 1000
@@ -85,7 +85,7 @@ describe('desktopWsClient', () => {
 
     const opened = session.connect();
     const socket = FakeWebSocket.instances[0];
-    expect(String(socket.url)).toBe('wss://zm123.m.zenmind.cc/ws?token=secret');
+    expect(String(socket.url)).toBe('wss://device.m.example.test/ws?token=secret');
     socket.open();
     await opened;
 
@@ -103,7 +103,7 @@ describe('desktopWsClient', () => {
     vi.useFakeTimers();
     FakeWebSocket.instances = [];
     const session = new DesktopWsSession({
-      url: 'wss://zm123.m.zenmind.cc/ws',
+      url: 'wss://device.m.example.test/ws',
       token: 'secret',
       WebSocketCtor: FakeWebSocket,
       requestTimeoutMs: 1000
@@ -143,7 +143,7 @@ describe('desktopWsClient', () => {
     vi.useFakeTimers();
     FakeWebSocket.instances = [];
     const session = new DesktopWsSession({
-      url: 'wss://zm123.m.zenmind.cc/ws',
+      url: 'wss://device.m.example.test/ws',
       token: 'secret',
       WebSocketCtor: FakeWebSocket,
       requestTimeoutMs: 1000
@@ -174,7 +174,7 @@ describe('desktopWsClient', () => {
     vi.useFakeTimers();
     FakeWebSocket.instances = [];
     const session = new DesktopWsSession({
-      url: 'wss://zm123.m.zenmind.cc/ws',
+      url: 'wss://device.m.example.test/ws',
       token: '',
       WebSocketCtor: FakeWebSocket,
       requestTimeoutMs: 10
@@ -192,7 +192,7 @@ describe('desktopWsClient', () => {
     vi.useFakeTimers();
     FakeWebSocket.instances = [];
     const session = new DesktopWsSession({
-      url: 'wss://zm123.m.zenmind.cc/ws',
+      url: 'wss://device.m.example.test/ws',
       token: '',
       WebSocketCtor: FakeWebSocket,
       connectTimeoutMs: 10
@@ -215,8 +215,8 @@ describe('desktopWsClient', () => {
       issues: [{ id: 'ISS-1', title: 'Ship', status: 'in_progress', priority: 'high' }]
     });
 
-    expect(normalizeAgents({ agents: [{ key: 'zenmi', name: '小宅', stats: { unreadCount: 2 } }] }, 'agent-platform')).toEqual([
-      expect.objectContaining({ agentKey: 'zenmi', displayName: '小宅', unreadCount: 2, source: 'agent-platform' })
+    expect(normalizeAgents({ agents: [{ key: 'agent-alpha', name: '小宅', stats: { unreadCount: 2 } }] }, 'agent-platform')).toEqual([
+      expect.objectContaining({ agentKey: 'agent-alpha', displayName: '小宅', unreadCount: 2, source: 'agent-platform' })
     ]);
   });
 

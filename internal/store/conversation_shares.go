@@ -8,62 +8,153 @@ import (
 	"errors"
 	"strings"
 	"time"
+	"unicode"
 )
 
+const ConversationDocumentVersion = 1
+const MaxConversationShareConversationIDBytes = 255
+
 type ConversationShare struct {
-	ID           string     `json:"id"`
-	OwnerUserID  string     `json:"-"`
-	Title        string     `json:"title"`
-	SnapshotJSON []byte     `json:"-"`
-	CreatedAt    time.Time  `json:"createdAt"`
-	RevokedAt    *time.Time `json:"revokedAt,omitempty"`
+	ID              string
+	OwnerUserID     string
+	ConversationID  string
+	DocumentVersion int
+	HTMLDocument    []byte
+	CreatedAt       time.Time
+	ExpiresAt       *time.Time
+	LastAccessedAt  *time.Time
 }
 
-func (db *DB) CreateConversationShare(ctx context.Context, ownerUserID, title string, snapshotJSON []byte) (ConversationShare, error) {
+func (db *DB) CreateConversationShare(
+	ctx context.Context,
+	ownerUserID string,
+	conversationID string,
+	documentVersion int,
+	htmlDocument []byte,
+	createdAt time.Time,
+	expiresAt *time.Time,
+) (ConversationShare, error) {
 	ownerUserID = strings.TrimSpace(ownerUserID)
-	title = strings.TrimSpace(title)
+	conversationID = strings.TrimSpace(conversationID)
+	createdAt = createdAt.UTC()
+	if expiresAt != nil {
+		normalized := expiresAt.UTC()
+		expiresAt = &normalized
+	}
 	if ownerUserID == "" {
 		return ConversationShare{}, errors.New("owner user id is required")
 	}
-	if title == "" {
-		return ConversationShare{}, errors.New("title is required")
+	if !ValidConversationShareConversationID(conversationID) {
+		return ConversationShare{}, errors.New("invalid conversation id")
 	}
-	if len(snapshotJSON) == 0 {
-		return ConversationShare{}, errors.New("snapshot is required")
+	if documentVersion != ConversationDocumentVersion {
+		return ConversationShare{}, errors.New("unsupported conversation document version")
+	}
+	if len(htmlDocument) == 0 {
+		return ConversationShare{}, errors.New("HTML document is required")
+	}
+	if expiresAt != nil && !expiresAt.After(createdAt) {
+		return ConversationShare{}, errors.New("expiration must be after creation")
 	}
 	id, err := newConversationShareID()
 	if err != nil {
 		return ConversationShare{}, err
 	}
 	share := ConversationShare{
-		ID:           id,
-		OwnerUserID:  ownerUserID,
-		Title:        title,
-		SnapshotJSON: append([]byte(nil), snapshotJSON...),
-		CreatedAt:    time.Now().UTC(),
+		ID:              id,
+		OwnerUserID:     ownerUserID,
+		ConversationID:  conversationID,
+		DocumentVersion: documentVersion,
+		HTMLDocument:    htmlDocument,
+		CreatedAt:       createdAt,
+		ExpiresAt:       expiresAt,
 	}
 	_, err = db.sql.ExecContext(ctx, `
-		INSERT INTO conversation_shares (id, owner_user_id, title, snapshot_json, created_at)
-		VALUES (?, ?, ?, ?, ?)
-	`, share.ID, share.OwnerUserID, share.Title, share.SnapshotJSON, share.CreatedAt)
+		INSERT INTO conversation_shares (
+			id, owner_user_id, conversation_id, document_version, html_document, created_at, expires_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?)
+	`, share.ID, share.OwnerUserID, share.ConversationID, share.DocumentVersion, share.HTMLDocument, share.CreatedAt, share.ExpiresAt)
 	return share, err
 }
 
-func (db *DB) GetPublicConversationShare(ctx context.Context, id string) (ConversationShare, error) {
-	row := db.sql.QueryRowContext(ctx, `
-		SELECT id, owner_user_id, title, snapshot_json, created_at, revoked_at
-		FROM conversation_shares
-		WHERE id = ? AND revoked_at IS NULL
-	`, strings.TrimSpace(id))
-	return scanConversationShare(row)
+func (db *DB) ListConversationShares(
+	ctx context.Context,
+	ownerUserID string,
+	conversationID string,
+	now time.Time,
+) ([]ConversationShare, error) {
+	ownerUserID = strings.TrimSpace(ownerUserID)
+	conversationID = strings.TrimSpace(conversationID)
+	if ownerUserID == "" {
+		return nil, errors.New("owner user id is required")
+	}
+	if !ValidConversationShareConversationID(conversationID) {
+		return nil, errors.New("invalid conversation id")
+	}
+	rows, err := db.sql.QueryContext(ctx, `
+		SELECT shares.id, shares.owner_user_id, shares.conversation_id,
+		       shares.document_version, shares.created_at, shares.expires_at,
+		       access.last_accessed_at
+		FROM conversation_shares AS shares
+		LEFT JOIN conversation_share_access AS access ON access.share_id = shares.id
+		WHERE shares.owner_user_id = ?
+		  AND shares.conversation_id = ?
+		  AND shares.document_version = ?
+		  AND shares.revoked_at IS NULL
+		  AND (shares.expires_at IS NULL OR shares.expires_at > ?)
+		ORDER BY shares.created_at DESC, shares.id DESC
+	`, ownerUserID, conversationID, ConversationDocumentVersion, now.UTC())
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	shares := make([]ConversationShare, 0)
+	for rows.Next() {
+		var share ConversationShare
+		if err := rows.Scan(
+			&share.ID,
+			&share.OwnerUserID,
+			&share.ConversationID,
+			&share.DocumentVersion,
+			&share.CreatedAt,
+			&share.ExpiresAt,
+			&share.LastAccessedAt,
+		); err != nil {
+			return nil, err
+		}
+		shares = append(shares, share)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return shares, nil
 }
 
-func (db *DB) RevokeConversationShare(ctx context.Context, id, ownerUserID string) error {
+func (db *DB) GetPublicConversationShare(ctx context.Context, id string, now time.Time) (ConversationShare, error) {
+	row := db.sql.QueryRowContext(ctx, `
+		SELECT id, document_version, html_document
+		FROM conversation_shares
+		WHERE id = ?
+		  AND document_version = ?
+		  AND revoked_at IS NULL
+		  AND (expires_at IS NULL OR expires_at > ?)
+	`, strings.TrimSpace(id), ConversationDocumentVersion, now.UTC())
+	var share ConversationShare
+	if err := row.Scan(&share.ID, &share.DocumentVersion, &share.HTMLDocument); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return ConversationShare{}, ErrNotFound
+		}
+		return ConversationShare{}, err
+	}
+	return share, nil
+}
+
+func (db *DB) RevokeConversationShare(ctx context.Context, id, ownerUserID string, revokedAt time.Time) error {
 	result, err := db.sql.ExecContext(ctx, `
 		UPDATE conversation_shares
 		SET revoked_at = ?
 		WHERE id = ? AND owner_user_id = ? AND revoked_at IS NULL
-	`, time.Now().UTC(), strings.TrimSpace(id), strings.TrimSpace(ownerUserID))
+	`, revokedAt.UTC(), strings.TrimSpace(id), strings.TrimSpace(ownerUserID))
 	if err != nil {
 		return err
 	}
@@ -77,19 +168,20 @@ func (db *DB) RevokeConversationShare(ctx context.Context, id, ownerUserID strin
 	return nil
 }
 
-func scanConversationShare(row rowScanner) (ConversationShare, error) {
-	var share ConversationShare
-	var revokedAt sql.NullTime
-	if err := row.Scan(&share.ID, &share.OwnerUserID, &share.Title, &share.SnapshotJSON, &share.CreatedAt, &revokedAt); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return ConversationShare{}, ErrNotFound
-		}
-		return ConversationShare{}, err
-	}
-	if revokedAt.Valid {
-		share.RevokedAt = &revokedAt.Time
-	}
-	return share, nil
+func (db *DB) RecordConversationShareAccess(ctx context.Context, id string, accessedAt time.Time) error {
+	_, err := db.sql.ExecContext(ctx, `
+		INSERT INTO conversation_share_access (share_id, last_accessed_at)
+		VALUES (?, ?)
+		ON CONFLICT(share_id) DO UPDATE SET last_accessed_at = excluded.last_accessed_at
+	`, strings.TrimSpace(id), accessedAt.UTC())
+	return err
+}
+
+func ValidConversationShareConversationID(value string) bool {
+	value = strings.TrimSpace(value)
+	return value != "" &&
+		len(value) <= MaxConversationShareConversationIDBytes &&
+		!strings.ContainsFunc(value, unicode.IsControl)
 }
 
 func newConversationShareID() (string, error) {

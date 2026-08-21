@@ -93,7 +93,7 @@ func TestRelayAgentWebSocketIntegration(t *testing.T) {
 func TestRelayRejectsInvalidTunnelToken(t *testing.T) {
 	db := openProxyTestDB(t)
 	manager := NewManager()
-	relay := NewRelay(db, manager, nil, 64<<20)
+	relay := NewRelay(db, manager, nil, "example", "m.example.test", "wa.example.test", 64<<20)
 	server := httptest.NewServer(http.HandlerFunc(relay.HandleTunnel))
 	defer server.Close()
 
@@ -108,7 +108,7 @@ func TestRelayRejectsInvalidTunnelToken(t *testing.T) {
 func TestRelayTunnelFirstFrameAuthStartsYamux(t *testing.T) {
 	db := openProxyTestDB(t)
 	manager := NewManager()
-	relay := NewRelay(db, manager, nil, 64<<20)
+	relay := NewRelay(db, manager, nil, "example", "m.example.test", "wa.example.test", 64<<20)
 	server := httptest.NewServer(http.HandlerFunc(relay.HandleTunnel))
 	defer server.Close()
 
@@ -143,7 +143,7 @@ func TestRelayTunnelFirstFrameAuthStartsYamux(t *testing.T) {
 func TestRelayTunnelTrustedProxyRemoteAddrPersistsToSessionAndManager(t *testing.T) {
 	db := openProxyTestDB(t)
 	manager := NewManager()
-	relay := NewRelay(db, manager, nil, 64<<20)
+	relay := NewRelay(db, manager, nil, "example", "m.example.test", "wa.example.test", 64<<20)
 	relay.SetTrustedProxyCIDRs("127.0.0.1/32")
 	server := httptest.NewServer(http.HandlerFunc(relay.HandleTunnel))
 	defer server.Close()
@@ -197,7 +197,7 @@ func TestRelayTunnelTrustedProxyRemoteAddrPersistsToSessionAndManager(t *testing
 func TestRelayTunnelFirstFrameInvalidTokenReturnsStandardError(t *testing.T) {
 	db := openProxyTestDB(t)
 	manager := NewManager()
-	relay := NewRelay(db, manager, nil, 64<<20)
+	relay := NewRelay(db, manager, nil, "example", "m.example.test", "wa.example.test", 64<<20)
 	server := httptest.NewServer(http.HandlerFunc(relay.HandleTunnel))
 	defer server.Close()
 
@@ -256,7 +256,7 @@ func TestRelayTunnelFirstFrameMalformedOrWrongFrameReturnsStandardError(t *testi
 		t.Run(tc.name, func(t *testing.T) {
 			db := openProxyTestDB(t)
 			manager := NewManager()
-			relay := NewRelay(db, manager, nil, 64<<20)
+			relay := NewRelay(db, manager, nil, "example", "m.example.test", "wa.example.test", 64<<20)
 			server := httptest.NewServer(http.HandlerFunc(relay.HandleTunnel))
 			defer server.Close()
 
@@ -280,7 +280,7 @@ func TestRelayTunnelFirstFrameMalformedOrWrongFrameReturnsStandardError(t *testi
 func TestRelayTunnelLegacyBearerCompatibilityStartsYamux(t *testing.T) {
 	db := openProxyTestDB(t)
 	manager := NewManager()
-	relay := NewRelay(db, manager, nil, 64<<20)
+	relay := NewRelay(db, manager, nil, "example", "m.example.test", "wa.example.test", 64<<20)
 	server := httptest.NewServer(http.HandlerFunc(relay.HandleTunnel))
 	defer server.Close()
 
@@ -312,7 +312,7 @@ func TestRelayRoutesToAssignedAgent(t *testing.T) {
 
 	db := openProxyTestDB(t)
 	manager := NewManager()
-	relay := NewRelay(db, manager, nil, 64<<20)
+	relay := NewRelay(db, manager, nil, "example", "m.example.test", "wa.example.test", 64<<20)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/tunnel" {
 			relay.HandleTunnel(w, r)
@@ -349,7 +349,7 @@ func TestRelayRoutesToAssignedAgent(t *testing.T) {
 func TestRelayDoesNotForwardUnassignedRoute(t *testing.T) {
 	db := openProxyTestDB(t)
 	manager := NewManager()
-	relay := NewRelay(db, manager, nil, 64<<20)
+	relay := NewRelay(db, manager, nil, "example", "m.example.test", "wa.example.test", 64<<20)
 	server := httptest.NewServer(http.HandlerFunc(relay.HandlePublic))
 	defer server.Close()
 
@@ -376,7 +376,7 @@ func startTunnelPair(t *testing.T, targetURL string) (*store.DB, *Manager, strin
 	db := openProxyTestDB(t)
 	manager := NewManager()
 	raw, token := createProxyToken(t, db, "test-agent")
-	relay := NewRelay(db, manager, nil, 64<<20)
+	relay := NewRelay(db, manager, nil, "example", "m.example.test", "wa.example.test", 64<<20)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/tunnel" {
 			relay.HandleTunnel(w, r)

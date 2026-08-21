@@ -1100,9 +1100,6 @@ type patchAdminUserPayload struct {
 
 func (s *Server) servicePublicHost(name string) string {
 	baseDomain := strings.TrimPrefix(tunnelHost(s.Config.PublicBaseDomain), ".")
-	if baseDomain == "" {
-		baseDomain = "tunnel-hub.zenmind.cc"
-	}
 	return name + "." + baseDomain
 }
 

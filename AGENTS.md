@@ -4,7 +4,7 @@
 
 ## 1. 项目概览
 
-`tunnel-hub-server` 是 Tunnel Hub 的 Go 后端，核心边界是 Relay、Agent/Zenmind Desktop 出站连接、管理 API、Desktop 注册 API、SQLite 持久化和公网 HTTP/WebSocket 转发。
+`tunnel-hub-server` 是 Tunnel Hub 的 Go 后端，核心边界是 Relay、Agent/Desktop 出站连接、管理 API、Desktop 注册 API、SQLite 持久化和公网 HTTP/WebSocket 转发。
 
 管理前端在 sibling 项目 `tunnel-hub-website`，Desktop 协议调试台在 sibling 项目 `tunnel-hub-tester`。Desktop public mini site 是本仓库内的独立子项目 `tunnel-hub-public/`，作为单独静态容器部署；不要把管理后台 React/Vite 前端重新放回本项目。
 
@@ -16,14 +16,14 @@
 - 复用连接: `github.com/hashicorp/yamux`，通过 `replace` 指向本地 `third_party/yamux`。
 - 存储: SQLite，驱动为 `modernc.org/sqlite`，不依赖 CGO。
 - 鉴权: 本地 admin session cookie + 官网 SSO JWT bearer token。
-- 配置: `.env` 自动加载 + 环境变量覆盖。
+- 配置: `configs/brand.yaml` 是唯一品牌来源；`.env` 只承载非品牌运行参数。
 - 部署: Docker multi-stage build，distroless runtime，Nginx/Caddy 负责公网 TLS 和路由。
 
 ## 3. 架构设计
 
 Relay 入口在 `cmd/relay/main.go`，启动顺序是：
 
-1. `internal/config` 加载 `.env` 和环境变量。
+1. `internal/config` 加载 `.env`、严格校验品牌 YAML，再读取非品牌环境变量。
 2. `internal/store` 打开 SQLite 并执行 schema/migration。
 3. 可选根据 `ADMIN_USERNAME`/`ADMIN_PASSWORD` bootstrap 本地管理员。
 4. 创建 `proxy.Manager` 管理在线 Agent/ Desktop tunnel session。
@@ -35,11 +35,11 @@ Relay 入口在 `cmd/relay/main.go`，启动顺序是：
 - `/api/desktop/*`: Desktop 注册 API。只接受官网 SSO JWT，要求 `scope` 包含 `tunnel`。
 - `/tunnel`: Agent 或 Desktop 主动连入的 WebSocket。旧 Agent 使用 `Authorization: Bearer <token>`；Desktop 推荐首帧发送 `ns=d` 的 `tunnel.open`。
 - 普通服务 Host: 通过 `routes.public_host` 找 active route，打开对应 token 的 yamux stream，转发 HTTP/WebSocket 到 Agent 本地服务。
-- `*.m.zenmind.cc`: Desktop public Host。WebSocket upgrade 请求进入 Relay，向 Desktop tunnel stream 发送 `ns=d` / `desktop.websocket.open` 元数据；普通 HTTP 由宿主机反向代理转发到 `tunnel-hub-public`。
-- `*.m.zenmind.cc/api/upload`: Mobile 上传入口，只从请求 Host 确定 Desktop，内部发送 `ns=ap`, `type=/api/upload`；multipart 不允许携带 `publicHost`。
-- `*.m.zenmind.cc/api/resource`: Mobile 资源入口，内部发送 `ns=ap`, `type=/api/resource` 和 `{file,pushURL}`；Desktop 通过 ticket 保护的 `/api/push/{id}` 回推文件。
-- `*.wa.zenmind.cc`: Desktop WebApp public HTTP/WebSocket。Relay 通过 route 和 token 打开 Desktop stream，向 Desktop 发送 `ns=wa` 的 `http.request` 或 `websocket.connect` 元数据。
-- `share.zenmind.cc`: 对话分享只读站点。`/share/{id}` 由 `agent-webclient` 轻量入口渲染，`/api/public/shares/{id}` 由 Relay 从 SQLite 读取未撤销快照。
+- `*.m.example.test`: Desktop public Host。WebSocket upgrade 请求进入 Relay，向 Desktop tunnel stream 发送 `ns=d` / `desktop.websocket.open` 元数据；普通 HTTP 由宿主机反向代理转发到 `tunnel-hub-public`。
+- `*.m.example.test/api/upload`: Mobile 上传入口，只从请求 Host 确定 Desktop，内部发送 `ns=ap`, `type=/api/upload`；multipart 不允许携带 `publicHost`。
+- `*.m.example.test/api/resource`: Mobile 资源入口，内部发送 `ns=ap`, `type=/api/resource` 和 `{file,pushURL}`；Desktop 通过 ticket 保护的 `/api/push/{id}` 回推文件。
+- `*.wa.example.test`: Desktop WebApp public HTTP/WebSocket。Relay 通过 route 和 token 打开 Desktop stream，向 Desktop 发送 `ns=wa` 的 `http.request` 或 `websocket.connect` 元数据。
+- `share.example.test`: 对话分享只读站点。公开边缘网关将 `/share/{id}` 和 `/assets/conversation-export/*` 转发到 Relay；Tunnel API origin 也必须暴露相同资产路径，供动态 origin 的本地和落盘导出使用。前者以一次 SQLite 主键查询读取有效 HTML 并原字节返回，后者从编译期 `embed.FS` 返回 WebClient 内容寻址资产。
 
 ## 4. 目录结构
 
@@ -48,8 +48,10 @@ Relay 入口在 `cmd/relay/main.go`，启动顺序是：
 - `internal/admin`: 管理 API、本地登录、SSO JWT 管理鉴权、overview/activity/metrics 聚合、公开 component 列表。
 - `internal/auth`: secret hash、admin password、SSO JWT 验证。
 - `internal/config`: Relay/Agent 环境变量配置和 `.env` 加载。
+- `configs`: Relay 与 Public 构建共用的品牌 YAML、可运行示例和跨实现测试 fixture。
 - `internal/desktop`: Desktop device 和 Desktop WebApp 注册 API。
 - `internal/proxy`: Relay/Agent 转发实现、yamux session、active agent manager、traffic event 记录。
+- `internal/shareassets`: 公开对话显示资产的只读 handler 与编译期文件；目录按 asset-set hash 追加，不覆盖或删除已发布集合。
 - `internal/store`: SQLite schema、migration、DAO 和领域模型。
 - `internal/tunnel`: 隧道协议结构、JSON frame、WebSocket frame、Host/path/upstream 工具。
 - `deploy`: Nginx/Caddy 示例配置。
@@ -68,7 +70,8 @@ Relay 入口在 `cmd/relay/main.go`，启动顺序是：
 - `agent_sessions`: Agent/Desktop tunnel 在线历史。
 - `events`: 管理操作和系统事件。
 - `traffic_events`: Desktop/WebApp/普通 route 的访问统计。
-- `conversation_shares`: 用户创建的版本化只读对话快照和撤销状态；公开 ID 必须不可预测，所有者身份来自官网 SSO JWT。
+- `conversation_shares`: 用户创建的版本化不透明 HTML、会话关联、到期时间和撤销状态；公开 ID 必须不可预测，生成时使用 `share_` 前缀，但接收端只按 URL-safe 不透明 ID 校验。所有者身份来自官网 SSO JWT；Relay 只校验传输契约并原字节保存/返回，不解析 HTML，也不保留旧事件流双协议。
+- `conversation_share_access`: 每条分享最近一次成功公开访问时间；热更新与 HTML BLOB 分表，不保存访问日志或次数。
 
 注意：`admin_api_keys` 仍在 schema 中，但当前主 API 路径没有完整使用它，不要把它当成已上线能力写入 README。
 
@@ -93,10 +96,11 @@ Relay 入口在 `cmd/relay/main.go`，启动顺序是：
 - `GET /api/components`
 - `POST /api/desktop/devices/register`
 - `PUT /api/desktop/devices/{deviceId}/webapps/{name}`
-- `POST /api/desktop/shares`, `DELETE /api/desktop/shares/{shareId}`
-- `GET /api/public/shares/{shareId}`
-- `POST https://<desktop>.m.zenmind.cc/api/upload`
-- `GET https://<desktop>.m.zenmind.cc/api/resource?file=<chat-relative-path>`
+- `POST /api/desktop/shares`, `GET /api/desktop/shares?conversationId=...`, `DELETE /api/desktop/shares/{shareId}`
+- `GET /share/{shareId}`
+- `GET/HEAD /assets/conversation-export/{assetSet}/{file}`
+- `POST https://<desktop>.m.example.test/api/upload`
+- `GET https://<desktop>.m.example.test/api/resource?file=<chat-relative-path>`
 
 隧道协议要点：
 
@@ -112,16 +116,18 @@ Relay 入口在 `cmd/relay/main.go`，启动顺序是：
 ## 7. 开发要点
 
 - 文档、配置和测试里的 API 路径必须以 `cmd/relay/main.go`、`internal/admin/server.go`、`internal/desktop/server.go` 为准。
-- 环境变量事实以 `internal/config/config.go` 和 `.env.example` 为准；不要在文档里写真实生产值。
-- `.env.example` 默认包含 SSO issuer 和 public key file；本地只跑 direct admin login 时，需要清空 SSO 相关变量或准备 `configs/jwt-public.pem`，否则 `admin.NewServer`/`desktop.NewServer` 会启动失败。
+- 品牌字段事实以 `configs/brand.yaml` 和 `internal/config/brand.go` 为准；环境变量事实以 `internal/config/config.go` 和 `.env.example` 为准。不要恢复旧品牌环境变量或写入真实生产值。
+- `.env.example` 的 SSO issuer 默认留空，并预留 public key file；需要调试 SSO 或 Desktop 注册时，必须同时配置 issuer 和有效 `configs/jwt-public.pem`。
 - Host 匹配必须统一经过 `internal/tunnel.NormalizeHost` 或等价逻辑，避免大小写、端口、尾点导致 route 绕过。
 - `proxy.Manager` 以 token 维护在线 Agent；同一 token 新连接会替换旧连接。新增功能时要考虑 token/session 的一对多和替换行为。
 - HTTP 请求体当前在 Relay 侧完整缓冲，限制由 `MAX_REQUEST_BODY_BYTES` 控制。涉及大文件、流式上传或 backpressure 的改动要重点测试。
-- Desktop public Host 不使用 `deviceId`，由随机 `zm...m.zenmind.cc` 生成；WebApp Host 由随机 `zwa...wa.zenmind.cc` 生成。
+- Desktop public Host 不使用 `deviceId`，由随机 label 加 `domains.desktopPublicBase` 生成；WebApp Host 由随机 label 加 `domains.webAppPublicBase` 生成。
 - Desktop/platform auth token 由 Desktop 侧校验，Relay 只负责把 query token 或 `bearer.<token>` subprotocol 透传给 Desktop。
-- 附件 API 的 Desktop 身份只来自 `<desktop>.m.zenmind.cc` Host；不得从 body、query 或其他客户端字段接受 `publicHost` 覆盖。
+- 附件 API 的 Desktop 身份只来自 `<desktop>.m.example.test` Host；不得从 body、query 或其他客户端字段接受 `publicHost` 覆盖。
 - 管理 token 手动创建当前禁用；Desktop 注册会创建/轮换 tunnel token。
+- 对话显示资产必须由 Agent WebClient 同一次构建同步，路径中的 64 位 hash 是不可变集合身份；handler 只接受白名单路径并返回长期 immutable、CORS/CORP 与 `nosniff` 响应头。永久分享存在时不得清理历史集合。
 - Go 改动提交前运行 `gofmt -w` 和相关 `go test`。
+- React/Vite 改动同时运行 `tunnel-hub-public` 的 `npm test`，并用非空品牌文件执行 `npm run build`；测试模式默认读取 `brand.example.yaml`。
 
 ## 8. 开发流程
 
@@ -164,7 +170,7 @@ npm run dev
 - 根目录当前是三个 sibling 项目，不是一个统一 git 根目录；不要假设可以在上级目录使用 git 历史或提交。
 - `.env`、SQLite 数据库、JWT key、真实 token、`configs/*.pem` 都不能提交。
 - 生产部署依赖反向代理正确转发 WebSocket upgrade；修改部署文档时要同时检查 wildcard Host 路由。
-- `*.m.zenmind.cc` 的 WebSocket upgrade 必须继续直达 Relay；普通 HTTP 在生产反向代理层应转到 `tunnel-hub-public`。如果普通 HTTP 到达 Relay，Relay 仍会返回 upgrade required。
-- `*.wa.zenmind.cc` 是 browser-facing WebApp 代理，不等同于 tester 中的 Desktop business namespace `ns=wa`。
+- `*.m.example.test` 的 WebSocket upgrade 必须继续直达 Relay；普通 HTTP 在生产反向代理层应转到 `tunnel-hub-public`。如果普通 HTTP 到达 Relay，Relay 仍会返回 upgrade required。
+- `*.wa.example.test` 是 browser-facing WebApp 代理，不等同于 tester 中的 Desktop business namespace `ns=wa`。
 - `third_party/yamux` 是本地替换依赖，改动需要说明原因并跑完整隧道测试。
 - 如果环境限制导致无法运行验证命令，最终说明里必须明确列出未运行项和原因。

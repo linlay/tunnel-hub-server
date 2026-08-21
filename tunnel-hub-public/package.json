@@ -15,7 +15,8 @@
     "typescript": "latest",
     "react": "latest",
     "react-dom": "latest",
-    "lucide-react": "latest"
+    "lucide-react": "latest",
+    "yaml": "^2.8.1"
   },
   "devDependencies": {
     "@testing-library/jest-dom": "latest",
