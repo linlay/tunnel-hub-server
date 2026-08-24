@@ -12,7 +12,7 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/linlay/zenmind-tunnel-server/internal/store"
+	"example.invalid/tunnel-hub-server/internal/store"
 )
 
 const maxConversationShareBytes int64 = 20 * 1024 * 1024

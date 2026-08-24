@@ -27,7 +27,7 @@ WebApp 有两条独立链路：
 
 ### 前置要求
 
-- Go 1.26
+- Go 1.25
 - Docker / Docker Compose
 - OpenSSL，可选，用于从官网 SSO 私钥导出 JWT 公钥
 - 一个可用的官网 SSO JWT 公钥，生产和 Desktop 注册 API 必需
@@ -37,13 +37,11 @@ WebApp 有两条独立链路：
 ```bash
 cd tunnel-hub-server
 cp .env.example .env
-mkdir -p .local
-cp configs/brand.example.yaml .local/brand.yaml
-go test ./...
-go run ./cmd/relay
+make test
+make run-relay
 ```
 
-复制 `.env.example` 后，把 `configs/brand.example.yaml` 复制到已忽略的 `.local/brand.yaml`，再显式填写 Relay 地址、数据库路径和 SSO 校验参数。仓库提交的 `brand.yaml` 故意保留完整空键，不能直接启动；`brand.example.yaml` 是可运行示例。
+复制 `.env.example` 后，在已忽略的 `.env` 中填写 `GO_MODULE_PATH`、运行时身份、域名、Relay 地址、数据库路径和 SSO 校验参数。仓库不提交任何环境的真实身份值。
 
 Relay 启动要求同时提供 SSO issuer、audience、用户 ID claim，以及文件或 PEM 形式的有效 JWT 公钥。缺少任何一项都会在监听端口前失败并指出字段。
 
@@ -62,7 +60,7 @@ Agent 需要使用已创建的 tunnel token。Desktop 新注册后返回的是�
 
 ```bash
 cd tunnel-hub-server
-AGENT_TOKEN=<token> AGENT_RELAY_URL=ws://127.0.0.1:11961/tunnel go run ./cmd/agent
+AGENT_TOKEN=<token> AGENT_RELAY_URL=ws://127.0.0.1:11961/tunnel make run-agent
 ```
 
 生产环境使用：
@@ -76,42 +74,44 @@ AGENT_RELAY_URL=wss://hub.example.test/tunnel
 ```bash
 cd tunnel-hub-server
 cp .env.example .env
-mkdir -p .local
-cp configs/brand.example.yaml .local/brand.yaml
 docker compose up --build
 ```
 
-`docker-compose.yml` 会把数据库写入命名卷，并分别只读挂载 `.local/brand.yaml` 与 `configs/jwt-public.pem`。启动前请确认两者均已准备好。
+`docker-compose.yml` 会把 `.env` 中的 `GO_MODULE_PATH` 作为构建参数传给 server，并把运行时配置注入 server/public；数据库写入命名卷，JWT 公钥以只读文件挂载。启动前请确认 `.env` 和 `configs/jwt-public.pem` 均已准备好。
 
 ## 3. 配置说明
 
 本项目会自动加载当前工作目录下的 `.env`。真实 shell 环境变量或容器环境变量优先级高于 `.env`。不要提交真实密钥、token、密码或生产 JWT key material。
 
-### 品牌配置
+### 运行时身份配置
 
-Relay 和 `tunnel-hub-public` 构建共同读取 `BRAND_CONFIG_FILE` 选择的 YAML，字段契约如下：
+Relay 和 `tunnel-hub-public` 都在进程或容器启动时读取环境变量，不在源码或镜像构建层中注入真实值：
 
-| YAML 字段 | 必填 | 说明 |
+| 名称 | 必填 | 说明 |
 | --- | --- | --- |
-| `schemaVersion` | 是 | 当前固定为 `1`。 |
-| `brand.id` | 是 | 稳定部署身份，只允许小写字母开头以及小写字母、数字、连字符。该值派生 mobile session Cookie，投产后不要随意修改。 |
-| `brand.productName` | 是 | 产品显示名。 |
-| `brand.publicSiteTitle` | 是 | Public 页面构建时注入的完整标题。 |
-| `domains.publicBase` | 是 | Tunnel API/管理入口 hostname。 |
-| `domains.desktopPublicBase` | 是 | Desktop public wildcard 根 hostname。 |
-| `domains.webAppPublicBase` | 是 | WebApp wildcard 根 hostname。 |
-| `endpoints.relayPublicUrl` | 是 | Relay WebSocket URL；非 Loopback 地址必须使用 `wss` 和 `/tunnel`。 |
-| `endpoints.sharePublicBaseUrl` | 是 | 公开分享 origin；非 Loopback 地址必须使用 HTTPS，本地 Loopback 可使用 HTTP。 |
+| `BRAND_ID` | 是 | 稳定部署身份，只允许小写字母开头以及小写字母、数字、连字符。该值派生 mobile session Cookie，投产后不要随意修改。 |
+| `PRODUCT_NAME` | 是 | 产品显示名。 |
+| `PUBLIC_SITE_TITLE` | 是 | Public 页面运行时标题；Nginx 容器缺少该值时拒绝启动。 |
+| `PUBLIC_BASE_DOMAIN` | 是 | Tunnel API/管理入口 hostname。 |
+| `DESKTOP_PUBLIC_BASE_DOMAIN` | 是 | Desktop public wildcard 根 hostname。 |
+| `WEBAPP_PUBLIC_BASE_DOMAIN` | 是 | WebApp wildcard 根 hostname。 |
+| `RELAY_PUBLIC_URL` | 是 | Relay WebSocket URL；非 Loopback 地址必须使用 `wss` 和 `/tunnel`。 |
+| `SHARE_PUBLIC_BASE_URL` | 是 | 公开分享 origin；非 Loopback 地址必须使用 HTTPS，本地 Loopback 可使用 HTTP。 |
 
-三个 domain 只接受互不相同的 hostname，不接受 scheme、端口、路径、通配符或 IP。Go 与 Vite 都严格拒绝未知字段、错误类型、多文档和非法值。`BRAND_CONFIG_FILE` 仅选择 YAML 文件，不覆盖其中字段；本地真实文件放在已忽略的 `.local/` 下。
+三个 domain 只接受互不相同的 hostname，不接受 scheme、端口、路径、通配符或 IP。Relay 会严格校验全部值，缺失或非法时在监听端口前失败。
 
-HTTPS 下 mobile session Cookie 为 `__Host-<brand.id>_mobile_session`，本地 HTTP 下为 `<brand.id>_mobile_session`。
+HTTPS 下 mobile session Cookie 为 `__Host-<BRAND_ID>_mobile_session`，本地 HTTP 下为 `<BRAND_ID>_mobile_session`。
+
+### Go module 构建身份
+
+提交态 `go.mod` 和内部 import 固定使用中性路径 `example.invalid/tunnel-hub-server`。Go import 不能读取环境变量，因此 `make` 和 Docker 构建入口会读取 `.env`/CI 中的 `GO_MODULE_PATH`，复制未忽略的工作树到临时目录，仅在临时树中替换 module path 后执行 build/test/run；源码工作区不会被改写。
+
+GitHub 和 GitLab CI 应分别设置各自仓库对应的 `GO_MODULE_PATH`。同时从 CI 外部提供非空 `FORBIDDEN_BRAND_TERMS`，通过 `make verify-neutral` 对文件路径和内容做大小写不敏感扫描；缺少禁用词配置时检查会失败。
 
 ### Relay 环境变量
 
 | 名称 | 默认值 | 说明 |
 | --- | --- | --- |
-| `BRAND_CONFIG_FILE` | 必填 | 品牌 YAML 路径；本地真实文件应放在 `.local/`，容器中固定为 `/configs/brand.yaml`。 |
 | `RELAY_ADDR` | 必填 | Relay 本地监听地址；示例为 `:11961`，容器内由 Compose 覆盖为 `:8080`。 |
 | `RELAY_DB_PATH` | 必填 | SQLite 数据库路径；示例为 `tunnel.db`，容器中通常设置为 `/data/tunnel.db`。 |
 | `ADMIN_HOST` | 空 | 旧版 Relay 静态管理站点 Host；拆分部署时保持为空。 |
@@ -158,20 +158,18 @@ openssl pkey -in /path/to/official-sso-private.pem -pubout -out configs/jwt-publ
 
 ```bash
 cd tunnel-hub-server
-mkdir -p bin
-go build -o ./bin/relay ./cmd/relay
-go build -o ./bin/agent ./cmd/agent
+make build
 ```
 
 ### 构建镜像
 
 ```bash
 cd tunnel-hub-server
-docker build -t tunnel-hub-server:latest .
-docker build -f tunnel-hub-public/Dockerfile --build-arg BRAND_CONFIG_FILE=configs/brand.example.yaml -t tunnel-hub-public:example .
+make docker-build
+docker build -f tunnel-hub-public/Dockerfile -t tunnel-hub-public:example .
 ```
 
-镜像会同时构建 `/app/relay` 和 `/app/agent`，默认入口是 `/app/relay`。
+Server 镜像会同时构建 `/app/relay` 和 `/app/agent`，默认入口是 `/app/relay`。直接执行 `docker build` 时必须显式传入 `--build-arg GO_MODULE_PATH=...`；可用 `GO_IMAGE` 和 `RUNTIME_IMAGE` build args 覆盖基础镜像。构建阶段固定 `GOTOOLCHAIN=local`，不会自动下载其他 Go 工具链。
 
 ### Docker Compose
 
@@ -197,21 +195,22 @@ docker compose up -d --build
 
 Tunnel 端模板在 `deploy/nginx/tunnel-hub.conf.template` 和 `deploy/caddy/Caddyfile.template`，其中包含分享 origin 的 `/share/*`，以及分享/Tunnel API 两个 origin 的 `/assets/conversation-export/*` 直连 Relay 规则。上线前必须替换全部 `{{...}}` 占位符；分享关闭时删除分享 Host block。
 
-| 模板占位符 | YAML 来源 |
+| 模板占位符 | 环境变量来源 |
 | --- | --- |
-| `{{PUBLIC_BASE}}` | `domains.publicBase` |
-| `{{DESKTOP_PUBLIC_BASE}}` | `domains.desktopPublicBase` |
-| `{{WEBAPP_PUBLIC_BASE}}` | `domains.webAppPublicBase` |
-| `{{SHARE_HOST}}` | `endpoints.sharePublicBaseUrl` 的 hostname |
-| `{{DESKTOP_PUBLIC_BASE_REGEX}}` | 转义正则元字符后的 `domains.desktopPublicBase` |
-| `{{ACME_EMAIL}}`、`{{*_CERTIFICATE}}`、`{{*_CERTIFICATE_KEY}}` | 部署环境的 ACME 联系邮箱和证书绝对路径，不来自品牌 YAML |
+| `{{PUBLIC_BASE}}` | `PUBLIC_BASE_DOMAIN` |
+| `{{DESKTOP_PUBLIC_BASE}}` | `DESKTOP_PUBLIC_BASE_DOMAIN` |
+| `{{WEBAPP_PUBLIC_BASE}}` | `WEBAPP_PUBLIC_BASE_DOMAIN` |
+| `{{SHARE_HOST}}` | `SHARE_PUBLIC_BASE_URL` 的 hostname |
+| `{{DESKTOP_PUBLIC_BASE_REGEX}}` | 转义正则元字符后的 `DESKTOP_PUBLIC_BASE_DOMAIN` |
+| `{{ACME_EMAIL}}`、`{{*_CERTIFICATE}}`、`{{*_CERTIFICATE_KEY}}` | 部署环境的 ACME 联系邮箱和证书绝对路径 |
 
 ## 5. 运维
 
 ### 常用检查
 
 ```bash
-go test ./...
+make test
+make verify-neutral
 docker compose ps
 docker logs tunnel-hub-server
 ```
@@ -319,23 +318,24 @@ curl https://hub.example.test/api/components
 - Desktop public mini site 没有打开：确认 `*.m.example.test` 普通 HTTP 已转发到 `tunnel-hub-public`，不是 Relay。
 - 附件上传返回 `desktop is offline`：确认请求 Host 对应的 Desktop 已连接 `/tunnel`。
 - 附件资源返回 `desktop resource timed out`：确认 Desktop 已实现 `/api/resource` 业务帧，并能访问 Hub 提供的 ticket 保护回推 URL。
-- 公网 Host 404：检查 DNS wildcard、Nginx/Caddy wildcard route，以及 `brand.yaml` 的三个 `domains` 字段。
+- 公网 Host 404：检查 DNS wildcard、Nginx/Caddy wildcard route，以及三个 domain 环境变量。
 
 ### 跨应用发布检查
 
 - Desktop 注册响应字段 `relayUrl`、`publicHost`、`publicUrl`、`webSocketUrl` 保持不变；Desktop 与移动 WebApp 继续动态消费这些值。
-- 发布前核对对应环境仓库的 `tunnelHub.relayUrl` 与 `brand.yaml.endpoints.relayPublicUrl` 完全一致，本仓库不修改 sibling 应用。
+- 发布前核对对应环境仓库的 `tunnelHub.relayUrl` 与 `RELAY_PUBLIC_URL` 完全一致，本仓库不修改 sibling 应用。
 - `tunnel-hub-tester` 的远程附件 helper 仍限制在其既有域名，非当前品牌环境只保证可手工填写 URL 做普通 WebSocket 调试，附件适配另行处理。
-- 顺序为：准备非空品牌 YAML，用同一文件构建 public 和渲染代理模板，最后同时发布 Relay、public 与代理配置。分享表直接使用当前 schema；未发布的本地调试数据库需由开发者删除后重建。
+- 顺序为：在部署环境准备完整运行时变量，渲染代理模板，最后同时发布 Relay、public 与代理配置。分享表直接使用当前 schema；未发布的本地调试数据库需由开发者删除后重建。
 - HTTP 上传失败：检查 `MAX_REQUEST_BODY_BYTES`，当前 Relay 会完整缓冲请求体。
 
 ## 6. 开发命令
 
 ```bash
-go test ./...
-go test ./internal/proxy -run Test
-go test ./internal/admin -run Test
+make test
+GO_MODULE_PATH=example.invalid/tunnel-hub-server GOTOOLCHAIN=local go run ./tools/moduleprep exec -- go test ./internal/proxy -run Test
+GO_MODULE_PATH=example.invalid/tunnel-hub-server GOTOOLCHAIN=local go run ./tools/moduleprep exec -- go test ./internal/admin -run Test
+make verify-neutral
 gofmt -w ./cmd ./internal
 ```
 
-提交前至少运行 `go test ./...`。协议、转发、鉴权、配置、存储相关改动需要补充或更新对应 `*_test.go`。
+提交前至少运行 `make test` 和 `make verify-neutral`。协议、转发、鉴权、配置、存储相关改动需要补充或更新对应 `*_test.go`。

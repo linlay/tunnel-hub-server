@@ -21,12 +21,12 @@ import (
 	"testing"
 	"time"
 
+	"example.invalid/tunnel-hub-server/internal/config"
+	"example.invalid/tunnel-hub-server/internal/proxy"
+	"example.invalid/tunnel-hub-server/internal/store"
+	"example.invalid/tunnel-hub-server/internal/tunnel"
 	"github.com/gorilla/websocket"
 	"github.com/hashicorp/yamux"
-	"github.com/linlay/zenmind-tunnel-server/internal/config"
-	"github.com/linlay/zenmind-tunnel-server/internal/proxy"
-	"github.com/linlay/zenmind-tunnel-server/internal/store"
-	"github.com/linlay/zenmind-tunnel-server/internal/tunnel"
 )
 
 var (
@@ -945,7 +945,7 @@ func runFakeDesktopBroker(t *testing.T, ctx context.Context, relayURL, token str
 	open := tunnel.NewStreamRequest(tunnel.NamespaceDesktop, tunnel.FrameRequest, tunnel.TypeTunnelOpen, "tun_test", &tunnel.StreamPayload{
 		AgentToken: token,
 		DeviceID:   "mac-mini",
-		Client:     "zenmind-desktop",
+		Client:     "example-desktop",
 		Capabilities: []string{
 			"desktop.websocket",
 			"webapp.http",
@@ -1025,7 +1025,7 @@ func runFakeDesktopBrokerWithHandler(t *testing.T, ctx context.Context, relayURL
 	defer ws.Close()
 	open := tunnel.NewStreamRequest(tunnel.NamespaceDesktop, tunnel.FrameRequest, tunnel.TypeTunnelOpen, "tun_test", &tunnel.StreamPayload{
 		AgentToken: token,
-		Client:     "zenmind-desktop",
+		Client:     "example-desktop",
 		Capabilities: []string{
 			"desktop.websocket",
 		},
@@ -1077,7 +1077,7 @@ func runFakeWebAppTunnelClient(t *testing.T, ctx context.Context, relayURL, toke
 	defer ws.Close()
 	open := tunnel.NewStreamRequest(tunnel.NamespaceDesktop, tunnel.FrameRequest, tunnel.TypeTunnelOpen, "tun_test", &tunnel.StreamPayload{
 		AgentToken: token,
-		Client:     "zenmind-desktop",
+		Client:     "example-desktop",
 		Capabilities: []string{
 			"webapp.http",
 			"webapp.websocket",

@@ -11,13 +11,13 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/linlay/zenmind-tunnel-server/internal/admin"
-	"github.com/linlay/zenmind-tunnel-server/internal/config"
-	desktopapi "github.com/linlay/zenmind-tunnel-server/internal/desktop"
-	"github.com/linlay/zenmind-tunnel-server/internal/proxy"
-	"github.com/linlay/zenmind-tunnel-server/internal/shareassets"
-	"github.com/linlay/zenmind-tunnel-server/internal/store"
-	"github.com/linlay/zenmind-tunnel-server/internal/tunnel"
+	"example.invalid/tunnel-hub-server/internal/admin"
+	"example.invalid/tunnel-hub-server/internal/config"
+	desktopapi "example.invalid/tunnel-hub-server/internal/desktop"
+	"example.invalid/tunnel-hub-server/internal/proxy"
+	"example.invalid/tunnel-hub-server/internal/shareassets"
+	"example.invalid/tunnel-hub-server/internal/store"
+	"example.invalid/tunnel-hub-server/internal/tunnel"
 )
 
 func main() {

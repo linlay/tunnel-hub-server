@@ -18,10 +18,10 @@ import (
 	"testing"
 	"time"
 
+	"example.invalid/tunnel-hub-server/internal/store"
+	"example.invalid/tunnel-hub-server/internal/tunnel"
 	"github.com/gorilla/websocket"
 	"github.com/hashicorp/yamux"
-	"github.com/linlay/zenmind-tunnel-server/internal/store"
-	"github.com/linlay/zenmind-tunnel-server/internal/tunnel"
 )
 
 type fakeUploadResult struct {
@@ -314,7 +314,7 @@ func runFakeUploadDesktop(t *testing.T, ctx context.Context, relayURL, token str
 	defer ws.Close()
 	open := tunnel.NewStreamRequest(tunnel.NamespaceDesktop, tunnel.FrameRequest, tunnel.TypeTunnelOpen, "tun_upload", &tunnel.StreamPayload{
 		AgentToken: token,
-		Client:     "zenmind-desktop",
+		Client:     "example-desktop",
 		Capabilities: []string{
 			"desktop.websocket",
 		},

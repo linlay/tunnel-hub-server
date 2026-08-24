@@ -9,12 +9,12 @@ import (
 	"testing"
 	"time"
 
+	"example.invalid/tunnel-hub-server/internal/auth"
+	"example.invalid/tunnel-hub-server/internal/config"
+	"example.invalid/tunnel-hub-server/internal/store"
+	"example.invalid/tunnel-hub-server/internal/tunnel"
 	"github.com/gorilla/websocket"
 	"github.com/hashicorp/yamux"
-	"github.com/linlay/zenmind-tunnel-server/internal/auth"
-	"github.com/linlay/zenmind-tunnel-server/internal/config"
-	"github.com/linlay/zenmind-tunnel-server/internal/store"
-	"github.com/linlay/zenmind-tunnel-server/internal/tunnel"
 )
 
 func TestRelayAgentHTTPIntegration(t *testing.T) {
@@ -121,7 +121,7 @@ func TestRelayTunnelFirstFrameAuthStartsYamux(t *testing.T) {
 	if err := ws.WriteJSON(tunnel.NewStreamRequest(tunnel.NamespaceDesktop, tunnel.FrameRequest, tunnel.TypeTunnelOpen, "tun_1", &tunnel.StreamPayload{
 		AgentToken: raw,
 		DeviceID:   "desktop-1",
-		Client:     "zenmind-desktop",
+		Client:     "example-desktop",
 	})); err != nil {
 		t.Fatalf("write tunnel.open: %v", err)
 	}
@@ -160,7 +160,7 @@ func TestRelayTunnelTrustedProxyRemoteAddrPersistsToSessionAndManager(t *testing
 	if err := ws.WriteJSON(tunnel.NewStreamRequest(tunnel.NamespaceDesktop, tunnel.FrameRequest, tunnel.TypeTunnelOpen, "tun_1", &tunnel.StreamPayload{
 		AgentToken: raw,
 		DeviceID:   "desktop-1",
-		Client:     "zenmind-desktop",
+		Client:     "example-desktop",
 	})); err != nil {
 		t.Fatalf("write tunnel.open: %v", err)
 	}

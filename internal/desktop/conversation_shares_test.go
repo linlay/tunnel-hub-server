@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/linlay/zenmind-tunnel-server/internal/config"
+	"example.invalid/tunnel-hub-server/internal/config"
 )
 
 const validConversationHTML = "<!doctype html><html><head><title>发布计划</title><style>main{color:#123}</style></head><body><main>你好，对话分享</main><script>globalThis.__ready=true</script></body></html>"

@@ -1,43 +1,32 @@
 package config
 
-import (
-	"os"
-	"path/filepath"
-	"testing"
-)
+import "testing"
 
-const validBrandYAML = `schemaVersion: 1
-brand:
-  id: example
-  productName: Example Desktop
-  publicSiteTitle: Example Desktop
-domains:
-  publicBase: hub.example.test
-  desktopPublicBase: m.example.test
-  webAppPublicBase: wa.example.test
-endpoints:
-  relayPublicUrl: wss://hub.example.test/tunnel
-  sharePublicBaseUrl: https://share.example.test
-`
-
-func useTestBrandConfig(t *testing.T) string {
+func setValidBrandEnv(t *testing.T) {
 	t.Helper()
-	path := filepath.Join(t.TempDir(), "brand.yaml")
-	if err := os.WriteFile(path, []byte(validBrandYAML), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("BRAND_CONFIG_FILE", path)
+	t.Setenv("BRAND_ID", "example")
+	t.Setenv("PRODUCT_NAME", "Example Desktop")
+	t.Setenv("PUBLIC_SITE_TITLE", "Example Desktop")
+	t.Setenv("PUBLIC_BASE_DOMAIN", "hub.example.test")
+	t.Setenv("DESKTOP_PUBLIC_BASE_DOMAIN", "m.example.test")
+	t.Setenv("WEBAPP_PUBLIC_BASE_DOMAIN", "wa.example.test")
+	t.Setenv("RELAY_PUBLIC_URL", "wss://hub.example.test/tunnel")
+	t.Setenv("SHARE_PUBLIC_BASE_URL", "https://share.example.test")
+}
+
+func useTestRelayConfig(t *testing.T) {
+	t.Helper()
+	setValidBrandEnv(t)
 	t.Setenv("RELAY_ADDR", ":18081")
 	t.Setenv("RELAY_DB_PATH", ":memory:")
 	t.Setenv("SSO_JWT_ISSUER", "https://issuer.example.test")
 	t.Setenv("SSO_JWT_PUBLIC_KEY_FILE", "test-public.pem")
 	t.Setenv("SSO_JWT_AUDIENCE", "tunnel")
 	t.Setenv("SSO_JWT_USER_ID_CLAIM", "sub")
-	return path
 }
 
 func TestLoadRelayConfigSupportsLegacyBootstrapAdminEnv(t *testing.T) {
-	useTestBrandConfig(t)
+	useTestRelayConfig(t)
 	t.Setenv("ADMIN_USERNAME", "")
 	t.Setenv("ADMIN_PASSWORD", "")
 	t.Setenv("BOOTSTRAP_ADMIN_USERNAME", "legacy-admin")
@@ -55,8 +44,8 @@ func TestLoadRelayConfigSupportsLegacyBootstrapAdminEnv(t *testing.T) {
 	}
 }
 
-func TestLoadRelayConfigUsesBrandFile(t *testing.T) {
-	useTestBrandConfig(t)
+func TestLoadRelayConfigUsesBrandEnvironment(t *testing.T) {
+	useTestRelayConfig(t)
 
 	cfg, err := LoadRelayConfigStrict()
 	if err != nil {
@@ -74,7 +63,7 @@ func TestLoadRelayConfigUsesBrandFile(t *testing.T) {
 }
 
 func TestLoadRelayConfigSupportsTrustedProxyCIDRs(t *testing.T) {
-	useTestBrandConfig(t)
+	useTestRelayConfig(t)
 	t.Setenv("TRUSTED_PROXY_CIDRS", "172.23.0.1/32,127.0.0.1/32,::1/128")
 
 	cfg, err := LoadRelayConfigStrict()
@@ -87,7 +76,7 @@ func TestLoadRelayConfigSupportsTrustedProxyCIDRs(t *testing.T) {
 }
 
 func TestLoadRelayConfigSupportsRelaxedSSOCompatibility(t *testing.T) {
-	useTestBrandConfig(t)
+	useTestRelayConfig(t)
 	t.Setenv("SSO_JWT_USER_ID_CLAIM", "userId")
 	t.Setenv("SSO_JWT_ALLOW_ANY_AUDIENCE", "true")
 	t.Setenv("SSO_JWT_ALLOW_ANY_ADMIN_ROLE", "true")
@@ -104,7 +93,14 @@ func TestLoadRelayConfigSupportsRelaxedSSOCompatibility(t *testing.T) {
 
 func TestLoadRelayConfigRequiresEnvironmentSpecificValues(t *testing.T) {
 	for _, key := range []string{
-		"BRAND_CONFIG_FILE",
+		"BRAND_ID",
+		"PRODUCT_NAME",
+		"PUBLIC_SITE_TITLE",
+		"PUBLIC_BASE_DOMAIN",
+		"DESKTOP_PUBLIC_BASE_DOMAIN",
+		"WEBAPP_PUBLIC_BASE_DOMAIN",
+		"RELAY_PUBLIC_URL",
+		"SHARE_PUBLIC_BASE_URL",
 		"RELAY_ADDR",
 		"RELAY_DB_PATH",
 		"SSO_JWT_ISSUER",
@@ -112,7 +108,7 @@ func TestLoadRelayConfigRequiresEnvironmentSpecificValues(t *testing.T) {
 		"SSO_JWT_USER_ID_CLAIM",
 	} {
 		t.Run(key, func(t *testing.T) {
-			useTestBrandConfig(t)
+			useTestRelayConfig(t)
 			t.Setenv(key, "")
 			if _, err := LoadRelayConfigStrict(); err == nil || err.Error() != key+" is required" {
 				t.Fatalf("error = %v", err)
@@ -121,7 +117,7 @@ func TestLoadRelayConfigRequiresEnvironmentSpecificValues(t *testing.T) {
 	}
 
 	t.Run("SSO public key", func(t *testing.T) {
-		useTestBrandConfig(t)
+		useTestRelayConfig(t)
 		t.Setenv("SSO_JWT_PUBLIC_KEY_FILE", "")
 		t.Setenv("SSO_JWT_PUBLIC_KEY_PEM", "")
 		if _, err := LoadRelayConfigStrict(); err == nil || err.Error() != "SSO_JWT_PUBLIC_KEY_FILE or SSO_JWT_PUBLIC_KEY_PEM is required" {
@@ -131,7 +127,7 @@ func TestLoadRelayConfigRequiresEnvironmentSpecificValues(t *testing.T) {
 }
 
 func TestLoadRelayConfigRejectsInvalidRelayAddress(t *testing.T) {
-	useTestBrandConfig(t)
+	useTestRelayConfig(t)
 	t.Setenv("RELAY_ADDR", "localhost:not-a-port")
 	if _, err := LoadRelayConfigStrict(); err == nil || err.Error() != "RELAY_ADDR is invalid" {
 		t.Fatalf("error = %v", err)

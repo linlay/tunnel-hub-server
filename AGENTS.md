@@ -10,20 +10,20 @@
 
 ## 2. 技术栈
 
-- 语言/runtime: Go 1.26。
+- 语言/runtime: Go 1.25，所有构建入口固定 `GOTOOLCHAIN=local`。
 - HTTP: 标准库 `net/http`。
 - WebSocket: `github.com/gorilla/websocket`。
 - 复用连接: `github.com/hashicorp/yamux`，通过 `replace` 指向本地 `third_party/yamux`。
 - 存储: SQLite，驱动为 `modernc.org/sqlite`，不依赖 CGO。
 - 鉴权: 本地 admin session cookie + 官网 SSO JWT bearer token。
-- 配置: `configs/brand.yaml` 是唯一品牌来源；`.env` 只承载非品牌运行参数。
+- 配置: 运行时身份、域名和公开端点全部来自环境变量；真实 `.env` 不提交。
 - 部署: Docker multi-stage build，distroless runtime，Nginx/Caddy 负责公网 TLS 和路由。
 
 ## 3. 架构设计
 
 Relay 入口在 `cmd/relay/main.go`，启动顺序是：
 
-1. `internal/config` 加载 `.env`、严格校验品牌 YAML，再读取非品牌环境变量。
+1. `internal/config` 加载 `.env`，严格校验运行时身份、域名、公开端点及其他环境变量。
 2. `internal/store` 打开 SQLite 并执行 schema/migration。
 3. 可选根据 `ADMIN_USERNAME`/`ADMIN_PASSWORD` bootstrap 本地管理员。
 4. 创建 `proxy.Manager` 管理在线 Agent/ Desktop tunnel session。
@@ -48,7 +48,9 @@ Relay 入口在 `cmd/relay/main.go`，启动顺序是：
 - `internal/admin`: 管理 API、本地登录、SSO JWT 管理鉴权、overview/activity/metrics 聚合、公开 component 列表。
 - `internal/auth`: secret hash、admin password、SSO JWT 验证。
 - `internal/config`: Relay/Agent 环境变量配置和 `.env` 加载。
-- `configs`: Relay 与 Public 构建共用的品牌 YAML、可运行示例和跨实现测试 fixture。
+- `configs`: JWT 公钥等部署文件；真实密钥材料不提交。
+- `tools/moduleprep`: 在临时工作树中把中性 Go module path 替换为构建环境路径，并执行 build/test/run。
+- `tools/neutralcheck`: 使用外部禁用词扫描 Git 跟踪文件和待提交的新文件。
 - `internal/desktop`: Desktop device 和 Desktop WebApp 注册 API。
 - `internal/proxy`: Relay/Agent 转发实现、yamux session、active agent manager、traffic event 记录。
 - `internal/shareassets`: 公开对话显示资产的只读 handler 与编译期文件；目录按 asset-set hash 追加，不覆盖或删除已发布集合。
@@ -116,7 +118,9 @@ Relay 入口在 `cmd/relay/main.go`，启动顺序是：
 ## 7. 开发要点
 
 - 文档、配置和测试里的 API 路径必须以 `cmd/relay/main.go`、`internal/admin/server.go`、`internal/desktop/server.go` 为准。
-- 品牌字段事实以 `configs/brand.yaml` 和 `internal/config/brand.go` 为准；环境变量事实以 `internal/config/config.go` 和 `.env.example` 为准。不要恢复旧品牌环境变量或写入真实生产值。
+- 运行时身份字段事实以 `internal/config/brand.go` 和 `.env.example` 为准。不要恢复配置文件注入，也不要写入真实生产值。
+- 提交态 `go.mod` 和内部 import 必须保持 `example.invalid/tunnel-hub-server`；任何环境对应的 module path 只能通过 `GO_MODULE_PATH` 交给 `tools/moduleprep`。禁止在工作区原地批量改写 Go 文件。
+- `FORBIDDEN_BRAND_TERMS` 只允许来自已忽略的 `.env` 或 CI 外部变量；提交前必须运行 fail-closed 的 `make verify-neutral`。
 - `.env.example` 的 SSO issuer 默认留空，并预留 public key file；需要调试 SSO 或 Desktop 注册时，必须同时配置 issuer 和有效 `configs/jwt-public.pem`。
 - Host 匹配必须统一经过 `internal/tunnel.NormalizeHost` 或等价逻辑，避免大小写、端口、尾点导致 route 绕过。
 - `proxy.Manager` 以 token 维护在线 Agent；同一 token 新连接会替换旧连接。新增功能时要考虑 token/session 的一对多和替换行为。
@@ -127,7 +131,7 @@ Relay 入口在 `cmd/relay/main.go`，启动顺序是：
 - 管理 token 手动创建当前禁用；Desktop 注册会创建/轮换 tunnel token。
 - 对话显示资产必须由 Agent WebClient 同一次构建同步，路径中的 64 位 hash 是不可变集合身份；handler 只接受白名单路径并返回长期 immutable、CORS/CORP 与 `nosniff` 响应头。永久分享存在时不得清理历史集合。
 - Go 改动提交前运行 `gofmt -w` 和相关 `go test`。
-- React/Vite 改动同时运行 `tunnel-hub-public` 的 `npm test`，并用非空品牌文件执行 `npm run build`；测试模式默认读取 `brand.example.yaml`。
+- React/Vite 改动同时运行 `tunnel-hub-public` 的 `npm test` 和 `npm run build`。Public 镜像构建不得注入运行时标题；容器启动时必须通过 `PUBLIC_SITE_TITLE` 生成纯文本 runtime 配置。
 
 ## 8. 开发流程
 
@@ -135,14 +139,15 @@ Relay 入口在 `cmd/relay/main.go`，启动顺序是：
 
 ```bash
 cd tunnel-hub-server
-go test ./...
-go run ./cmd/relay
+make test
+make verify-neutral
+make run-relay
 ```
 
 Agent 联调：
 
 ```bash
-AGENT_TOKEN=<token> AGENT_RELAY_URL=ws://127.0.0.1:8080/tunnel go run ./cmd/agent
+AGENT_TOKEN=<token> AGENT_RELAY_URL=ws://127.0.0.1:8080/tunnel make run-agent
 ```
 
 管理前端联调：

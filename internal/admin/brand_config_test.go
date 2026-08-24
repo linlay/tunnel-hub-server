@@ -3,7 +3,7 @@ package admin
 import (
 	"testing"
 
-	"github.com/linlay/zenmind-tunnel-server/internal/config"
+	"example.invalid/tunnel-hub-server/internal/config"
 )
 
 func TestServicePublicHostDoesNotUseABrandFallback(t *testing.T) {

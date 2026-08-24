@@ -14,12 +14,12 @@ func TestMobileWebAppSessionCookieNameUsesHostPrefixOnlyForSecureCookies(t *test
 }
 
 func TestMobileWebAppSessionCookieNamePreservesCurrentBrandCompatibility(t *testing.T) {
-	relay := &Relay{BrandID: "zenmind", MobileWebAppCookieSecure: true}
-	if got := relay.mobileWebAppSessionCookieName(); got != "__Host-zenmind_mobile_session" {
+	relay := &Relay{BrandID: "example", MobileWebAppCookieSecure: true}
+	if got := relay.mobileWebAppSessionCookieName(); got != "__Host-example_mobile_session" {
 		t.Fatalf("secure cookie name = %q", got)
 	}
 	relay.SetMobileWebAppCookieSecure(false)
-	if got := relay.mobileWebAppSessionCookieName(); got != "zenmind_mobile_session" {
+	if got := relay.mobileWebAppSessionCookieName(); got != "example_mobile_session" {
 		t.Fatalf("insecure cookie name = %q", got)
 	}
 }

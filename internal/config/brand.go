@@ -1,16 +1,11 @@
 package config
 
 import (
-	"errors"
 	"fmt"
-	"io"
 	"net"
 	"net/url"
-	"os"
 	"regexp"
 	"strings"
-
-	"gopkg.in/yaml.v3"
 )
 
 var (
@@ -19,67 +14,93 @@ var (
 )
 
 type BrandConfig struct {
-	SchemaVersion int            `yaml:"schemaVersion"`
-	Brand         BrandIdentity  `yaml:"brand"`
-	Domains       BrandDomains   `yaml:"domains"`
-	Endpoints     BrandEndpoints `yaml:"endpoints"`
+	Brand     BrandIdentity
+	Domains   BrandDomains
+	Endpoints BrandEndpoints
 }
 
 type BrandIdentity struct {
-	ID              string `yaml:"id"`
-	ProductName     string `yaml:"productName"`
-	PublicSiteTitle string `yaml:"publicSiteTitle"`
+	ID              string
+	ProductName     string
+	PublicSiteTitle string
 }
 
 type BrandDomains struct {
-	PublicBase        string `yaml:"publicBase"`
-	DesktopPublicBase string `yaml:"desktopPublicBase"`
-	WebAppPublicBase  string `yaml:"webAppPublicBase"`
+	PublicBase        string
+	DesktopPublicBase string
+	WebAppPublicBase  string
 }
 
 type BrandEndpoints struct {
-	RelayPublicURL     string `yaml:"relayPublicUrl"`
-	SharePublicBaseURL string `yaml:"sharePublicBaseUrl"`
+	RelayPublicURL     string
+	SharePublicBaseURL string
 }
 
-func LoadBrandConfig(path string) (BrandConfig, error) {
-	file, err := os.Open(path)
+func LoadBrandConfigFromEnv() (BrandConfig, error) {
+	brandID, err := requiredEnv("BRAND_ID")
 	if err != nil {
-		return BrandConfig{}, fmt.Errorf("open brand config %q: %w", path, err)
+		return BrandConfig{}, err
 	}
-	defer file.Close()
+	productName, err := requiredEnv("PRODUCT_NAME")
+	if err != nil {
+		return BrandConfig{}, err
+	}
+	publicSiteTitle, err := requiredEnv("PUBLIC_SITE_TITLE")
+	if err != nil {
+		return BrandConfig{}, err
+	}
+	publicBase, err := requiredEnv("PUBLIC_BASE_DOMAIN")
+	if err != nil {
+		return BrandConfig{}, err
+	}
+	desktopPublicBase, err := requiredEnv("DESKTOP_PUBLIC_BASE_DOMAIN")
+	if err != nil {
+		return BrandConfig{}, err
+	}
+	webAppPublicBase, err := requiredEnv("WEBAPP_PUBLIC_BASE_DOMAIN")
+	if err != nil {
+		return BrandConfig{}, err
+	}
+	relayPublicURL, err := requiredEnv("RELAY_PUBLIC_URL")
+	if err != nil {
+		return BrandConfig{}, err
+	}
+	sharePublicBaseURL, err := requiredEnv("SHARE_PUBLIC_BASE_URL")
+	if err != nil {
+		return BrandConfig{}, err
+	}
 
-	decoder := yaml.NewDecoder(io.LimitReader(file, 64<<10))
-	decoder.KnownFields(true)
-	var cfg BrandConfig
-	if err := decoder.Decode(&cfg); err != nil {
-		return BrandConfig{}, fmt.Errorf("decode brand config %q: %w", path, err)
-	}
-	var extra any
-	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
-		if err != nil {
-			return BrandConfig{}, fmt.Errorf("decode brand config %q: %w", path, err)
-		}
-		return BrandConfig{}, fmt.Errorf("brand config %q must contain exactly one YAML document", path)
+	cfg := BrandConfig{
+		Brand: BrandIdentity{
+			ID:              brandID,
+			ProductName:     productName,
+			PublicSiteTitle: publicSiteTitle,
+		},
+		Domains: BrandDomains{
+			PublicBase:        publicBase,
+			DesktopPublicBase: desktopPublicBase,
+			WebAppPublicBase:  webAppPublicBase,
+		},
+		Endpoints: BrandEndpoints{
+			RelayPublicURL:     relayPublicURL,
+			SharePublicBaseURL: sharePublicBaseURL,
+		},
 	}
 	if err := cfg.validate(); err != nil {
-		return BrandConfig{}, fmt.Errorf("validate brand config %q: %w", path, err)
+		return BrandConfig{}, err
 	}
 	return cfg, nil
 }
 
 func (cfg *BrandConfig) validate() error {
-	if cfg.SchemaVersion != 1 {
-		return fmt.Errorf("schemaVersion must be 1")
-	}
 	if !brandIDPattern.MatchString(cfg.Brand.ID) {
-		return fmt.Errorf("brand.id must start with a lowercase letter and contain only lowercase letters, digits, and hyphens")
+		return fmt.Errorf("BRAND_ID must start with a lowercase letter and contain only lowercase letters, digits, and hyphens")
 	}
 	if strings.TrimSpace(cfg.Brand.ProductName) == "" {
-		return fmt.Errorf("brand.productName must not be empty")
+		return fmt.Errorf("PRODUCT_NAME must not be empty")
 	}
 	if strings.TrimSpace(cfg.Brand.PublicSiteTitle) == "" {
-		return fmt.Errorf("brand.publicSiteTitle must not be empty")
+		return fmt.Errorf("PUBLIC_SITE_TITLE must not be empty")
 	}
 
 	domains := []*string{
@@ -87,7 +108,7 @@ func (cfg *BrandConfig) validate() error {
 		&cfg.Domains.DesktopPublicBase,
 		&cfg.Domains.WebAppPublicBase,
 	}
-	names := []string{"domains.publicBase", "domains.desktopPublicBase", "domains.webAppPublicBase"}
+	names := []string{"PUBLIC_BASE_DOMAIN", "DESKTOP_PUBLIC_BASE_DOMAIN", "WEBAPP_PUBLIC_BASE_DOMAIN"}
 	seen := make(map[string]struct{}, len(domains))
 	for i, domain := range domains {
 		normalized, err := validateHostname(names[i], *domain)
@@ -102,13 +123,13 @@ func (cfg *BrandConfig) validate() error {
 	}
 
 	if cfg.Endpoints.RelayPublicURL == "" {
-		return fmt.Errorf("endpoints.relayPublicUrl must not be empty")
+		return fmt.Errorf("RELAY_PUBLIC_URL must not be empty")
 	}
 	if err := validateRelayURL(cfg.Endpoints.RelayPublicURL); err != nil {
 		return err
 	}
 	if cfg.Endpoints.SharePublicBaseURL == "" {
-		return fmt.Errorf("endpoints.sharePublicBaseUrl must not be empty")
+		return fmt.Errorf("SHARE_PUBLIC_BASE_URL must not be empty")
 	}
 	normalized, err := validateShareOrigin(cfg.Endpoints.SharePublicBaseURL)
 	if err != nil {
@@ -137,20 +158,20 @@ func validateHostname(field, value string) (string, error) {
 func validateRelayURL(value string) error {
 	u, err := url.Parse(value)
 	if err != nil || u.Hostname() == "" {
-		return fmt.Errorf("endpoints.relayPublicUrl must be a valid WebSocket URL")
+		return fmt.Errorf("RELAY_PUBLIC_URL must be a valid WebSocket URL")
 	}
-	if err := validateEndpointHostname("endpoints.relayPublicUrl", u.Hostname()); err != nil {
+	if err := validateEndpointHostname("RELAY_PUBLIC_URL", u.Hostname()); err != nil {
 		return err
 	}
 	if u.User != nil || u.RawQuery != "" || u.Fragment != "" || u.RawPath != "" || u.Path != "/tunnel" {
-		return fmt.Errorf("endpoints.relayPublicUrl must have path /tunnel and no credentials, query, or fragment")
+		return fmt.Errorf("RELAY_PUBLIC_URL must have path /tunnel and no credentials, query, or fragment")
 	}
 	if isLoopbackHost(u.Hostname()) {
 		if u.Scheme != "ws" && u.Scheme != "wss" {
-			return fmt.Errorf("loopback endpoints.relayPublicUrl must use ws or wss")
+			return fmt.Errorf("loopback RELAY_PUBLIC_URL must use ws or wss")
 		}
 	} else if u.Scheme != "wss" {
-		return fmt.Errorf("non-loopback endpoints.relayPublicUrl must use wss")
+		return fmt.Errorf("non-loopback RELAY_PUBLIC_URL must use wss")
 	}
 	return nil
 }
@@ -158,20 +179,20 @@ func validateRelayURL(value string) error {
 func validateShareOrigin(value string) (string, error) {
 	u, err := url.Parse(value)
 	if err != nil || u.Hostname() == "" {
-		return "", fmt.Errorf("endpoints.sharePublicBaseUrl must be a valid origin")
+		return "", fmt.Errorf("SHARE_PUBLIC_BASE_URL must be a valid origin")
 	}
-	if err := validateEndpointHostname("endpoints.sharePublicBaseUrl", u.Hostname()); err != nil {
+	if err := validateEndpointHostname("SHARE_PUBLIC_BASE_URL", u.Hostname()); err != nil {
 		return "", err
 	}
 	if u.User != nil || u.RawQuery != "" || u.Fragment != "" || (u.Path != "" && u.Path != "/") {
-		return "", fmt.Errorf("endpoints.sharePublicBaseUrl must be an origin without credentials, path, query, or fragment")
+		return "", fmt.Errorf("SHARE_PUBLIC_BASE_URL must be an origin without credentials, path, query, or fragment")
 	}
 	if isLoopbackHost(u.Hostname()) {
 		if u.Scheme != "http" && u.Scheme != "https" {
-			return "", fmt.Errorf("loopback endpoints.sharePublicBaseUrl must use http or https")
+			return "", fmt.Errorf("loopback SHARE_PUBLIC_BASE_URL must use http or https")
 		}
 	} else if u.Scheme != "https" {
-		return "", fmt.Errorf("non-loopback endpoints.sharePublicBaseUrl must use https")
+		return "", fmt.Errorf("non-loopback SHARE_PUBLIC_BASE_URL must use https")
 	}
 	u.Path = ""
 	return strings.TrimSuffix(u.String(), "/"), nil

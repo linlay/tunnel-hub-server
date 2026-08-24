@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/linlay/zenmind-tunnel-server/internal/auth"
+	"example.invalid/tunnel-hub-server/internal/auth"
 )
 
 func TestRouteCRUDAndHostNormalization(t *testing.T) {
