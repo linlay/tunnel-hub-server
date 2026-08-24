@@ -70,7 +70,7 @@ Relay 入口在 `cmd/relay/main.go`，启动顺序是：
 - `agent_sessions`: Agent/Desktop tunnel 在线历史。
 - `events`: 管理操作和系统事件。
 - `traffic_events`: Desktop/WebApp/普通 route 的访问统计。
-- `conversation_shares`: 用户创建的版本化不透明 HTML、会话关联、到期时间和撤销状态；公开 ID 必须不可预测，生成时使用 `share_` 前缀，但接收端只按 URL-safe 不透明 ID 校验。所有者身份来自官网 SSO JWT；Relay 只校验传输契约并原字节保存/返回，不解析 HTML，也不保留旧事件流双协议。
+- `conversation_shares`: 用户创建的版本化不透明 HTML、会话关联、到期时间和撤销状态；公开 ID 必须不可预测，生成时使用 `share_` 前缀，但接收端只按 URL-safe 不透明 ID 校验。所有者身份来自官网 SSO JWT；Desktop main 是创建、列表、撤销的直接调用方，HTML 由 Desktop 常驻 Worker 使用 Agent Platform Snapshot 与 Agent WebClient 模板预先生成。Relay 只校验传输契约并原字节保存/返回，不解析 HTML，也不保留旧事件流双协议。
 - `conversation_share_access`: 每条分享最近一次成功公开访问时间；热更新与 HTML BLOB 分表，不保存访问日志或次数。
 
 注意：`admin_api_keys` 仍在 schema 中，但当前主 API 路径没有完整使用它，不要把它当成已上线能力写入 README。
