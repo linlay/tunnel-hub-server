@@ -1,59 +1,48 @@
 package config
 
 import (
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 )
 
-func TestLoadBrandConfigUsesSharedValidFixture(t *testing.T) {
-	cfg, err := LoadBrandConfig(filepath.Join("..", "..", "configs", "testdata", "brand.valid.yaml"))
+func TestLoadBrandConfigFromEnv(t *testing.T) {
+	setValidBrandEnv(t)
+	cfg, err := LoadBrandConfigFromEnv()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Brand.ID != "fixture-brand" || cfg.Endpoints.RelayPublicURL != "wss://hub.fixture.example.test/tunnel" {
+	if cfg.Brand.ID != "example" || cfg.Endpoints.RelayPublicURL != "wss://hub.example.test/tunnel" {
 		t.Fatalf("unexpected brand config: %+v", cfg)
 	}
 }
 
-func TestLoadBrandConfigRejectsSharedInvalidFixtures(t *testing.T) {
-	for _, name := range []string{"brand.invalid-unknown.yaml", "brand.invalid-domain.yaml"} {
-		t.Run(name, func(t *testing.T) {
-			_, err := LoadBrandConfig(filepath.Join("..", "..", "configs", "testdata", name))
-			if err == nil {
-				t.Fatal("expected invalid fixture to fail")
-			}
-		})
-	}
-}
-
-func TestLoadBrandConfigValidation(t *testing.T) {
+func TestLoadBrandConfigFromEnvValidation(t *testing.T) {
 	tests := []struct {
 		name    string
-		replace string
-		with    string
+		key     string
+		value   string
 		wantErr string
 	}{
-		{name: "empty id", replace: "id: example", with: `id: ""`, wantErr: "brand.id"},
-		{name: "invalid id", replace: "id: example", with: "id: Example", wantErr: "brand.id"},
-		{name: "empty product", replace: "productName: Example Desktop", with: `productName: ""`, wantErr: "productName"},
-		{name: "empty title", replace: "publicSiteTitle: Example Desktop", with: `publicSiteTitle: ""`, wantErr: "publicSiteTitle"},
-		{name: "duplicate domains", replace: "webAppPublicBase: wa.example.test", with: "webAppPublicBase: m.example.test", wantErr: "must be different"},
-		{name: "wildcard domain", replace: "publicBase: hub.example.test", with: "publicBase: '*.example.test'", wantErr: "hostname"},
-		{name: "empty relay", replace: "relayPublicUrl: wss://hub.example.test/tunnel", with: `relayPublicUrl: ""`, wantErr: "must not be empty"},
-		{name: "remote ws", replace: "relayPublicUrl: wss://hub.example.test/tunnel", with: "relayPublicUrl: ws://hub.example.test/tunnel", wantErr: "must use wss"},
-		{name: "relay path", replace: "relayPublicUrl: wss://hub.example.test/tunnel", with: "relayPublicUrl: wss://hub.example.test/other", wantErr: "path /tunnel"},
-		{name: "relay wildcard", replace: "relayPublicUrl: wss://hub.example.test/tunnel", with: "relayPublicUrl: wss://*.example.test/tunnel", wantErr: "valid hostname"},
-		{name: "empty share", replace: "sharePublicBaseUrl: https://share.example.test", with: `sharePublicBaseUrl: ""`, wantErr: "must not be empty"},
-		{name: "remote share http", replace: "sharePublicBaseUrl: https://share.example.test", with: "sharePublicBaseUrl: http://share.example.test", wantErr: "must use https"},
-		{name: "share path", replace: "sharePublicBaseUrl: https://share.example.test", with: "sharePublicBaseUrl: https://share.example.test/path", wantErr: "must be an origin"},
-		{name: "share wildcard", replace: "sharePublicBaseUrl: https://share.example.test", with: "sharePublicBaseUrl: https://*.example.test", wantErr: "valid hostname"},
+		{name: "empty id", key: "BRAND_ID", value: "", wantErr: "BRAND_ID is required"},
+		{name: "invalid id", key: "BRAND_ID", value: "Example", wantErr: "BRAND_ID"},
+		{name: "empty product", key: "PRODUCT_NAME", value: "", wantErr: "PRODUCT_NAME is required"},
+		{name: "empty title", key: "PUBLIC_SITE_TITLE", value: "", wantErr: "PUBLIC_SITE_TITLE is required"},
+		{name: "duplicate domains", key: "WEBAPP_PUBLIC_BASE_DOMAIN", value: "m.example.test", wantErr: "must be different"},
+		{name: "wildcard domain", key: "PUBLIC_BASE_DOMAIN", value: "*.example.test", wantErr: "hostname"},
+		{name: "empty relay", key: "RELAY_PUBLIC_URL", value: "", wantErr: "RELAY_PUBLIC_URL is required"},
+		{name: "remote ws", key: "RELAY_PUBLIC_URL", value: "ws://hub.example.test/tunnel", wantErr: "must use wss"},
+		{name: "relay path", key: "RELAY_PUBLIC_URL", value: "wss://hub.example.test/other", wantErr: "path /tunnel"},
+		{name: "relay wildcard", key: "RELAY_PUBLIC_URL", value: "wss://*.example.test/tunnel", wantErr: "valid hostname"},
+		{name: "empty share", key: "SHARE_PUBLIC_BASE_URL", value: "", wantErr: "SHARE_PUBLIC_BASE_URL is required"},
+		{name: "remote share http", key: "SHARE_PUBLIC_BASE_URL", value: "http://share.example.test", wantErr: "must use https"},
+		{name: "share path", key: "SHARE_PUBLIC_BASE_URL", value: "https://share.example.test/path", wantErr: "must be an origin"},
+		{name: "share wildcard", key: "SHARE_PUBLIC_BASE_URL", value: "https://*.example.test", wantErr: "valid hostname"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			path := writeBrandFixture(t, strings.Replace(validBrandYAML, test.replace, test.with, 1))
-			_, err := LoadBrandConfig(path)
+			setValidBrandEnv(t)
+			t.Setenv(test.key, test.value)
+			_, err := LoadBrandConfigFromEnv()
 			if err == nil || !strings.Contains(err.Error(), test.wantErr) {
 				t.Fatalf("error = %v, want substring %q", err, test.wantErr)
 			}
@@ -61,7 +50,7 @@ func TestLoadBrandConfigValidation(t *testing.T) {
 	}
 }
 
-func TestLoadBrandConfigAcceptsExplicitLoopbackEndpoints(t *testing.T) {
+func TestLoadBrandConfigFromEnvAcceptsExplicitLoopbackEndpoints(t *testing.T) {
 	for _, test := range []struct {
 		name      string
 		host      string
@@ -72,9 +61,10 @@ func TestLoadBrandConfigAcceptsExplicitLoopbackEndpoints(t *testing.T) {
 		{name: "ipv6", host: "[::1]", shareHost: "[::1]"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			yaml := strings.Replace(validBrandYAML, "relayPublicUrl: wss://hub.example.test/tunnel", "relayPublicUrl: ws://"+test.host+":18181/tunnel", 1)
-			yaml = strings.Replace(yaml, "sharePublicBaseUrl: https://share.example.test", "sharePublicBaseUrl: http://"+test.shareHost+":18080/", 1)
-			cfg, err := LoadBrandConfig(writeBrandFixture(t, yaml))
+			setValidBrandEnv(t)
+			t.Setenv("RELAY_PUBLIC_URL", "ws://"+test.host+":18181/tunnel")
+			t.Setenv("SHARE_PUBLIC_BASE_URL", "http://"+test.shareHost+":18080/")
+			cfg, err := LoadBrandConfigFromEnv()
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -85,35 +75,21 @@ func TestLoadBrandConfigAcceptsExplicitLoopbackEndpoints(t *testing.T) {
 	}
 }
 
-func TestLoadBrandConfigRejectsReservedNonCanonicalLocalEndpoints(t *testing.T) {
+func TestLoadBrandConfigFromEnvRejectsReservedNonCanonicalLocalEndpoints(t *testing.T) {
 	for _, host := range []string{"127.0.0.2", "demo.localhost", "0.0.0.0"} {
 		t.Run("relay_"+host, func(t *testing.T) {
-			yaml := strings.Replace(validBrandYAML, "relayPublicUrl: wss://hub.example.test/tunnel", "relayPublicUrl: wss://"+host+":18181/tunnel", 1)
-			if _, err := LoadBrandConfig(writeBrandFixture(t, yaml)); err == nil {
+			setValidBrandEnv(t)
+			t.Setenv("RELAY_PUBLIC_URL", "wss://"+host+":18181/tunnel")
+			if _, err := LoadBrandConfigFromEnv(); err == nil {
 				t.Fatalf("reserved local relay host accepted: %s", host)
 			}
 		})
 		t.Run("share_"+host, func(t *testing.T) {
-			yaml := strings.Replace(validBrandYAML, "sharePublicBaseUrl: https://share.example.test", "sharePublicBaseUrl: https://"+host+":18080", 1)
-			if _, err := LoadBrandConfig(writeBrandFixture(t, yaml)); err == nil {
+			setValidBrandEnv(t)
+			t.Setenv("SHARE_PUBLIC_BASE_URL", "https://"+host+":18080")
+			if _, err := LoadBrandConfigFromEnv(); err == nil {
 				t.Fatalf("reserved local share host accepted: %s", host)
 			}
 		})
 	}
-}
-
-func TestLoadBrandConfigRejectsMultipleDocuments(t *testing.T) {
-	_, err := LoadBrandConfig(writeBrandFixture(t, validBrandYAML+"---\n{}\n"))
-	if err == nil || !strings.Contains(err.Error(), "exactly one YAML document") {
-		t.Fatalf("error = %v", err)
-	}
-}
-
-func writeBrandFixture(t *testing.T, contents string) string {
-	t.Helper()
-	path := filepath.Join(t.TempDir(), "brand.yaml")
-	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	return path
 }

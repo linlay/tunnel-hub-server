@@ -15,9 +15,9 @@ import (
 	"testing"
 	"time"
 
+	"example.invalid/tunnel-hub-server/internal/tunnel"
 	"github.com/gorilla/websocket"
 	"github.com/hashicorp/yamux"
-	"github.com/linlay/zenmind-tunnel-server/internal/tunnel"
 )
 
 type fakeResourceResult struct {
@@ -267,7 +267,7 @@ func runFakeResourceDesktop(t *testing.T, ctx context.Context, relayURL, token s
 	defer ws.Close()
 	open := tunnel.NewStreamRequest(tunnel.NamespaceDesktop, tunnel.FrameRequest, tunnel.TypeTunnelOpen, "tun_resource", &tunnel.StreamPayload{
 		AgentToken: token,
-		Client:     "zenmind-desktop",
+		Client:     "example-desktop",
 		Capabilities: []string{
 			"desktop.websocket",
 		},

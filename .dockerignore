@@ -3,7 +3,6 @@
 .env
 .env.local
 .local/*
-!.local/brand.yaml
 data/*
 !data/.gitkeep
 configs/*.pem
@@ -11,5 +10,6 @@ configs/*.key
 *.db
 *.db-*
 dist
+bin
 node_modules
 *.tsbuildinfo

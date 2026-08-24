@@ -48,11 +48,7 @@ type AgentConfig struct {
 
 func LoadRelayConfigStrict() (RelayConfig, error) {
 	loadDotEnv()
-	brandPath, err := requiredEnv("BRAND_CONFIG_FILE")
-	if err != nil {
-		return RelayConfig{}, err
-	}
-	brand, err := LoadBrandConfig(brandPath)
+	brand, err := LoadBrandConfigFromEnv()
 	if err != nil {
 		return RelayConfig{}, err
 	}

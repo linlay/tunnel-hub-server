@@ -1,12 +1,11 @@
-module github.com/linlay/zenmind-tunnel-server
+module example.invalid/tunnel-hub-server
 
-go 1.26
+go 1.25.0
 
 require (
 	github.com/gorilla/websocket v1.5.3
 	github.com/hashicorp/yamux v0.0.0
 	golang.org/x/crypto v0.45.0
-	gopkg.in/yaml.v3 v3.0.1
 	modernc.org/sqlite v1.48.1
 )
 

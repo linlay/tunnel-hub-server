@@ -10,8 +10,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/linlay/zenmind-tunnel-server/internal/auth"
-	"github.com/linlay/zenmind-tunnel-server/internal/tunnel"
+	"example.invalid/tunnel-hub-server/internal/auth"
+	"example.invalid/tunnel-hub-server/internal/tunnel"
 	_ "modernc.org/sqlite"
 )
 

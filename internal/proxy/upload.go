@@ -21,9 +21,9 @@ import (
 	"sync"
 	"time"
 
+	"example.invalid/tunnel-hub-server/internal/store"
+	"example.invalid/tunnel-hub-server/internal/tunnel"
 	"github.com/gorilla/websocket"
-	"github.com/linlay/zenmind-tunnel-server/internal/store"
-	"github.com/linlay/zenmind-tunnel-server/internal/tunnel"
 )
 
 const (
