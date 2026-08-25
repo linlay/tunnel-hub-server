@@ -56,7 +56,7 @@ ADMIN_PASSWORD=<local-password>
 
 ### 启动 Agent
 
-Agent 需要使用已创建的 tunnel token。Desktop 新注册后返回的是内部 `agentToken`；普通 Agent 可使用已有 active token。
+普通 Agent 使用已创建的 tunnel token。Desktop 先通过统一认证注册设备，连接 `/tunnel` 时在首个 `tunnel.open` 中发送 `identityToken + deviceId`，不再创建或保存第二份 Relay token。
 
 ```bash
 cd tunnel-hub-server
@@ -128,7 +128,7 @@ GitHub 和 GitLab CI 应分别设置各自仓库对应的 `GO_MODULE_PATH`。同
 | `SSO_JWT_USER_ID_CLAIM` | 必填 | 用作稳定用户标识的 JWT claim 名。 |
 | `SSO_JWT_ALLOW_ANY_AUDIENCE` | `false` | 兼容开关；为 `true` 时跳过 audience 校验，但仍校验签名、issuer 和有效期。 |
 | `SSO_JWT_ALLOW_ANY_ADMIN_ROLE` | `false` | 高风险兼容开关；为 `true` 时任意有效 SSO 用户都获得 Tunnel Hub 管理权限。 |
-| `SSO_JWT_ALLOW_MISSING_TUNNEL_SCOPE` | `false` | 兼容开关；为 `true` 时管理和 Desktop 注册不再要求 `scope=tunnel`。 |
+| `SSO_JWT_ALLOW_MISSING_TUNNEL_SCOPE` | `false` | 兼容开关；为 `true` 时管理、Desktop 注册和 Desktop Tunnel 握手不再要求 `scope=tunnel`。 |
 | `MAX_REQUEST_BODY_BYTES` | `67108864` | Relay 缓冲 HTTP 请求体的最大字节数。 |
 | `TRUSTED_PROXY_CIDRS` | 空 | 可信反向代理 CIDR，命中后才读取 `X-Real-IP` / `X-Forwarded-For`；生产 Docker + nginx 建议 `172.23.0.1/32,127.0.0.1/32,::1/128`。 |
 
@@ -137,7 +137,7 @@ GitHub 和 GitLab CI 应分别设置各自仓库对应的 `GO_MODULE_PATH`。同
 | 名称 | 默认值 | 说明 |
 | --- | --- | --- |
 | `AGENT_RELAY_URL` | `ws://127.0.0.1:11961/tunnel` | Agent 默认 Relay tunnel WebSocket 地址。 |
-| `AGENT_TOKEN` | 必填 | Agent/desktop tunnel token。 |
+| `AGENT_TOKEN` | 必填 | 普通 Agent tunnel token。 |
 | `AGENT_TLS_INSECURE_SKIP_VERIFY` | `false` | 开发调试 TLS 跳过校验开关，生产不要开启。 |
 | `AGENT_RECONNECT_SECONDS` | `3` | 断线重连间隔。 |
 
@@ -246,7 +246,7 @@ curl -X PUT https://hub.example.test/api/admin/services/auditor \
 curl -X POST https://hub.example.test/api/desktop/devices/register \
   -H "Authorization: Bearer $OFFICIAL_SSO_JWT" \
   -H "Content-Type: application/json" \
-  -d '{"deviceId":"mac-mini","deviceName":"Frank MacBook Pro","rotateToken":false}'
+  -d '{"deviceId":"mac-mini","deviceName":"Frank MacBook Pro"}'
 ```
 
 创建、读取和撤销对话分享：
@@ -313,7 +313,7 @@ curl https://hub.example.test/api/components
 - `official JWT verifier is not configured`: 检查 `SSO_JWT_ISSUER` 和 JWT 公钥配置。
 - 启动时报 JWT 公钥文件不存在：准备有效公钥，并确认 `SSO_JWT_PUBLIC_KEY_FILE` 指向正确文件。
 - 管理台无法登录：确认 `ADMIN_PASSWORD` 首次启动时已设置，或使用官网 SSO JWT 调用 API。
-- `desktop is offline` / `assigned desktop is offline`: 确认 Desktop 或 Agent 已连接 `/tunnel`，且 token 仍为 active。
+- `desktop is offline` / `assigned desktop is offline`: 确认 Desktop 已用有效统一认证 identity token 和已注册 deviceId 连接 `/tunnel`；普通 Agent 仍需 active tunnel token。
 - WebSocket 无法升级：检查反向代理是否保留 `Upgrade` 和 `Connection` 头。
 - Desktop public mini site 没有打开：确认 `*.m.example.test` 普通 HTTP 已转发到 `tunnel-hub-public`，不是 Relay。
 - 附件上传返回 `desktop is offline`：确认请求 Host 对应的 Desktop 已连接 `/tunnel`。

@@ -298,7 +298,7 @@ func TestAdminAPIKeyEndpointRemoved(t *testing.T) {
 	}
 }
 
-func TestManualTokenCreationDisabledAndDesktopRegistrationStillReturnsAgentToken(t *testing.T) {
+func TestManualTokenCreationDisabledAndDesktopRegistrationCreatesNoToken(t *testing.T) {
 	server, db := newAdminTestServer(t)
 	req := authedAdminRequest(http.MethodPost, "/api/admin/tokens", `{"name":"manual"}`)
 	rec := httptest.NewRecorder()
@@ -318,8 +318,9 @@ func TestManualTokenCreationDisabledAndDesktopRegistrationStillReturnsAgentToken
 	if err != nil {
 		t.Fatalf("register desktop device: %v", err)
 	}
-	if registration.AgentToken == "" || registration.Token.ID == "" || !registration.Created {
-		t.Fatalf("registration should still issue agent token: %+v", registration)
+	tokens, err := db.ListTokens(context.Background())
+	if err != nil || len(tokens) != 0 || !registration.Created {
+		t.Fatalf("desktop registration created a token: registration=%+v tokens=%+v err=%v", registration, tokens, err)
 	}
 }
 
@@ -348,15 +349,15 @@ func TestConsoleAggregationEndpoints(t *testing.T) {
 	if err != nil {
 		t.Fatalf("register webapp: %v", err)
 	}
-	sessionRecord, err := db.CreateAgentSession(ctx, registration.Token.ID, "127.0.0.1:50000")
+	sessionRecord, err := db.CreateDesktopSession(ctx, registration.Device, "127.0.0.1:50000")
 	if err != nil {
 		t.Fatalf("create agent session: %v", err)
 	}
 	activeYamux, peer := newAdminTestSession(t)
 	defer peer.Close()
-	server.Manager.SetActive(&proxy.ActiveAgent{
+	server.Manager.SetActive(&proxy.ActiveTunnel{
 		SessionID:   sessionRecord.ID,
-		TokenID:     registration.Token.ID,
+		Key:         proxy.DesktopConnectionKey(registration.Device.DeviceKey),
 		RemoteAddr:  sessionRecord.RemoteAddr,
 		ConnectedAt: sessionRecord.ConnectedAt,
 		Yamux:       activeYamux,
@@ -365,7 +366,7 @@ func TestConsoleAggregationEndpoints(t *testing.T) {
 		ObjectType: "webapp",
 		PublicHost: webapp.Route.PublicHost,
 		RouteID:    webapp.Route.ID,
-		TokenID:    registration.Token.ID,
+		DeviceID:   registration.Device.DeviceKey,
 		SessionID:  sessionRecord.ID,
 		Kind:       "http",
 		Method:     http.MethodGet,
@@ -506,9 +507,9 @@ func TestSessionCloseEndpoint(t *testing.T) {
 	}
 	activeYamux, peer := newAdminTestSession(t)
 	defer peer.Close()
-	server.Manager.SetActive(&proxy.ActiveAgent{
+	server.Manager.SetActive(&proxy.ActiveTunnel{
 		SessionID:   activeRecord.ID,
-		TokenID:     token.ID,
+		Key:         proxy.AgentConnectionKey(token.ID),
 		RemoteAddr:  activeRecord.RemoteAddr,
 		ConnectedAt: activeRecord.ConnectedAt,
 		Yamux:       activeYamux,
@@ -674,9 +675,9 @@ func TestAgentsEndpointCombinesTokenConnectionAndRoutes(t *testing.T) {
 	}
 	session, peer := newAdminTestSession(t)
 	connectedAt := time.Now().UTC()
-	server.Manager.SetActive(&proxy.ActiveAgent{
+	server.Manager.SetActive(&proxy.ActiveTunnel{
 		SessionID:   "session_1",
-		TokenID:     token.ID,
+		Key:         proxy.AgentConnectionKey(token.ID),
 		RemoteAddr:  "127.0.0.1:50000",
 		ConnectedAt: connectedAt,
 		Yamux:       session,
@@ -758,7 +759,14 @@ func newAdminTestServerWithConfig(t *testing.T, cfg config.RelayConfig) (*Server
 	if err := db.Migrate(context.Background()); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
-	server, err := NewServer(db, proxy.NewManager(), cfg, nil)
+	verifier, err := auth.NewSSOJWTVerifier(auth.SSOJWTConfig{
+		Issuer: cfg.SSOJWTIssuer, Audience: cfg.SSOJWTAudience, UserIDClaim: cfg.SSOJWTUserIDClaim,
+		AllowAnyAudience: cfg.SSOJWTAllowAnyAudience, PublicKeyFile: cfg.SSOJWTPublicKeyFile, PublicKeyPEM: cfg.SSOJWTPublicKeyPEM,
+	})
+	if err != nil {
+		t.Fatalf("new SSO verifier: %v", err)
+	}
+	server, err := NewServer(db, proxy.NewManager(), cfg, nil, verifier)
 	if err != nil {
 		t.Fatalf("new admin server: %v", err)
 	}

@@ -1,7 +1,9 @@
 package proxy
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -13,6 +15,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"example.invalid/tunnel-hub-server/internal/auth"
 	"example.invalid/tunnel-hub-server/internal/store"
 	"example.invalid/tunnel-hub-server/internal/tunnel"
 	"github.com/gorilla/websocket"
@@ -28,6 +31,8 @@ type Relay struct {
 	DesktopBaseDomain        string
 	WebAppBaseDomain         string
 	MobileWebAppCookieSecure bool
+	desktopIdentityVerifier  *auth.SSOJWTVerifier
+	allowMissingTunnelScope  bool
 	trustedProxyCIDRs        []*net.IPNet
 	uploads                  *uploadStore
 	resources                *resourceStore
@@ -38,6 +43,24 @@ type webAppRelayOptions struct {
 	Subprotocol string
 	Source      string
 	ObjectType  string
+	Connection  ConnectionKey
+	DeviceID    string
+}
+
+type desktopTunnelOpenFrame struct {
+	V       int                      `json:"v"`
+	NS      string                   `json:"ns"`
+	Frame   string                   `json:"frame"`
+	Type    string                   `json:"type"`
+	ID      string                   `json:"id"`
+	Payload desktopTunnelOpenPayload `json:"payload"`
+}
+
+type desktopTunnelOpenPayload struct {
+	IdentityToken string   `json:"identityToken"`
+	DeviceID      string   `json:"deviceId"`
+	Client        string   `json:"client"`
+	Capabilities  []string `json:"capabilities"`
 }
 
 func NewRelay(db *store.DB, manager *Manager, logger *slog.Logger, brandID, desktopBaseDomain, webAppBaseDomain string, maxRequestBodyBytes int64) *Relay {
@@ -76,10 +99,23 @@ func (r *Relay) SetTrustedProxyCIDRs(value string) {
 	r.trustedProxyCIDRs = parseTrustedProxyCIDRs(value)
 }
 
+func (r *Relay) SetDesktopIdentityVerifier(verifier *auth.SSOJWTVerifier, allowMissingScope bool) {
+	r.desktopIdentityVerifier = verifier
+	r.allowMissingTunnelScope = allowMissingScope
+}
+
 func (r *Relay) HandleTunnel(w http.ResponseWriter, req *http.Request) {
 	clientRemoteAddr := r.clientRemoteAddr(req)
-	rawToken := bearerToken(req.Header.Get("Authorization"))
-	if rawToken != "" {
+	authorizations, authorizationPresent := req.Header[http.CanonicalHeaderKey("Authorization")]
+	if authorizationPresent {
+		rawToken := ""
+		if len(authorizations) == 1 {
+			rawToken = bearerToken(authorizations[0])
+		}
+		if rawToken == "" {
+			http.Error(w, "invalid authorization header", http.StatusUnauthorized)
+			return
+		}
 		token, err := r.DB.FindActiveTokenBySecret(req.Context(), rawToken)
 		if err != nil {
 			http.Error(w, "invalid token", http.StatusUnauthorized)
@@ -91,7 +127,22 @@ func (r *Relay) HandleTunnel(w http.ResponseWriter, req *http.Request) {
 			r.Logger.Error("upgrade tunnel websocket", "error", err)
 			return
 		}
-		r.serveTunnelSession(req, ws, token.ID, clientRemoteAddr, nil)
+		defer ws.Close()
+		dbSession, err := r.DB.CreateAgentSession(req.Context(), token.ID, clientRemoteAddr)
+		if err != nil {
+			_ = ws.Close()
+			r.Logger.Error("create agent session", "error", err)
+			return
+		}
+		_ = r.DB.TouchToken(req.Context(), token.ID)
+		r.serveTunnelSession(ws, ActiveTunnel{
+			SessionID:   dbSession.ID,
+			Key:         AgentConnectionKey(token.ID),
+			RemoteAddr:  clientRemoteAddr,
+			ConnectedAt: dbSession.ConnectedAt,
+		}, time.Time{}, func() {
+			_ = r.DB.EndAgentSession(context.Background(), dbSession.ID)
+		})
 		return
 	}
 
@@ -102,25 +153,61 @@ func (r *Relay) HandleTunnel(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 	defer ws.Close()
+	ws.SetReadLimit(1 << 20)
+	if err := ws.SetReadDeadline(time.Now().Add(10 * time.Second)); err != nil {
+		r.Logger.Warn("set desktop tunnel handshake deadline", "error", err)
+	}
 
-	var open tunnel.StreamRequest
-	if err := ws.ReadJSON(&open); err != nil {
+	_, rawOpen, err := ws.ReadMessage()
+	if err != nil {
 		_ = ws.WriteJSON(tunnel.NewErrorResponse(tunnel.NamespaceDesktop, tunnel.TypeTunnelOpen, "", http.StatusBadRequest, "invalid tunnel.open frame"))
 		return
 	}
-	if open.V != tunnel.ProtocolVersion || open.NS != tunnel.NamespaceDesktop || open.Frame != tunnel.FrameRequest || open.Type != tunnel.TypeTunnelOpen || open.Payload == nil {
+	var open desktopTunnelOpenFrame
+	decoder := json.NewDecoder(bytes.NewReader(rawOpen))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&open); err != nil || decoder.Decode(&struct{}{}) != io.EOF {
+		_ = ws.WriteJSON(tunnel.NewErrorResponse(tunnel.NamespaceDesktop, tunnel.TypeTunnelOpen, "", http.StatusBadRequest, "invalid tunnel.open frame"))
+		return
+	}
+	if open.V != tunnel.ProtocolVersion || open.NS != tunnel.NamespaceDesktop || open.Frame != tunnel.FrameRequest || open.Type != tunnel.TypeTunnelOpen {
 		_ = ws.WriteJSON(tunnel.NewErrorResponse(tunnel.NamespaceDesktop, tunnel.TypeTunnelOpen, open.ID, http.StatusBadRequest, "expected tunnel.open request"))
 		return
 	}
-	token, err := r.DB.FindActiveTokenBySecret(req.Context(), open.Payload.AgentToken)
-	if err != nil {
-		_ = ws.WriteJSON(tunnel.NewErrorResponse(tunnel.NamespaceDesktop, tunnel.TypeTunnelOpen, open.ID, http.StatusUnauthorized, "invalid agent token"))
+	open.Payload.IdentityToken = strings.TrimSpace(open.Payload.IdentityToken)
+	open.Payload.DeviceID = strings.TrimSpace(open.Payload.DeviceID)
+	if open.Payload.IdentityToken == "" || tunnel.ValidateDesktopDeviceID(open.Payload.DeviceID) != nil {
+		_ = ws.WriteJSON(tunnel.NewErrorResponse(tunnel.NamespaceDesktop, tunnel.TypeTunnelOpen, open.ID, http.StatusBadRequest, "identityToken and a valid deviceId are required"))
 		return
 	}
-	dbSession, err := r.DB.CreateAgentSession(req.Context(), token.ID, clientRemoteAddr)
+	if r.desktopIdentityVerifier == nil {
+		_ = ws.WriteJSON(tunnel.NewErrorResponse(tunnel.NamespaceDesktop, tunnel.TypeTunnelOpen, open.ID, http.StatusServiceUnavailable, "desktop identity verifier is unavailable"))
+		return
+	}
+	principal, err := r.desktopIdentityVerifier.Verify(open.Payload.IdentityToken, time.Now())
 	if err != nil {
-		r.Logger.Error("create agent session", "error", err)
-		_ = ws.WriteJSON(tunnel.NewErrorResponse(tunnel.NamespaceDesktop, tunnel.TypeTunnelOpen, open.ID, http.StatusInternalServerError, "create agent session failed"))
+		_ = ws.WriteJSON(tunnel.NewErrorResponse(tunnel.NamespaceDesktop, tunnel.TypeTunnelOpen, open.ID, http.StatusUnauthorized, "invalid identity token"))
+		return
+	}
+	if !r.allowMissingTunnelScope && !principal.HasScope("tunnel") {
+		_ = ws.WriteJSON(tunnel.NewErrorResponse(tunnel.NamespaceDesktop, tunnel.TypeTunnelOpen, open.ID, http.StatusForbidden, "tunnel scope required"))
+		return
+	}
+	device, err := r.DB.GetDesktopDeviceByOwnerAndID(req.Context(), principal.UserID, open.Payload.DeviceID)
+	if err != nil {
+		if !errors.Is(err, store.ErrNotFound) {
+			r.Logger.Error("resolve desktop tunnel owner", "error", err)
+		}
+		_ = ws.WriteJSON(tunnel.NewErrorResponse(tunnel.NamespaceDesktop, tunnel.TypeTunnelOpen, open.ID, http.StatusForbidden, "desktop device is not registered for this identity"))
+		return
+	}
+	if err := ws.SetReadDeadline(time.Time{}); err != nil {
+		r.Logger.Warn("clear desktop tunnel handshake deadline", "error", err)
+	}
+	dbSession, err := r.DB.CreateDesktopSession(req.Context(), device, clientRemoteAddr)
+	if err != nil {
+		r.Logger.Error("create desktop session", "error", err)
+		_ = ws.WriteJSON(tunnel.NewErrorResponse(tunnel.NamespaceDesktop, tunnel.TypeTunnelOpen, open.ID, http.StatusInternalServerError, "create desktop session failed"))
 		return
 	}
 	success := tunnel.NewSuccessResponse(tunnel.NamespaceDesktop, tunnel.TypeTunnelOpen, open.ID, &tunnel.StreamResponseData{
@@ -128,14 +215,21 @@ func (r *Relay) HandleTunnel(w http.ResponseWriter, req *http.Request) {
 		Multiplex: "yamux",
 	})
 	if err := ws.WriteJSON(success); err != nil {
-		_ = r.DB.EndAgentSession(context.Background(), dbSession.ID)
+		_ = r.DB.EndDesktopSession(context.Background(), dbSession.ID)
 		r.Logger.Error("write tunnel.open response", "error", err)
 		return
 	}
-	r.serveTunnelSession(req, ws, token.ID, clientRemoteAddr, &dbSession)
+	r.serveTunnelSession(ws, ActiveTunnel{
+		SessionID:   dbSession.ID,
+		Key:         DesktopConnectionKey(device.DeviceKey),
+		RemoteAddr:  clientRemoteAddr,
+		ConnectedAt: dbSession.ConnectedAt,
+	}, principal.ExpiresAt, func() {
+		_ = r.DB.EndDesktopSession(context.Background(), dbSession.ID)
+	})
 }
 
-func (r *Relay) serveTunnelSession(req *http.Request, ws *websocket.Conn, tokenID, clientRemoteAddr string, dbSession *store.AgentSession) {
+func (r *Relay) serveTunnelSession(ws *websocket.Conn, active ActiveTunnel, expiresAt time.Time, finish func()) {
 	conn := tunnel.NewWebSocketNetConn(ws)
 	config := yamux.DefaultConfig()
 	config.EnableKeepAlive = true
@@ -143,39 +237,34 @@ func (r *Relay) serveTunnelSession(req *http.Request, ws *websocket.Conn, tokenI
 	session, err := yamux.Server(conn, config)
 	if err != nil {
 		_ = conn.Close()
-		if dbSession != nil {
-			_ = r.DB.EndAgentSession(context.Background(), dbSession.ID)
-		}
+		finish()
 		r.Logger.Error("start yamux server", "error", err)
 		return
 	}
-
-	if dbSession == nil {
-		nextSession, err := r.DB.CreateAgentSession(req.Context(), tokenID, clientRemoteAddr)
-		if err != nil {
+	active.Yamux = session
+	var expiryTimer *time.Timer
+	if !expiresAt.IsZero() {
+		expiryTimer = time.AfterFunc(time.Until(expiresAt), func() {
+			_ = ws.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.ClosePolicyViolation, "identity expired"), time.Now().Add(time.Second))
 			_ = session.Close()
-			r.Logger.Error("create agent session", "error", err)
-			return
-		}
-		dbSession = &nextSession
+		})
+		defer expiryTimer.Stop()
 	}
-	_ = r.DB.TouchToken(context.Background(), tokenID)
-	_ = r.DB.AddEvent(context.Background(), "agent.connected", "Agent connected", dbSession.ID)
-	r.Manager.SetActive(&ActiveAgent{
-		SessionID:   dbSession.ID,
-		TokenID:     tokenID,
-		RemoteAddr:  clientRemoteAddr,
-		ConnectedAt: dbSession.ConnectedAt,
-		Yamux:       session,
-	})
-	r.Logger.Info("agent connected", "session", dbSession.ID, "remote", clientRemoteAddr)
+	eventPrefix := string(active.Key.Kind)
+	eventSubject := "Agent"
+	if active.Key.Kind == ConnectionKindDesktop {
+		eventSubject = "Desktop"
+	}
+	_ = r.DB.AddEvent(context.Background(), eventPrefix+".connected", eventSubject+" connected", active.SessionID)
+	r.Manager.SetActive(&active)
+	r.Logger.Info(eventPrefix+" connected", "session", active.SessionID, "remote", active.RemoteAddr)
 
 	<-session.CloseChan()
 
-	r.Manager.Clear(dbSession.ID)
-	_ = r.DB.EndAgentSession(context.Background(), dbSession.ID)
-	_ = r.DB.AddEvent(context.Background(), "agent.disconnected", "Agent disconnected", dbSession.ID)
-	r.Logger.Info("agent disconnected", "session", dbSession.ID)
+	r.Manager.Clear(active.SessionID)
+	finish()
+	_ = r.DB.AddEvent(context.Background(), eventPrefix+".disconnected", eventSubject+" disconnected", active.SessionID)
+	r.Logger.Info(eventPrefix+" disconnected", "session", active.SessionID)
 }
 
 func (r *Relay) HandlePublic(w http.ResponseWriter, req *http.Request) {
@@ -187,6 +276,27 @@ func (r *Relay) HandlePublic(w http.ResponseWriter, req *http.Request) {
 		r.handleDesktopPublic(w, req)
 		return
 	}
+	if isHostUnderBaseDomain(req.Host, r.WebAppBaseDomain) {
+		webApp, err := r.DB.GetActiveDesktopWebAppRouteByHost(req.Context(), req.Host)
+		if errors.Is(err, store.ErrNotFound) {
+			http.NotFound(w, req)
+			return
+		}
+		if err != nil {
+			r.writeGatewayError(w, "webapp route lookup failed", err)
+			return
+		}
+		options := webAppRelayOptions{
+			Connection: DesktopConnectionKey(webApp.Device.DeviceKey),
+			DeviceID:   webApp.Device.DeviceKey,
+		}
+		if isWebSocketRequest(req) {
+			r.handleWebAppPublicWebSocket(w, req, webApp.Route, options)
+			return
+		}
+		r.handleWebAppPublicHTTP(w, req, webApp.Route, options)
+		return
+	}
 	route, err := r.DB.GetActiveRouteByHost(req.Context(), req.Host)
 	if errors.Is(err, store.ErrNotFound) {
 		http.NotFound(w, req)
@@ -194,14 +304,6 @@ func (r *Relay) HandlePublic(w http.ResponseWriter, req *http.Request) {
 	}
 	if err != nil {
 		r.writeGatewayError(w, "route lookup failed", err)
-		return
-	}
-	if isHostUnderBaseDomain(req.Host, r.WebAppBaseDomain) {
-		if isWebSocketRequest(req) {
-			r.handleWebAppPublicWebSocket(w, req, route, webAppRelayOptions{})
-			return
-		}
-		r.handleWebAppPublicHTTP(w, req, route, webAppRelayOptions{})
 		return
 	}
 	if isWebSocketRequest(req) {
@@ -269,7 +371,6 @@ func (r *Relay) handleMobileWebAppPublic(w http.ResponseWriter, req *http.Reques
 		ID:         fmt.Sprintf("mobile:%d", port),
 		PublicHost: tunnel.NormalizeHost(req.Host),
 		TargetURL:  fmt.Sprintf("http://127.0.0.1:%d", port),
-		TokenID:    device.TokenID,
 		Active:     true,
 	}
 	options := webAppRelayOptions{
@@ -277,6 +378,8 @@ func (r *Relay) handleMobileWebAppPublic(w http.ResponseWriter, req *http.Reques
 		Subprotocol: subprotocol,
 		Source:      "mobile",
 		ObjectType:  "mobile-webapp",
+		Connection:  DesktopConnectionKey(device.DeviceKey),
+		DeviceID:    device.DeviceKey,
 	}
 	if isWebSocketRequest(req) {
 		r.handleWebAppPublicWebSocket(w, next, route, options)
@@ -299,8 +402,9 @@ func (r *Relay) handleDesktopPublic(w http.ResponseWriter, req *http.Request) {
 		r.writeGatewayError(w, "desktop lookup failed", err)
 		return
 	}
-	stream, err := r.Manager.OpenStream(req.Context(), device.TokenID)
-	if errors.Is(err, ErrNoAgent) {
+	connection := DesktopConnectionKey(device.DeviceKey)
+	stream, err := r.Manager.OpenStream(req.Context(), connection)
+	if errors.Is(err, ErrNoTunnel) {
 		http.Error(w, "desktop is offline", http.StatusBadGateway)
 		return
 	}
@@ -312,7 +416,7 @@ func (r *Relay) handleDesktopPublic(w http.ResponseWriter, req *http.Request) {
 		_ = stream.Close()
 		r.Manager.StreamClosed()
 	}()
-	active, _ := r.Manager.ActiveAgentForToken(device.TokenID)
+	active, _ := r.Manager.ActiveFor(connection)
 	var bytesIn atomic.Int64
 	var bytesOut atomic.Int64
 	statusCode := 0
@@ -321,7 +425,7 @@ func (r *Relay) handleDesktopPublic(w http.ResponseWriter, req *http.Request) {
 		r.recordTrafficEvent(store.TrafficEvent{
 			ObjectType: "desktop",
 			PublicHost: req.Host,
-			TokenID:    device.TokenID,
+			DeviceID:   device.DeviceKey,
 			SessionID:  active.SessionID,
 			Kind:       "websocket",
 			Method:     req.Method,
@@ -384,8 +488,9 @@ func (r *Relay) handleWebAppPublicHTTP(w http.ResponseWriter, req *http.Request,
 		r.writeGatewayError(w, "parse webapp upstream failed", err)
 		return
 	}
-	stream, err := r.Manager.OpenStream(req.Context(), route.TokenID)
-	if errors.Is(err, ErrNoAgent) {
+	connection := webAppConnection(route, options)
+	stream, err := r.Manager.OpenStream(req.Context(), connection)
+	if errors.Is(err, ErrNoTunnel) {
 		http.Error(w, "assigned desktop is offline", http.StatusBadGateway)
 		return
 	}
@@ -397,7 +502,7 @@ func (r *Relay) handleWebAppPublicHTTP(w http.ResponseWriter, req *http.Request,
 		_ = stream.Close()
 		r.Manager.StreamClosed()
 	}()
-	active, _ := r.Manager.ActiveAgentForToken(route.TokenID)
+	active, _ := r.Manager.ActiveFor(connection)
 	bytesIn := int64(0)
 	bytesOut := int64(0)
 	statusCode := 0
@@ -408,6 +513,7 @@ func (r *Relay) handleWebAppPublicHTTP(w http.ResponseWriter, req *http.Request,
 			PublicHost: req.Host,
 			RouteID:    route.ID,
 			TokenID:    route.TokenID,
+			DeviceID:   options.DeviceID,
 			SessionID:  active.SessionID,
 			Kind:       "http",
 			Method:     req.Method,
@@ -491,8 +597,9 @@ func (r *Relay) handleWebAppPublicWebSocket(w http.ResponseWriter, req *http.Req
 		r.writeGatewayError(w, "parse webapp websocket upstream failed", err)
 		return
 	}
-	stream, err := r.Manager.OpenStream(req.Context(), route.TokenID)
-	if errors.Is(err, ErrNoAgent) {
+	connection := webAppConnection(route, options)
+	stream, err := r.Manager.OpenStream(req.Context(), connection)
+	if errors.Is(err, ErrNoTunnel) {
 		http.Error(w, "assigned desktop is offline", http.StatusBadGateway)
 		return
 	}
@@ -504,7 +611,7 @@ func (r *Relay) handleWebAppPublicWebSocket(w http.ResponseWriter, req *http.Req
 		_ = stream.Close()
 		r.Manager.StreamClosed()
 	}()
-	active, _ := r.Manager.ActiveAgentForToken(route.TokenID)
+	active, _ := r.Manager.ActiveFor(connection)
 	var bytesIn atomic.Int64
 	var bytesOut atomic.Int64
 	statusCode := 0
@@ -515,6 +622,7 @@ func (r *Relay) handleWebAppPublicWebSocket(w http.ResponseWriter, req *http.Req
 			PublicHost: req.Host,
 			RouteID:    route.ID,
 			TokenID:    route.TokenID,
+			DeviceID:   options.DeviceID,
 			SessionID:  active.SessionID,
 			Kind:       "websocket",
 			Method:     req.Method,
@@ -573,8 +681,8 @@ func (r *Relay) handleWebAppPublicWebSocket(w http.ResponseWriter, req *http.Req
 }
 
 func (r *Relay) handlePublicHTTP(w http.ResponseWriter, req *http.Request, route store.Route) {
-	stream, err := r.Manager.OpenStream(req.Context(), route.TokenID)
-	if errors.Is(err, ErrNoAgent) {
+	stream, err := r.Manager.OpenStream(req.Context(), AgentConnectionKey(route.TokenID))
+	if errors.Is(err, ErrNoTunnel) {
 		http.Error(w, "assigned agent is offline", http.StatusBadGateway)
 		return
 	}
@@ -633,8 +741,8 @@ func (r *Relay) handlePublicHTTP(w http.ResponseWriter, req *http.Request, route
 }
 
 func (r *Relay) handlePublicWebSocket(w http.ResponseWriter, req *http.Request, route store.Route) {
-	stream, err := r.Manager.OpenStream(req.Context(), route.TokenID)
-	if errors.Is(err, ErrNoAgent) {
+	stream, err := r.Manager.OpenStream(req.Context(), AgentConnectionKey(route.TokenID))
+	if errors.Is(err, ErrNoTunnel) {
 		http.Error(w, "assigned agent is offline", http.StatusBadGateway)
 		return
 	}
@@ -693,11 +801,11 @@ func (r *Relay) writeGatewayError(w http.ResponseWriter, message string, err err
 }
 
 func bearerToken(header string) string {
-	const prefix = "Bearer "
-	if !strings.HasPrefix(header, prefix) {
+	parts := strings.Fields(header)
+	if len(parts) != 2 || !strings.EqualFold(parts[0], "Bearer") {
 		return ""
 	}
-	return strings.TrimSpace(strings.TrimPrefix(header, prefix))
+	return parts[1]
 }
 
 func parseTrustedProxyCIDRs(value string) []*net.IPNet {
@@ -1053,6 +1161,13 @@ func valueOr(value, fallback string) string {
 		return fallback
 	}
 	return value
+}
+
+func webAppConnection(route store.Route, options webAppRelayOptions) ConnectionKey {
+	if options.Connection.Kind != "" && options.Connection.ID != "" {
+		return options.Connection
+	}
+	return AgentConnectionKey(route.TokenID)
 }
 
 func requestID() string {
