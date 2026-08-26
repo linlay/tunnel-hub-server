@@ -9,6 +9,8 @@ import (
 	"net/http/httptest"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -43,6 +45,9 @@ func TestConversationShareAPICreateReadExpireAndRevoke(t *testing.T) {
 	}
 	if result.LastAccessedAt != nil {
 		t.Fatalf("new share lastAccessedAt=%v", result.LastAccessedAt)
+	}
+	if result.SingleUse {
+		t.Fatal("30-day share must not be single-use")
 	}
 	listed := performConversationShareRequest(server, http.MethodGet, conversationSharesPath+"?conversationId=chat-test", nil, defaultDesktopJWT)
 	assertConversationShareList(t, listed, result.ID, nil)
@@ -97,13 +102,9 @@ func TestConversationShareAPIExpirationOptions(t *testing.T) {
 		value    string
 		duration time.Duration
 	}{
-		{value: "5m", duration: 5 * time.Minute},
-		{value: "30m", duration: 30 * time.Minute},
-		{value: "1h", duration: time.Hour},
 		{value: "3h", duration: 3 * time.Hour},
 		{value: "1d", duration: 24 * time.Hour},
-		{value: "5d", duration: 5 * 24 * time.Hour},
-		{value: "15d", duration: 15 * 24 * time.Hour},
+		{value: "7d", duration: 7 * 24 * time.Hour},
 		{value: "30d", duration: 30 * 24 * time.Hour},
 	} {
 		t.Run(tc.value, func(t *testing.T) {
@@ -134,12 +135,187 @@ func TestConversationShareAPIExpirationOptions(t *testing.T) {
 		if result.ExpiresAt != nil {
 			t.Fatalf("permanent expiresAt=%v", result.ExpiresAt)
 		}
+		if result.SingleUse {
+			t.Fatal("permanent share must not be single-use")
+		}
 		now = now.Add(100 * 365 * 24 * time.Hour)
 		public := performConversationShareRequest(server, http.MethodGet, publicConversationSharePagePath+result.ID, nil, "")
 		if public.Code != http.StatusOK {
 			t.Fatalf("permanent public status=%d body=%s", public.Code, public.Body.String())
 		}
 	})
+
+	t.Run("once", func(t *testing.T) {
+		created := performConversationShareRequestWithExpiration(server, "once", []byte(validConversationHTML))
+		if created.Code != http.StatusCreated {
+			t.Fatalf("create status=%d body=%s", created.Code, created.Body.String())
+		}
+		var result conversationShareRecordResponse
+		if err := json.Unmarshal(created.Body.Bytes(), &result); err != nil {
+			t.Fatalf("decode response: %v", err)
+		}
+		if !result.SingleUse || result.ExpiresAt != nil || result.LastAccessedAt != nil {
+			t.Fatalf("unexpected single-use response: %#v", result)
+		}
+	})
+}
+
+func TestConversationShareAPIRejectsRemovedExpirationOptions(t *testing.T) {
+	cfg := desktopTestConfig(t)
+	cfg.SharePublicBaseURL = "https://share.example.test"
+	server, _ := newDesktopTestServerWithConfig(t, cfg)
+	for _, expiration := range []string{"5m", "30m", "1h", "5d", "15d"} {
+		t.Run(expiration, func(t *testing.T) {
+			response := performConversationShareRequestWithExpiration(
+				server,
+				expiration,
+				bytes.Repeat([]byte("x"), int(maxConversationShareBytes)+1),
+			)
+			if response.Code != http.StatusBadRequest {
+				t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+			}
+		})
+	}
+}
+
+func TestConversationShareSingleUseGETConsumesAtomically(t *testing.T) {
+	cfg := desktopTestConfig(t)
+	cfg.SharePublicBaseURL = "https://share.example.test"
+	server, _ := newDesktopTestServerWithConfig(t, cfg)
+	created := performConversationShareRequestWithExpiration(server, "once", []byte(validConversationHTML))
+	var result conversationShareRecordResponse
+	if err := json.Unmarshal(created.Body.Bytes(), &result); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	listed := performConversationShareRequest(server, http.MethodGet, conversationSharesPath+"?conversationId=chat-test", nil, defaultDesktopJWT)
+	if listed.Code != http.StatusOK || !strings.Contains(listed.Body.String(), result.ID) {
+		t.Fatalf("single-use share not listed: status=%d body=%s", listed.Code, listed.Body.String())
+	}
+
+	var accessWrites atomic.Int64
+	server.recordConversationShareAccess = func(context.Context, string, time.Time) error {
+		accessWrites.Add(1)
+		return nil
+	}
+	const readers = 12
+	codes := make(chan int, readers)
+	var wait sync.WaitGroup
+	wait.Add(readers)
+	for range readers {
+		go func() {
+			defer wait.Done()
+			response := performConversationShareRequest(server, http.MethodGet, publicConversationSharePagePath+result.ID, nil, "")
+			if response.Code == http.StatusOK && response.Body.String() != validConversationHTML {
+				codes <- 0
+				return
+			}
+			codes <- response.Code
+		}()
+	}
+	wait.Wait()
+	close(codes)
+	okCount := 0
+	notFoundCount := 0
+	for code := range codes {
+		switch code {
+		case http.StatusOK:
+			okCount++
+		case http.StatusNotFound:
+			notFoundCount++
+		default:
+			t.Fatalf("unexpected concurrent status=%d", code)
+		}
+	}
+	if okCount != 1 || notFoundCount != readers-1 {
+		t.Fatalf("ok=%d notFound=%d", okCount, notFoundCount)
+	}
+	if accessWrites.Load() != 0 {
+		t.Fatalf("single-use share wrote access metadata %d times", accessWrites.Load())
+	}
+	listed = performConversationShareRequest(server, http.MethodGet, conversationSharesPath+"?conversationId=chat-test", nil, defaultDesktopJWT)
+	assertConversationShareList(t, listed, "", nil)
+}
+
+func TestConversationShareSingleUseHEADDoesNotConsume(t *testing.T) {
+	cfg := desktopTestConfig(t)
+	cfg.SharePublicBaseURL = "https://share.example.test"
+	server, _ := newDesktopTestServerWithConfig(t, cfg)
+	created := performConversationShareRequestWithExpiration(server, "once", []byte(validConversationHTML))
+	var result conversationShareRecordResponse
+	if err := json.Unmarshal(created.Body.Bytes(), &result); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	head := performConversationShareRequest(server, http.MethodHead, publicConversationSharePagePath+result.ID, nil, "")
+	if head.Code != http.StatusMethodNotAllowed || head.Header().Get("Allow") != http.MethodGet {
+		t.Fatalf("HEAD status=%d allow=%q", head.Code, head.Header().Get("Allow"))
+	}
+	get := performConversationShareRequest(server, http.MethodGet, publicConversationSharePagePath+result.ID, nil, "")
+	if get.Code != http.StatusOK || get.Body.String() != validConversationHTML {
+		t.Fatalf("GET after HEAD status=%d body=%q", get.Code, get.Body.String())
+	}
+}
+
+func TestConversationShareSingleUseReadAndRevokeRaceHasOneWinner(t *testing.T) {
+	cfg := desktopTestConfig(t)
+	cfg.SharePublicBaseURL = "https://share.example.test"
+	server, _ := newDesktopTestServerWithConfig(t, cfg)
+	created := performConversationShareRequestWithExpiration(server, "once", []byte(validConversationHTML))
+	var result conversationShareRecordResponse
+	if err := json.Unmarshal(created.Body.Bytes(), &result); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+
+	codes := make(chan int, 2)
+	var wait sync.WaitGroup
+	wait.Add(2)
+	go func() {
+		defer wait.Done()
+		codes <- performConversationShareRequest(server, http.MethodGet, publicConversationSharePagePath+result.ID, nil, "").Code
+	}()
+	go func() {
+		defer wait.Done()
+		codes <- performConversationShareRequest(server, http.MethodDelete, conversationSharesPath+"/"+result.ID, nil, defaultDesktopJWT).Code
+	}()
+	wait.Wait()
+	close(codes)
+	winners := 0
+	notFound := 0
+	for code := range codes {
+		switch code {
+		case http.StatusOK, http.StatusNoContent:
+			winners++
+		case http.StatusNotFound:
+			notFound++
+		default:
+			t.Fatalf("unexpected race status=%d", code)
+		}
+	}
+	if winners != 1 || notFound != 1 {
+		t.Fatalf("winners=%d notFound=%d", winners, notFound)
+	}
+}
+
+func TestConversationShareSingleUseSupportsMaximumDocumentSize(t *testing.T) {
+	cfg := desktopTestConfig(t)
+	cfg.SharePublicBaseURL = "https://share.example.test"
+	server, _ := newDesktopTestServerWithConfig(t, cfg)
+	body := bytes.Repeat([]byte("x"), int(maxConversationShareBytes))
+	created := performConversationShareRequestWithExpiration(server, "once", body)
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create status=%d body=%s", created.Code, created.Body.String())
+	}
+	var result conversationShareRecordResponse
+	if err := json.Unmarshal(created.Body.Bytes(), &result); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	public := performConversationShareRequest(server, http.MethodGet, publicConversationSharePagePath+result.ID, nil, "")
+	if public.Code != http.StatusOK || public.Body.Len() != len(body) {
+		t.Fatalf("public status=%d bytes=%d", public.Code, public.Body.Len())
+	}
+	second := performConversationShareRequest(server, http.MethodGet, publicConversationSharePagePath+result.ID, nil, "")
+	if second.Code != http.StatusNotFound {
+		t.Fatalf("second status=%d", second.Code)
+	}
 }
 
 func TestConversationShareAPIRejectsInvalidExpirationBeforeHTMLBody(t *testing.T) {
@@ -425,6 +601,9 @@ func assertConversationShareList(
 	}
 	if len(result.Items) != 1 || result.Items[0].ID != wantID {
 		t.Fatalf("list items=%#v want=%q", result.Items, wantID)
+	}
+	if result.Items[0].SingleUse {
+		t.Fatalf("reusable share listed as single-use: %#v", result.Items[0])
 	}
 	if wantLastAccessedAt == nil {
 		if result.Items[0].LastAccessedAt != nil {

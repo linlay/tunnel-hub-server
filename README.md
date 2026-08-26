@@ -251,7 +251,7 @@ curl -X POST https://hub.example.test/api/desktop/devices/register \
 
 创建、读取和撤销对话分享：
 
-Relay 把 Desktop 常驻 Worker 已渲染、由 Desktop main 原样转发的完整 HTML 当作不透明字节保存，不解析 DOM、标题、消息或事件。正文最大 20 MiB，必须是非空 UTF-8。创建请求必须同时提供 `X-Conversation-Document-Version: 1`、非空 `X-Conversation-ID` 和 `X-Conversation-Share-Expiration`；时效只接受 `5m`、`30m`、`1h`、`3h`、`1d`、`5d`、`15d`、`30d`、`permanent`。任一 Header 缺失或非法都会在读取正文前返回 400。生产调用方是 Desktop main：Worker 从 Platform 请求 Snapshot、从 WebClient 请求模板，生成后由 main 创建、列表和撤销；Platform 不接收 Tunnel token，也不感知模板或分享生命周期。下面命令只用于服务端联调。
+Relay 把 Desktop 常驻 Worker 已渲染、由 Desktop main 原样转发的完整 HTML 当作不透明字节保存，不解析 DOM、标题、消息或事件。正文最大 20 MiB，必须是非空 UTF-8。创建请求必须同时提供 `X-Conversation-Document-Version: 1`、非空 `X-Conversation-ID` 和 `X-Conversation-Share-Expiration`；时效只接受 `once`、`3h`、`1d`、`7d`、`30d`、`permanent`。任一 Header 缺失或非法都会在读取正文前返回 400。生产调用方是 Desktop main：Worker 从 Platform 请求 Snapshot、从 WebClient 请求模板，生成后由 main 创建、列表和撤销；Platform 不接收 Tunnel token，也不感知模板或分享生命周期。下面命令只用于服务端联调。
 
 ```bash
 curl -X POST https://hub.example.test/api/desktop/shares \
@@ -273,7 +273,7 @@ curl -X DELETE https://hub.example.test/api/desktop/shares/share_xxx \
   -H "Authorization: Bearer $OFFICIAL_SSO_JWT"
 ```
 
-创建和列表响应的 `createdAt`、有限 `expiresAt` 与非空 `lastAccessedAt` 使用 RFC3339；永久 `expiresAt` 和尚未访问的 `lastAccessedAt` 明确返回 JSON `null`。列表只返回当前所有者、指定会话下未撤销且未到期的元数据，不读取 HTML。匿名 `GET /share/{id}` 只返回仍有效且未撤销的原始 HTML bytes，媒体类型为 `text/html; charset=utf-8`，并设置 `no-store`、`nosniff`、`noindex` 与 `no-referrer`；成功 GET 会 best-effort 更新独立访问元数据行，写入失败不影响正文。撤销、到期和未知 ID 统一返回最小 404 HTML；永久链接也可由所有者撤销。
+创建和列表响应固定包含 `singleUse`。`createdAt`、有限 `expiresAt` 与非空 `lastAccessedAt` 使用 RFC3339；`once` 与 `permanent` 的 `expiresAt`、尚未访问的 `lastAccessedAt` 明确返回 JSON `null`，两者由 `singleUse` 区分。列表只返回当前所有者、指定会话下仍有效的元数据，不读取 HTML。匿名 `GET /share/{id}` 只返回仍有效且未撤销的原始 HTML bytes，媒体类型为 `text/html; charset=utf-8`，并设置 `no-store`、`nosniff`、`noindex` 与 `no-referrer`。普通链接成功 GET 会 best-effort 更新独立访问元数据行，写入失败不影响正文；一次性链接使用 SQLite `DELETE ... RETURNING` 原子取得并删除正文，并发访问严格只有一个请求成功。链接预览器、机器人和安全扫描器的 GET 同样会消费一次性链接；HEAD 与其他方法不会消费。已消费、撤销、到期和未知 ID 统一返回最小 404 HTML；永久链接也可由所有者撤销。
 
 `GET/HEAD /assets/conversation-export/{sha256}/{file}` 只提供随 Relay 编译的白名单资产，响应使用精确 MIME、`nosniff`、跨 origin 读取许可和一年 `immutable` 缓存。资产目录是追加式发布：已经被模板引用的 hash 不允许覆盖或删除，分享撤销也不删除公共显示资源。
 

@@ -166,6 +166,64 @@ func TestMigrateDesktopIdentityPreservesAgentAndDesktopData(t *testing.T) {
 	}
 }
 
+func TestMigrateConversationSharesDefaultsExistingRowsToReusable(t *testing.T) {
+	db, err := Open(":memory:")
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	now := time.Date(2026, time.August, 17, 1, 2, 3, 0, time.UTC)
+	if _, err := db.sql.Exec(`
+		CREATE TABLE conversation_shares (
+			id TEXT PRIMARY KEY,
+			owner_user_id TEXT NOT NULL,
+			conversation_id TEXT NOT NULL,
+			document_version INTEGER NOT NULL,
+			html_document BLOB NOT NULL,
+			created_at TIMESTAMP NOT NULL,
+			expires_at TIMESTAMP,
+			revoked_at TIMESTAMP
+		);
+		INSERT INTO conversation_shares (
+			id, owner_user_id, conversation_id, document_version,
+			html_document, created_at, expires_at
+		) VALUES ('share_legacy', 'owner-a', 'chat-a', 1, '<p>legacy</p>', ?, ?);
+	`, now, now.Add(24*time.Hour)); err != nil {
+		t.Fatalf("seed legacy conversation share: %v", err)
+	}
+	if err := db.Migrate(context.Background()); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	if err := db.Migrate(context.Background()); err != nil {
+		t.Fatalf("idempotent migrate: %v", err)
+	}
+	assertConversationShareSingleUseExpirationConstraint(t, db, "share_invalid_migrated_once")
+	share, err := db.AcquirePublicConversationShare(context.Background(), "share_legacy", now)
+	if err != nil || share.SingleUse || string(share.HTMLDocument) != "<p>legacy</p>" {
+		t.Fatalf("legacy share=%#v err=%v", share, err)
+	}
+	if _, err := db.AcquirePublicConversationShare(context.Background(), "share_legacy", now); err != nil {
+		t.Fatalf("legacy share must remain reusable: %v", err)
+	}
+}
+
+func TestConversationShareSchemaRejectsSingleUseWithExpiration(t *testing.T) {
+	assertConversationShareSingleUseExpirationConstraint(t, openTestDB(t), "share_invalid_fresh_once")
+}
+
+func assertConversationShareSingleUseExpirationConstraint(t *testing.T, db *DB, id string) {
+	t.Helper()
+	now := time.Date(2026, time.August, 17, 1, 2, 3, 0, time.UTC)
+	if _, err := db.sql.Exec(`
+		INSERT INTO conversation_shares (
+			id, owner_user_id, conversation_id, document_version,
+			html_document, created_at, expires_at, single_use
+		) VALUES (?, 'owner-a', 'chat-a', 1, '<p>invalid</p>', ?, ?, 1)
+	`, id, now, now.Add(24*time.Hour)); err == nil {
+		t.Fatal("database accepted a single-use share with an expiration")
+	}
+}
+
 func openTestDB(t *testing.T) *DB {
 	t.Helper()
 	db, err := Open(":memory:")

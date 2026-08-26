@@ -189,6 +189,9 @@ func (db *DB) Migrate(ctx context.Context) error {
 	if err := db.ensureTrafficEventsTable(ctx); err != nil {
 		return err
 	}
+	if err := db.ensureConversationShareColumns(ctx); err != nil {
+		return err
+	}
 	if err := db.migrateDesktopIdentity(ctx); err != nil {
 		return err
 	}
@@ -1683,6 +1686,15 @@ func (db *DB) ensureColumn(ctx context.Context, table, column, definition string
 	return err
 }
 
+func (db *DB) ensureConversationShareColumns(ctx context.Context) error {
+	return db.ensureColumn(
+		ctx,
+		"conversation_shares",
+		"single_use",
+		"INTEGER NOT NULL DEFAULT 0 CHECK (single_use IN (0, 1) AND (single_use = 0 OR expires_at IS NULL))",
+	)
+}
+
 const schema = `
 CREATE TABLE IF NOT EXISTS admin_users (
 	id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1800,7 +1812,11 @@ CREATE TABLE IF NOT EXISTS conversation_shares (
 	html_document BLOB NOT NULL,
 	created_at TIMESTAMP NOT NULL,
 	expires_at TIMESTAMP,
-	revoked_at TIMESTAMP
+	revoked_at TIMESTAMP,
+	single_use INTEGER NOT NULL DEFAULT 0 CHECK (
+		single_use IN (0, 1)
+		AND (single_use = 0 OR expires_at IS NULL)
+	)
 );
 
 CREATE TABLE IF NOT EXISTS conversation_share_access (
