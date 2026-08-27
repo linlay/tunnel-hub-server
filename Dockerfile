@@ -1,10 +1,10 @@
-ARG GO_IMAGE=golang:1.25-alpine
-ARG RUNTIME_IMAGE=gcr.io/distroless/base-debian12
+ARG GO_IMAGE=harbor.gtjaqh.io/library/golang:1.25-alpine
+ARG RUNTIME_IMAGE=harbor.gtjaqh.io/library/debian:12
 
 FROM ${GO_IMAGE} AS build
 
-ARG GO_MODULE_PATH
-ARG GOPROXY=https://proxy.golang.org,direct
+ARG GO_MODULE_PATH=gitlab.gtjaqh.net/infrastructure/aiagent/tunnel-hub-server
+ARG GOPROXY=https://nexus.gtjaqh.net/repository/go-proxy-aliyun,direct
 ENV GOTOOLCHAIN=local \
     CGO_ENABLED=0 \
     GOPROXY=${GOPROXY}
