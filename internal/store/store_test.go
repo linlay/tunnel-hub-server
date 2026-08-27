@@ -59,14 +59,14 @@ func TestDesktopWebAppRouteUsesDeviceJoinWithoutToken(t *testing.T) {
 	if err != nil {
 		t.Fatalf("register device: %v", err)
 	}
-	created, err := db.RegisterDesktopWebApp(context.Background(), RegisterDesktopWebAppInput{OwnerUserID: "user-1", DeviceID: "mac-lan", Name: "notes", PublicHost: "notes.wa.example.test", TargetURL: "http://127.0.0.1:5173", Active: true})
+	created, err := db.RegisterDesktopWebApp(context.Background(), RegisterDesktopWebAppInput{OwnerUserID: "user-1", DeviceID: "mac-lan", Name: "notes", PublicHost: "abcdefghijk23-wa.example.test", TargetURL: "http://127.0.0.1:5173", Active: true})
 	if err != nil {
 		t.Fatalf("register webapp: %v", err)
 	}
 	if created.Route.TokenID != "" || !created.Route.Active {
 		t.Fatalf("webapp route = %+v", created.Route)
 	}
-	joined, err := db.GetActiveDesktopWebAppRouteByHost(context.Background(), "NOTES.WA.EXAMPLE.TEST:443")
+	joined, err := db.GetActiveDesktopWebAppRouteByHost(context.Background(), "ABCDEFGHIJK23-WA.EXAMPLE.TEST:443")
 	if err != nil {
 		t.Fatalf("join route: %v", err)
 	}
@@ -118,11 +118,11 @@ func TestMigrateDesktopIdentityPreservesAgentAndDesktopData(t *testing.T) {
 	}{
 		{`INSERT INTO tunnel_tokens VALUES (?, ?, ?, ?, 1, ?, NULL)`, []any{"desktop-token", "desktop", "hash", "desk", now}},
 		{`INSERT INTO tunnel_tokens VALUES (?, ?, ?, ?, 1, ?, NULL)`, []any{"agent-token", "agent", "hash", "agent", now}},
-		{`INSERT INTO routes VALUES (?, ?, ?, ?, 1, ?, ?)`, []any{"webapp-route", "notes.wa.example.test", "http://127.0.0.1:5173", "desktop-token", now, now}},
+		{`INSERT INTO routes VALUES (?, ?, ?, ?, 1, ?, ?)`, []any{"webapp-route", "abcdefghijk23-wa.example.test", "http://127.0.0.1:5173", "desktop-token", now, now}},
 		{`INSERT INTO routes VALUES (?, ?, ?, ?, 1, ?, ?)`, []any{"legacy-route", "legacy.example.test", "http://127.0.0.1:3000", "desktop-token", now, now}},
 		{`INSERT INTO routes VALUES (?, ?, ?, ?, 1, ?, ?)`, []any{"agent-route", "agent.example.test", "http://127.0.0.1:8080", "agent-token", now, now}},
 		{`INSERT INTO desktop_devices VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, []any{"device-key", "mac-lan", "Mac LAN", "user-1", "one@example.test", "Owner", "secret", "desktop-token", "legacy-route", "desk.m.example.test", "http://127.0.0.1:7082", now, now}},
-		{`INSERT INTO desktop_webapps VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?)`, []any{"webapp", "device-key", "notes", "webapp-route", "notes.wa.example.test", "http://127.0.0.1:5173", now, now}},
+		{`INSERT INTO desktop_webapps VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?)`, []any{"webapp", "device-key", "notes", "webapp-route", "abcdefghijk23-wa.example.test", "http://127.0.0.1:5173", now, now}},
 		{`INSERT INTO agent_sessions VALUES (?, ?, ?, ?, NULL)`, []any{"desktop-session", "desktop-token", "127.0.0.1", now}},
 		{`INSERT INTO agent_sessions VALUES (?, ?, ?, ?, NULL)`, []any{"agent-session", "agent-token", "127.0.0.2", now}},
 		{`INSERT INTO traffic_events (object_type, public_host, token_id, session_id, kind, bytes_in, bytes_out, occurred_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, []any{"desktop", "desk.m.example.test", "desktop-token", "desktop-session", "websocket", 3, 5, now}},
@@ -152,7 +152,7 @@ func TestMigrateDesktopIdentityPreservesAgentAndDesktopData(t *testing.T) {
 	if err != nil || len(agentSessions) != 1 || agentSessions[0].ID != "agent-session" {
 		t.Fatalf("agent sessions = %+v, %v", agentSessions, err)
 	}
-	webappRoute, err := db.GetActiveDesktopWebAppRouteByHost(context.Background(), "notes.wa.example.test")
+	webappRoute, err := db.GetActiveDesktopWebAppRouteByHost(context.Background(), "abcdefghijk23-wa.example.test")
 	if err != nil || webappRoute.Route.TokenID != "" || !webappRoute.Route.Active {
 		t.Fatalf("webapp route = %+v, %v", webappRoute, err)
 	}

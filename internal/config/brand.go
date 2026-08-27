@@ -109,17 +109,18 @@ func (cfg *BrandConfig) validate() error {
 		&cfg.Domains.WebAppPublicBase,
 	}
 	names := []string{"PUBLIC_BASE_DOMAIN", "DESKTOP_PUBLIC_BASE_DOMAIN", "WEBAPP_PUBLIC_BASE_DOMAIN"}
-	seen := make(map[string]struct{}, len(domains))
 	for i, domain := range domains {
 		normalized, err := validateHostname(names[i], *domain)
 		if err != nil {
 			return err
 		}
-		if _, exists := seen[normalized]; exists {
-			return fmt.Errorf("the three domains must be different")
-		}
-		seen[normalized] = struct{}{}
 		*domain = normalized
+	}
+	if cfg.Domains.PublicBase == cfg.Domains.DesktopPublicBase {
+		return fmt.Errorf("PUBLIC_BASE_DOMAIN and DESKTOP_PUBLIC_BASE_DOMAIN must be different")
+	}
+	if cfg.Domains.DesktopPublicBase == cfg.Domains.WebAppPublicBase {
+		return fmt.Errorf("DESKTOP_PUBLIC_BASE_DOMAIN and WEBAPP_PUBLIC_BASE_DOMAIN must be different")
 	}
 
 	if cfg.Endpoints.RelayPublicURL == "" {

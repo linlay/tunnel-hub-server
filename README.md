@@ -15,13 +15,13 @@
 
 - `hub.example.test`: 管理前端、`/api/admin`、`/api/desktop`、`/api/components` 和 `/tunnel`；不提供附件业务 API。
 - `*.m.example.test`: 普通设备 Host 打开 Desktop public mini site；`<device>-<frontendPort>.m.example.test` 的全部请求，以及普通设备 Host 的 WebSocket upgrade、`POST /api/upload` 和 `GET /api/resource` 请求进入 Relay。
-- `*.wa.example.test`: Desktop WebApp 反向代理入口，支持 HTTP 和 WebSocket。
+- `*-wa.example.test`: Desktop WebApp 反向代理入口，支持 HTTP 和 WebSocket，并由 `*.example.test` 单层泛域名覆盖。
 - `share.example.test`: 对话分享的公开只读 origin；边缘网关将 `/share/*` 和 `/assets/conversation-export/*` 转发到 Relay。前者返回已存储的轻量 HTML，后者返回 WebClient 构建的内容寻址显示资源。
 
 WebApp 有两条独立链路：
 
 - 手机配对访问使用 `https://<device>-<frontendPort>.m.example.test/`，不创建数据库 WebApp route。首次导航携带配对 `app` token，Relay 换成 HttpOnly Cookie 并重定向到无 token 地址；每个请求仍由 Desktop 校验 token scope、device id 和运行中的 WebApp 端口。
-- 用户主动公开分享使用 `*.wa.example.test`。该路由仅由 Desktop 的“一键发布”注册和启停，保持匿名 URL 分享语义。
+- 用户主动公开分享使用 `*-wa.example.test`。该路由仅由 Desktop 的“一键发布”注册和启停，保持匿名 URL 分享语义。
 
 ## 2. 快速开始
 
@@ -94,11 +94,11 @@ Relay 和 `tunnel-hub-public` 都在进程或容器启动时读取环境变量�
 | `PUBLIC_SITE_TITLE` | 是 | Public 页面运行时标题；Nginx 容器缺少该值时拒绝启动。 |
 | `PUBLIC_BASE_DOMAIN` | 是 | Tunnel API/管理入口 hostname。 |
 | `DESKTOP_PUBLIC_BASE_DOMAIN` | 是 | Desktop public wildcard 根 hostname。 |
-| `WEBAPP_PUBLIC_BASE_DOMAIN` | 是 | WebApp wildcard 根 hostname。 |
+| `WEBAPP_PUBLIC_BASE_DOMAIN` | 是 | WebApp 单层 wildcard 根 hostname；随机 Host 生成格式为 `<id>-wa.<该值>`。可与 `PUBLIC_BASE_DOMAIN` 相同，但必须与 `DESKTOP_PUBLIC_BASE_DOMAIN` 不同。 |
 | `RELAY_PUBLIC_URL` | 是 | Relay WebSocket URL；非 Loopback 地址必须使用 `wss` 和 `/tunnel`。 |
 | `SHARE_PUBLIC_BASE_URL` | 是 | 公开分享 origin；非 Loopback 地址必须使用 HTTPS，本地 Loopback 可使用 HTTP。 |
 
-三个 domain 只接受互不相同的 hostname，不接受 scheme、端口、路径、通配符或 IP。Relay 会严格校验全部值，缺失或非法时在监听端口前失败。
+三个 domain 都不接受 scheme、端口、路径、通配符或 IP。`PUBLIC_BASE_DOMAIN` 可与 `WEBAPP_PUBLIC_BASE_DOMAIN` 相同；Desktop public 根域必须与另外两个不同。Relay 会严格校验全部值，缺失或非法时在监听端口前失败。
 
 HTTPS 下 mobile session Cookie 为 `__Host-<BRAND_ID>_mobile_session`，本地 HTTP 下为 `<BRAND_ID>_mobile_session`。
 
@@ -190,7 +190,7 @@ docker compose up -d --build
 - `hub.example.test/`: 转发到 website 容器。
 - `hub.example.test/api/admin`, `/api/desktop`, `/api/components`, `/tunnel`: 转发到 Relay；`/api/upload`、`/api/resource` 和旧 `/api/download` 明确返回 404。
 - `*.m.example.test`: `<device>-<frontendPort>.m.example.test` 的全部路径，以及普通设备 Host 的 WebSocket upgrade、`POST /api/upload` 和 `GET /api/resource` 转发到 Relay；普通 `<device>.m.example.test` HTTP 转发到 public Desktop site。
-- `*.wa.example.test`: 直接转发到 Relay。
+- `*-wa.example.test`: 由 `*.example.test` 通配符入口直接转发到 Relay。
 - `share.example.test/share/*` 由公开边缘网关直接转发到 Relay。Relay 查询 SQLite 后返回 HTML；`/assets/conversation-export/*` 在分享 origin 和 Tunnel API origin 都返回编入 Relay 的不可变 JS/CSS/font 资产，供线上分享、落盘导出和本地 loopback 环境复用。HTML 资源 origin 由 Desktop Worker 按当前 Tunnel 配置注入，不绑定固定域名。
 
 Tunnel 端模板在 `deploy/nginx/tunnel-hub.conf.template` 和 `deploy/caddy/Caddyfile.template`，其中包含分享 origin 的 `/share/*`，以及分享/Tunnel API 两个 origin 的 `/assets/conversation-export/*` 直连 Relay 规则。上线前必须替换全部 `{{...}}` 占位符；分享关闭时删除分享 Host block。
@@ -203,6 +203,8 @@ Tunnel 端模板在 `deploy/nginx/tunnel-hub.conf.template` 和 `deploy/caddy/Ca
 | `{{SHARE_HOST}}` | `SHARE_PUBLIC_BASE_URL` 的 hostname |
 | `{{DESKTOP_PUBLIC_BASE_REGEX}}` | 转义正则元字符后的 `DESKTOP_PUBLIC_BASE_DOMAIN` |
 | `{{ACME_EMAIL}}`、`{{*_CERTIFICATE}}`、`{{*_CERTIFICATE_KEY}}` | 部署环境的 ACME 联系邮箱和证书绝对路径 |
+
+生产 WebApp 入口使用同时覆盖 `WEBAPP_PUBLIC_BASE_DOMAIN` 根域及其单层 wildcard 的证书，不需要二级 wildcard 证书。
 
 ## 5. 运维
 

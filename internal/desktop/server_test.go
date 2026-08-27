@@ -99,7 +99,7 @@ func TestRegisterDesktopDeviceAcceptsSSOJWT(t *testing.T) {
 	server, db := newDesktopTestServerWithConfig(t, config.RelayConfig{
 		PublicBaseDomain:        "hub.example.test",
 		DesktopPublicBaseDomain: "m.example.test",
-		WebAppPublicBaseDomain:  "wa.example.test",
+		WebAppPublicBaseDomain:  "example.test",
 		SSOJWTIssuer:            "https://official.example.test",
 		SSOJWTPublicKeyPEM:      publicKeyPEM,
 		SSOJWTAudience:          "tunnel-hub-server",
@@ -158,7 +158,7 @@ func TestRegisterDesktopDeviceAcceptsRelaxedSSOJWT(t *testing.T) {
 	server, _ := newDesktopTestServerWithConfig(t, config.RelayConfig{
 		PublicBaseDomain:        "hub.example.test",
 		DesktopPublicBaseDomain: "m.example.test",
-		WebAppPublicBaseDomain:  "wa.example.test",
+		WebAppPublicBaseDomain:  "example.test",
 		SSOJWTIssuer:            "https://official.example.test",
 		SSOJWTPublicKeyPEM:      publicKeyPEM,
 		SSOJWTAudience:          "tunnel",
@@ -295,7 +295,7 @@ func TestDesktopPublicHostIgnoresLegacyMRoute(t *testing.T) {
 		t.Fatalf("create legacy desktop route: %v", err)
 	}
 
-	relay := proxy.NewRelay(db, proxy.NewManager(), nil, "example", "m.example.test", "wa.example.test", 64<<20)
+	relay := proxy.NewRelay(db, proxy.NewManager(), nil, "example", "m.example.test", "example.test", 64<<20)
 	publicServer := httptest.NewServer(http.HandlerFunc(relay.HandlePublic))
 	defer publicServer.Close()
 
@@ -318,7 +318,7 @@ func TestDesktopPublicWebSocketOfflineReturnsGatewayError(t *testing.T) {
 	server, db := newDesktopTestServer(t)
 	registration := decodeRegisterResponse(t, performRegister(t, server, desktopRegisterBody("mac-mini", "", false), defaultDesktopJWT).Body)
 
-	relay := proxy.NewRelay(db, proxy.NewManager(), nil, "example", "m.example.test", "wa.example.test", 64<<20)
+	relay := proxy.NewRelay(db, proxy.NewManager(), nil, "example", "m.example.test", "example.test", 64<<20)
 	publicServer := httptest.NewServer(http.HandlerFunc(relay.HandlePublic))
 	defer publicServer.Close()
 
@@ -1306,7 +1306,7 @@ func desktopTestConfig(t *testing.T) config.RelayConfig {
 	return config.RelayConfig{
 		PublicBaseDomain:        "hub.example.test",
 		DesktopPublicBaseDomain: "m.example.test",
-		WebAppPublicBaseDomain:  "wa.example.test",
+		WebAppPublicBaseDomain:  "example.test",
 		SSOJWTIssuer:            "https://official.example.test",
 		SSOJWTPublicKeyPEM:      publicKeyPEM,
 		SSOJWTAudience:          "tunnel-hub-server",
@@ -1320,7 +1320,17 @@ func assertDesktopPublicHost(t *testing.T, publicHost, deviceID string) {
 
 func assertWebAppPublicHost(t *testing.T, publicHost string) {
 	t.Helper()
-	assertGeneratedPublicHost(t, publicHost, "wa.example.test", "")
+	suffix := "-wa.example.test"
+	if !strings.HasSuffix(publicHost, suffix) {
+		t.Fatalf("publicHost = %q, want *%s", publicHost, suffix)
+	}
+	label := strings.TrimSuffix(publicHost, suffix)
+	if len(label) != 13 {
+		t.Fatalf("publicHost label = %q, want 13 characters", label)
+	}
+	if !isLowercaseBase32Label(label) {
+		t.Fatalf("publicHost label = %q, want lowercase base32 [a-z2-7]+", label)
+	}
 }
 
 func assertGeneratedPublicHost(t *testing.T, publicHost, baseDomain, forbiddenFragment string) {

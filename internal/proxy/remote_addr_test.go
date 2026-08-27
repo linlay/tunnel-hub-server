@@ -59,7 +59,7 @@ func TestRelayClientRemoteAddr(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			relay := NewRelay(nil, nil, nil, "example", "m.example.test", "wa.example.test", 0)
+			relay := NewRelay(nil, nil, nil, "example", "m.example.test", "example.test", 0)
 			relay.SetTrustedProxyCIDRs(tc.trustedCIDRs)
 			req := &http.Request{
 				RemoteAddr: tc.remoteAddr,

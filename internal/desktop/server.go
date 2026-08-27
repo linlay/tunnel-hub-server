@@ -311,7 +311,7 @@ func (s *Server) randomWebAppPublicHost() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return label + "." + s.webAppPublicBaseDomain(), nil
+	return tunnel.BuildWebAppPublicHost(label, s.webAppPublicBaseDomain())
 }
 
 func (s *Server) baseDomain() string {

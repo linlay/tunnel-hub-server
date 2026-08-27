@@ -9,7 +9,7 @@ func setValidBrandEnv(t *testing.T) {
 	t.Setenv("PUBLIC_SITE_TITLE", "Example Desktop")
 	t.Setenv("PUBLIC_BASE_DOMAIN", "hub.example.test")
 	t.Setenv("DESKTOP_PUBLIC_BASE_DOMAIN", "m.example.test")
-	t.Setenv("WEBAPP_PUBLIC_BASE_DOMAIN", "wa.example.test")
+	t.Setenv("WEBAPP_PUBLIC_BASE_DOMAIN", "example.test")
 	t.Setenv("RELAY_PUBLIC_URL", "wss://hub.example.test/tunnel")
 	t.Setenv("SHARE_PUBLIC_BASE_URL", "https://share.example.test")
 }
@@ -57,7 +57,7 @@ func TestLoadRelayConfigUsesBrandEnvironment(t *testing.T) {
 	if cfg.RelayPublicURL != "wss://hub.example.test/tunnel" {
 		t.Fatalf("RelayPublicURL = %q", cfg.RelayPublicURL)
 	}
-	if cfg.DesktopPublicBaseDomain != "m.example.test" || cfg.WebAppPublicBaseDomain != "wa.example.test" {
+	if cfg.DesktopPublicBaseDomain != "m.example.test" || cfg.WebAppPublicBaseDomain != "example.test" {
 		t.Fatalf("brand domains were not loaded: %+v", cfg)
 	}
 }

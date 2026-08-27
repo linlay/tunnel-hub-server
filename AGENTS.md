@@ -38,7 +38,7 @@ Relay 入口在 `cmd/relay/main.go`，启动顺序是：
 - `*.m.example.test`: Desktop public Host。WebSocket upgrade 请求进入 Relay，向 Desktop tunnel stream 发送 `ns=d` / `desktop.websocket.open` 元数据；普通 HTTP 由宿主机反向代理转发到 `tunnel-hub-public`。
 - `*.m.example.test/api/upload`: Mobile 上传入口，只从请求 Host 确定 Desktop，内部发送 `ns=ap`, `type=/api/upload`；multipart 不允许携带 `publicHost`。
 - `*.m.example.test/api/resource`: Mobile 资源入口，内部发送 `ns=ap`, `type=/api/resource` 和 `{file,pushURL}`；Desktop 通过 ticket 保护的 `/api/push/{id}` 回推文件。
-- `*.wa.example.test`: Desktop WebApp public HTTP/WebSocket。Relay 通过 WebApp route 与所属 deviceKey 打开 Desktop stream，向 Desktop 发送 `ns=wa` 的 `http.request` 或 `websocket.connect` 元数据。
+- `*-wa.example.test`: Desktop WebApp public HTTP/WebSocket。Relay 通过 WebApp route 与所属 deviceKey 打开 Desktop stream，向 Desktop 发送 `ns=wa` 的 `http.request` 或 `websocket.connect` 元数据。
 - `share.example.test`: 对话分享只读站点。公开边缘网关将 `/share/{id}` 和 `/assets/conversation-export/*` 转发到 Relay；Tunnel API origin 也必须暴露相同资产路径，供动态 origin 的本地和落盘导出使用。普通分享以 SQLite 主键查询读取有效 HTML；一次性分享在普通查询未命中后以 `DELETE ... RETURNING` 原子取得并删除 HTML，并发只允许一个请求成功；两者都原字节返回。资产从编译期 `embed.FS` 返回 WebClient 内容寻址文件。
 
 ## 4. 目录结构
@@ -177,6 +177,6 @@ npm run dev
 - `.env`、SQLite 数据库、JWT key、真实 token、`configs/*.pem` 都不能提交。
 - 生产部署依赖反向代理正确转发 WebSocket upgrade；修改部署文档时要同时检查 wildcard Host 路由。
 - `*.m.example.test` 的 WebSocket upgrade 必须继续直达 Relay；普通 HTTP 在生产反向代理层应转到 `tunnel-hub-public`。如果普通 HTTP 到达 Relay，Relay 仍会返回 upgrade required。
-- `*.wa.example.test` 是 browser-facing WebApp 代理，不等同于 tester 中的 Desktop business namespace `ns=wa`。
+- `*-wa.example.test` 是 browser-facing WebApp 代理，不等同于 tester 中的 Desktop business namespace `ns=wa`。
 - `third_party/yamux` 是本地替换依赖，改动需要说明原因并跑完整隧道测试。
 - 如果环境限制导致无法运行验证命令，最终说明里必须明确列出未运行项和原因。

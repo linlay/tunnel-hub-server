@@ -64,6 +64,7 @@
 }
 
 # Public wildcard routes require DNS for *.{{DESKTOP_PUBLIC_BASE}} and *.{{WEBAPP_PUBLIC_BASE}}.
+# WebApp hosts use the single-label form <id>-wa.{{WEBAPP_PUBLIC_BASE}}.
 # Public ACME wildcard certificates usually require a DNS challenge provider.
 *.{{DESKTOP_PUBLIC_BASE}} {
 	@mobileWebApp host_regexp mobileWebApp ^[^.]+-[0-9]+\.{{DESKTOP_PUBLIC_BASE_REGEX}}$

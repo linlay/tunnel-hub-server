@@ -342,7 +342,7 @@ func TestConsoleAggregationEndpoints(t *testing.T) {
 		OwnerUserID: "42",
 		DeviceID:    "mac-mini",
 		Name:        "notes",
-		PublicHost:  "notes.wa.example.test",
+		PublicHost:  "abcdefghijk23-wa.example.test",
 		TargetURL:   "http://127.0.0.1:5173",
 		Active:      true,
 	})
@@ -426,11 +426,11 @@ func TestConsoleAggregationEndpoints(t *testing.T) {
 	if err := json.NewDecoder(webappsRec.Body).Decode(&webapps); err != nil {
 		t.Fatalf("decode webapps: %v", err)
 	}
-	if len(webapps) != 1 || webapps[0].PublicHost != "notes.wa.example.test" || !webapps[0].Online || webapps[0].Traffic.BytesIn != 111 || webapps[0].Route.ID != webapp.Route.ID {
+	if len(webapps) != 1 || webapps[0].PublicHost != "abcdefghijk23-wa.example.test" || !webapps[0].Online || webapps[0].Traffic.BytesIn != 111 || webapps[0].Route.ID != webapp.Route.ID {
 		t.Fatalf("unexpected webapps: %+v", webapps)
 	}
 
-	activityReq := authedAdminRequest(http.MethodGet, "/api/admin/activity?objectType=webapp&q=notes", "")
+	activityReq := authedAdminRequest(http.MethodGet, "/api/admin/activity?objectType=webapp&q=abcdefghijk23", "")
 	activityRec := httptest.NewRecorder()
 	server.ServeHTTP(activityRec, activityReq)
 	if activityRec.Code != http.StatusOK {

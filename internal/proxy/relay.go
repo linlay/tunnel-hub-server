@@ -276,7 +276,7 @@ func (r *Relay) HandlePublic(w http.ResponseWriter, req *http.Request) {
 		r.handleDesktopPublic(w, req)
 		return
 	}
-	if isHostUnderBaseDomain(req.Host, r.WebAppBaseDomain) {
+	if _, ok := tunnel.ParseWebAppPublicHost(req.Host, r.WebAppBaseDomain); ok {
 		webApp, err := r.DB.GetActiveDesktopWebAppRouteByHost(req.Context(), req.Host)
 		if errors.Is(err, store.ErrNotFound) {
 			http.NotFound(w, req)

@@ -31,7 +31,7 @@ type fakeUploadResult struct {
 }
 
 func TestRelayUploadRejectsMainHost(t *testing.T) {
-	relay := NewRelay(nil, NewManager(), nil, "example", "m.example.test", "wa.example.test", 64<<20)
+	relay := NewRelay(nil, NewManager(), nil, "example", "m.example.test", "example.test", 64<<20)
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/api/upload", nil)
 	req.Host = "hub.example.test"
@@ -44,7 +44,7 @@ func TestRelayUploadRejectsMainHost(t *testing.T) {
 func TestRelayUploadForwardsToDesktopAndServesPull(t *testing.T) {
 	db := openProxyTestDB(t)
 	manager := NewManager()
-	relay := NewRelay(db, manager, nil, "example", "m.example.test", "wa.example.test", 64<<20)
+	relay := NewRelay(db, manager, nil, "example", "m.example.test", "example.test", 64<<20)
 	identityToken := configureProxyDesktopIdentity(t, relay, "user_1")
 	server := newUploadRelayTestServer(t, relay)
 	defer server.Close()
@@ -120,7 +120,7 @@ func TestRelayUploadForwardsToDesktopAndServesPull(t *testing.T) {
 func TestRelayUploadRequiresFieldsAndDesktopOnline(t *testing.T) {
 	db := openProxyTestDB(t)
 	manager := NewManager()
-	relay := NewRelay(db, manager, nil, "example", "m.example.test", "wa.example.test", 64<<20)
+	relay := NewRelay(db, manager, nil, "example", "m.example.test", "example.test", 64<<20)
 	server := newUploadRelayTestServer(t, relay)
 	defer server.Close()
 	registration := registerUploadDesktop(t, db, "desk.m.example.test")
@@ -192,7 +192,7 @@ func TestRelayUploadRequiresFieldsAndDesktopOnline(t *testing.T) {
 }
 
 func TestRelayPullRejectsInvalidAndExpiredTickets(t *testing.T) {
-	relay := NewRelay(nil, NewManager(), nil, "example", "m.example.test", "wa.example.test", 64<<20)
+	relay := NewRelay(nil, NewManager(), nil, "example", "m.example.test", "example.test", 64<<20)
 	path := writePullFixture(t, "pull body")
 	relay.uploads.add(&pendingUpload{
 		ID:        "upload_ok",
@@ -236,7 +236,7 @@ func TestRelayPullRejectsInvalidAndExpiredTickets(t *testing.T) {
 func TestRelayUploadCleansPendingFileAfterDesktopError(t *testing.T) {
 	db := openProxyTestDB(t)
 	manager := NewManager()
-	relay := NewRelay(db, manager, nil, "example", "m.example.test", "wa.example.test", 64<<20)
+	relay := NewRelay(db, manager, nil, "example", "m.example.test", "example.test", 64<<20)
 	identityToken := configureProxyDesktopIdentity(t, relay, "user_1")
 	server := newUploadRelayTestServer(t, relay)
 	defer server.Close()

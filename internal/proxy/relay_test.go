@@ -25,12 +25,12 @@ func TestMobileWebAppSessionCookieNamePreservesCurrentBrandCompatibility(t *test
 }
 
 func TestNewRelayKeepsValidatedBrandRoutingIsolated(t *testing.T) {
-	alpha := NewRelay(nil, nil, nil, "alpha", "m.alpha.example.test", "wa.alpha.example.test", 1)
-	beta := NewRelay(nil, nil, nil, "beta", "m.beta.example.test", "wa.beta.example.test", 1)
-	if alpha.DesktopBaseDomain != "m.alpha.example.test" || alpha.WebAppBaseDomain != "wa.alpha.example.test" {
+	alpha := NewRelay(nil, nil, nil, "alpha", "m.alpha.example.test", "alpha.example.test", 1)
+	beta := NewRelay(nil, nil, nil, "beta", "m.beta.example.test", "beta.example.test", 1)
+	if alpha.DesktopBaseDomain != "m.alpha.example.test" || alpha.WebAppBaseDomain != "alpha.example.test" {
 		t.Fatalf("alpha domains = %q %q", alpha.DesktopBaseDomain, alpha.WebAppBaseDomain)
 	}
-	if beta.DesktopBaseDomain != "m.beta.example.test" || beta.WebAppBaseDomain != "wa.beta.example.test" {
+	if beta.DesktopBaseDomain != "m.beta.example.test" || beta.WebAppBaseDomain != "beta.example.test" {
 		t.Fatalf("beta domains = %q %q", beta.DesktopBaseDomain, beta.WebAppBaseDomain)
 	}
 	if alpha.mobileWebAppSessionCookieName() == beta.mobileWebAppSessionCookieName() {

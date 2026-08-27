@@ -29,7 +29,7 @@ type fakeResourceResult struct {
 func TestRelayResourceRequestsDesktopAndReturnsPushedFile(t *testing.T) {
 	db := openProxyTestDB(t)
 	manager := NewManager()
-	relay := NewRelay(db, manager, nil, "example", "m.example.test", "wa.example.test", 64<<20)
+	relay := NewRelay(db, manager, nil, "example", "m.example.test", "example.test", 64<<20)
 	identityToken := configureProxyDesktopIdentity(t, relay, "user_1")
 	server := newResourceRelayTestServer(t, relay)
 	defer server.Close()
@@ -100,7 +100,7 @@ func TestRelayResourceRequestsDesktopAndReturnsPushedFile(t *testing.T) {
 func TestRelayResourceEnforcesDesktopHostAuthAndSafeFile(t *testing.T) {
 	db := openProxyTestDB(t)
 	manager := NewManager()
-	relay := NewRelay(db, manager, nil, "example", "m.example.test", "wa.example.test", 64<<20)
+	relay := NewRelay(db, manager, nil, "example", "m.example.test", "example.test", 64<<20)
 	registration := registerUploadDesktop(t, db, "desk.m.example.test")
 
 	tests := []struct {
@@ -137,7 +137,7 @@ func TestRelayResourceEnforcesDesktopHostAuthAndSafeFile(t *testing.T) {
 func TestRelayResourcePropagatesDesktopTokenRejection(t *testing.T) {
 	db := openProxyTestDB(t)
 	manager := NewManager()
-	relay := NewRelay(db, manager, nil, "example", "m.example.test", "wa.example.test", 64<<20)
+	relay := NewRelay(db, manager, nil, "example", "m.example.test", "example.test", 64<<20)
 	identityToken := configureProxyDesktopIdentity(t, relay, "user_1")
 	server := newResourceRelayTestServer(t, relay)
 	defer server.Close()
@@ -162,7 +162,7 @@ func TestRelayResourcePropagatesDesktopTokenRejection(t *testing.T) {
 }
 
 func TestRelayPushValidatesTicketExpiryAndSizeWithoutFileNameHeader(t *testing.T) {
-	relay := NewRelay(nil, NewManager(), nil, "example", "m.example.test", "wa.example.test", 4)
+	relay := NewRelay(nil, NewManager(), nil, "example", "m.example.test", "example.test", 4)
 	relay.resources.add(&pendingResource{
 		ID: "resource_ok", Ticket: "ticket_ok", FileName: "note.txt",
 		ExpiresAt: time.Now().Add(time.Minute), Ready: make(chan struct{}),
@@ -212,7 +212,7 @@ func TestWaitResourceReadyReturnsContextError(t *testing.T) {
 func TestRelayResourceCleansPendingStateAfterDesktopError(t *testing.T) {
 	db := openProxyTestDB(t)
 	manager := NewManager()
-	relay := NewRelay(db, manager, nil, "example", "m.example.test", "wa.example.test", 64<<20)
+	relay := NewRelay(db, manager, nil, "example", "m.example.test", "example.test", 64<<20)
 	identityToken := configureProxyDesktopIdentity(t, relay, "user_1")
 	server := newResourceRelayTestServer(t, relay)
 	defer server.Close()
