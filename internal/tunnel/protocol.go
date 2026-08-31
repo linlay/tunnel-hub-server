@@ -17,6 +17,39 @@ import (
 	"github.com/gorilla/websocket"
 )
 
+var reservedDesktopDeviceIDs = map[string]struct{}{
+	"admin":  {},
+	"api":    {},
+	"www":    {},
+	"tunnel": {},
+	"relay":  {},
+}
+
+func ValidateDesktopDeviceID(deviceID string) error {
+	if deviceID == "" {
+		return errors.New("deviceId is required")
+	}
+	if deviceID != strings.ToLower(deviceID) {
+		return errors.New("deviceId must be lowercase")
+	}
+	if len(deviceID) > 63 {
+		return errors.New("deviceId must be 63 characters or fewer")
+	}
+	if strings.HasPrefix(deviceID, "-") || strings.HasSuffix(deviceID, "-") {
+		return errors.New("deviceId cannot start or end with hyphen")
+	}
+	if _, reserved := reservedDesktopDeviceIDs[deviceID]; reserved {
+		return errors.New("deviceId is reserved")
+	}
+	for _, char := range deviceID {
+		if (char >= 'a' && char <= 'z') || (char >= '0' && char <= '9') || char == '-' {
+			continue
+		}
+		return errors.New("deviceId must contain only lowercase letters, numbers, and hyphens")
+	}
+	return nil
+}
+
 const (
 	KindHTTP      = "http"
 	KindWebSocket = "websocket"
@@ -64,7 +97,7 @@ type RouteMetadata struct {
 }
 
 type StreamPayload struct {
-	AgentToken     string          `json:"agentToken,omitempty"`
+	IdentityToken  string          `json:"identityToken,omitempty"`
 	DeviceID       string          `json:"deviceId,omitempty"`
 	Client         string          `json:"client,omitempty"`
 	Capabilities   []string        `json:"capabilities,omitempty"`

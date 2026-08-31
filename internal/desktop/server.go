@@ -6,6 +6,7 @@ import (
 	"encoding/base32"
 	"encoding/json"
 	"errors"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/url"
@@ -15,6 +16,7 @@ import (
 	"example.invalid/tunnel-hub-server/internal/auth"
 	"example.invalid/tunnel-hub-server/internal/config"
 	"example.invalid/tunnel-hub-server/internal/store"
+	"example.invalid/tunnel-hub-server/internal/tunnel"
 )
 
 const registerPath = "/api/desktop/devices/register"
@@ -32,20 +34,12 @@ type Server struct {
 	recordConversationShareAccess func(context.Context, string, time.Time) error
 }
 
-func NewServer(db *store.DB, cfg config.RelayConfig, logger *slog.Logger) (*Server, error) {
+func NewServer(db *store.DB, cfg config.RelayConfig, logger *slog.Logger, ssoJWT *auth.SSOJWTVerifier) (*Server, error) {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	ssoJWT, err := auth.NewSSOJWTVerifier(auth.SSOJWTConfig{
-		Issuer:           cfg.SSOJWTIssuer,
-		Audience:         cfg.SSOJWTAudience,
-		UserIDClaim:      cfg.SSOJWTUserIDClaim,
-		AllowAnyAudience: cfg.SSOJWTAllowAnyAudience,
-		PublicKeyFile:    cfg.SSOJWTPublicKeyFile,
-		PublicKeyPEM:     cfg.SSOJWTPublicKeyPEM,
-	})
-	if err != nil {
-		return nil, err
+	if ssoJWT == nil {
+		return nil, errors.New("SSO JWT verifier is required")
 	}
 	return &Server{
 		DB:                            db,
@@ -125,17 +119,12 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 	}
 	payload.DeviceID = strings.TrimSpace(payload.DeviceID)
 	payload.DeviceName = strings.TrimSpace(payload.DeviceName)
-	payload.TargetURL = strings.TrimSpace(payload.TargetURL)
 	if err := payload.Validate(); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
 	result, err := s.registerDesktopDevice(r, principal, payload)
-	if errors.Is(err, store.ErrDesktopDeviceOwnerMismatch) {
-		writeError(w, http.StatusForbidden, "desktop device belongs to another user")
-		return
-	}
 	if errors.Is(err, store.ErrDesktopDeviceHostConflict) {
 		writeError(w, http.StatusConflict, "desktop public host already exists")
 		return
@@ -159,7 +148,7 @@ func (s *Server) handleRegisterWebApp(w http.ResponseWriter, r *http.Request, de
 		return
 	}
 	payload.TargetURL = strings.TrimSpace(payload.TargetURL)
-	if err := validateDeviceID(deviceID); err != nil {
+	if err := tunnel.ValidateDesktopDeviceID(deviceID); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -174,10 +163,6 @@ func (s *Server) handleRegisterWebApp(w http.ResponseWriter, r *http.Request, de
 	result, err := s.registerDesktopWebApp(r, principal, deviceID, name, payload)
 	if errors.Is(err, store.ErrNotFound) {
 		writeError(w, http.StatusNotFound, "desktop device not found")
-		return
-	}
-	if errors.Is(err, store.ErrDesktopDeviceOwnerMismatch) {
-		writeError(w, http.StatusForbidden, "desktop device belongs to another user")
 		return
 	}
 	if errors.Is(err, store.ErrDesktopDeviceHostConflict) {
@@ -200,15 +185,12 @@ func (s *Server) registerDesktopDevice(r *http.Request, principal auth.SSOJWTPri
 			return store.RegisterDesktopDeviceResult{}, err
 		}
 		result, err := s.DB.RegisterDesktopDevice(r.Context(), store.RegisterDesktopDeviceInput{
-			DeviceID:         payload.DeviceID,
-			DeviceName:       payload.DeviceName,
-			OwnerUserID:      principal.UserID,
-			OwnerEmail:       principal.Email,
-			OwnerName:        principal.Name,
-			PublicHost:       publicHost,
-			TargetURL:        payload.TargetURL,
-			RotateToken:      payload.RotateToken,
-			RotatePublicHost: payload.RotatePublicHost,
+			DeviceID:    payload.DeviceID,
+			DeviceName:  payload.DeviceName,
+			OwnerUserID: principal.UserID,
+			OwnerEmail:  principal.Email,
+			OwnerName:   principal.Name,
+			PublicHost:  publicHost,
 		})
 		if !errors.Is(err, store.ErrDesktopDeviceHostConflict) {
 			return result, err
@@ -279,9 +261,6 @@ func (s *Server) addRegistrationEvent(result store.RegisterDesktopDeviceResult) 
 	if result.Created {
 		eventType = "desktop_device.registered"
 		message = "Desktop device registered"
-	} else if result.Rotated {
-		eventType = "desktop_device.token_rotated"
-		message = "Desktop device token rotated"
 	}
 	if err := s.DB.AddEvent(context.Background(), eventType, message, result.Device.PublicHost); err != nil {
 		s.Logger.Error("add desktop device event", "error", err)
@@ -296,11 +275,6 @@ func (s *Server) registrationResponse(result store.RegisterDesktopDeviceResult) 
 		PublicURL:    "https://" + publicHost,
 		WebSocketURL: "wss://" + publicHost + "/ws",
 		RelayURL:     s.relayURL(),
-		TargetURL:    result.Device.TargetURL,
-		TokenID:      result.Token.ID,
-		AgentToken:   result.AgentToken,
-		Created:      result.Created,
-		Rotated:      result.Rotated,
 	}
 }
 
@@ -337,7 +311,7 @@ func (s *Server) randomWebAppPublicHost() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return label + "." + s.webAppPublicBaseDomain(), nil
+	return tunnel.BuildWebAppPublicHost(label, s.webAppPublicBaseDomain())
 }
 
 func (s *Server) baseDomain() string {
@@ -367,21 +341,12 @@ func (s *Server) writeInternal(w http.ResponseWriter, message string, err error)
 }
 
 type registerPayload struct {
-	DeviceID         string `json:"deviceId"`
-	DeviceName       string `json:"deviceName"`
-	TargetURL        string `json:"targetUrl"`
-	RotateToken      bool   `json:"rotateToken"`
-	RotatePublicHost bool   `json:"rotatePublicHost"`
+	DeviceID   string `json:"deviceId"`
+	DeviceName string `json:"deviceName"`
 }
 
 func (p registerPayload) Validate() error {
-	if err := validateDeviceID(p.DeviceID); err != nil {
-		return err
-	}
-	if strings.TrimSpace(p.TargetURL) != "" {
-		return validateTargetURL(p.TargetURL)
-	}
-	return nil
+	return tunnel.ValidateDesktopDeviceID(p.DeviceID)
 }
 
 type registerResponse struct {
@@ -390,11 +355,6 @@ type registerResponse struct {
 	PublicURL    string `json:"publicUrl"`
 	WebSocketURL string `json:"webSocketUrl"`
 	RelayURL     string `json:"relayUrl"`
-	TargetURL    string `json:"targetUrl"`
-	TokenID      string `json:"tokenId"`
-	AgentToken   string `json:"agentToken,omitempty"`
-	Created      bool   `json:"created"`
-	Rotated      bool   `json:"rotated"`
 }
 
 type webAppPayload struct {
@@ -424,37 +384,6 @@ type webAppResponse struct {
 	TargetURL  string `json:"targetUrl"`
 	RouteID    string `json:"routeId"`
 	Active     bool   `json:"active"`
-}
-
-func validateDeviceID(deviceID string) error {
-	if deviceID == "" {
-		return errors.New("deviceId is required")
-	}
-	if deviceID != strings.ToLower(deviceID) {
-		return errors.New("deviceId must be lowercase")
-	}
-	if len(deviceID) > 63 {
-		return errors.New("deviceId must be 63 characters or fewer")
-	}
-	if strings.HasPrefix(deviceID, "-") || strings.HasSuffix(deviceID, "-") {
-		return errors.New("deviceId cannot start or end with hyphen")
-	}
-	if reservedDeviceIDs[deviceID] {
-		return errors.New("deviceId is reserved")
-	}
-	for _, char := range deviceID {
-		if char >= 97 && char <= 122 {
-			continue
-		}
-		if char >= 48 && char <= 57 {
-			continue
-		}
-		if char == 45 {
-			continue
-		}
-		return errors.New("deviceId must contain only lowercase letters, numbers, and hyphens")
-	}
-	return nil
 }
 
 func validateWebAppName(name string) error {
@@ -509,17 +438,17 @@ func tunnelHost(host string) string {
 	return host
 }
 
-var reservedDeviceIDs = map[string]bool{
-	"admin":  true,
-	"api":    true,
-	"www":    true,
-	"tunnel": true,
-	"relay":  true,
-}
-
 func decodeJSON(r *http.Request, value any) error {
 	defer r.Body.Close()
-	return json.NewDecoder(r.Body).Decode(value)
+	decoder := json.NewDecoder(io.LimitReader(r.Body, (1<<20)+1))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(value); err != nil {
+		return err
+	}
+	if decoder.Decode(&struct{}{}) != io.EOF {
+		return errors.New("request body must contain one JSON object")
+	}
+	return nil
 }
 
 func writeJSON(w http.ResponseWriter, status int, value any) {

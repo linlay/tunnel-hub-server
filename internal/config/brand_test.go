@@ -27,7 +27,8 @@ func TestLoadBrandConfigFromEnvValidation(t *testing.T) {
 		{name: "invalid id", key: "BRAND_ID", value: "Example", wantErr: "BRAND_ID"},
 		{name: "empty product", key: "PRODUCT_NAME", value: "", wantErr: "PRODUCT_NAME is required"},
 		{name: "empty title", key: "PUBLIC_SITE_TITLE", value: "", wantErr: "PUBLIC_SITE_TITLE is required"},
-		{name: "duplicate domains", key: "WEBAPP_PUBLIC_BASE_DOMAIN", value: "m.example.test", wantErr: "must be different"},
+		{name: "public and desktop domains overlap", key: "PUBLIC_BASE_DOMAIN", value: "m.example.test", wantErr: "must be different"},
+		{name: "desktop and webapp domains overlap", key: "WEBAPP_PUBLIC_BASE_DOMAIN", value: "m.example.test", wantErr: "must be different"},
 		{name: "wildcard domain", key: "PUBLIC_BASE_DOMAIN", value: "*.example.test", wantErr: "hostname"},
 		{name: "empty relay", key: "RELAY_PUBLIC_URL", value: "", wantErr: "RELAY_PUBLIC_URL is required"},
 		{name: "remote ws", key: "RELAY_PUBLIC_URL", value: "ws://hub.example.test/tunnel", wantErr: "must use wss"},
@@ -47,6 +48,18 @@ func TestLoadBrandConfigFromEnvValidation(t *testing.T) {
 				t.Fatalf("error = %v, want substring %q", err, test.wantErr)
 			}
 		})
+	}
+}
+
+func TestLoadBrandConfigFromEnvAllowsPublicAndWebAppBaseToMatch(t *testing.T) {
+	setValidBrandEnv(t)
+	t.Setenv("WEBAPP_PUBLIC_BASE_DOMAIN", "hub.example.test")
+	cfg, err := LoadBrandConfigFromEnv()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Domains.PublicBase != cfg.Domains.WebAppPublicBase {
+		t.Fatalf("domains = %+v", cfg.Domains)
 	}
 }
 

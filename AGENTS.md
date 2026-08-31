@@ -33,13 +33,13 @@ Relay 入口在 `cmd/relay/main.go`，启动顺序是：
 
 - `/api/admin/*`: 管理 API。支持本地 `tunnel_hub_session` cookie，也支持官网 SSO JWT；JWT 必须满足 `role=admin` 且 `scope` 包含 `tunnel`。
 - `/api/desktop/*`: Desktop 注册 API。只接受官网 SSO JWT，要求 `scope` 包含 `tunnel`。
-- `/tunnel`: Agent 或 Desktop 主动连入的 WebSocket。旧 Agent 使用 `Authorization: Bearer <token>`；Desktop 推荐首帧发送 `ns=d` 的 `tunnel.open`。
+- `/tunnel`: Agent 或 Desktop 主动连入的 WebSocket。普通 Agent 使用 `Authorization: Bearer <token>`；Desktop 不带 Authorization，并在首帧 `ns=d` 的 `tunnel.open` 中发送 `identityToken + deviceId`。
 - 普通服务 Host: 通过 `routes.public_host` 找 active route，打开对应 token 的 yamux stream，转发 HTTP/WebSocket 到 Agent 本地服务。
 - `*.m.example.test`: Desktop public Host。WebSocket upgrade 请求进入 Relay，向 Desktop tunnel stream 发送 `ns=d` / `desktop.websocket.open` 元数据；普通 HTTP 由宿主机反向代理转发到 `tunnel-hub-public`。
 - `*.m.example.test/api/upload`: Mobile 上传入口，只从请求 Host 确定 Desktop，内部发送 `ns=ap`, `type=/api/upload`；multipart 不允许携带 `publicHost`。
 - `*.m.example.test/api/resource`: Mobile 资源入口，内部发送 `ns=ap`, `type=/api/resource` 和 `{file,pushURL}`；Desktop 通过 ticket 保护的 `/api/push/{id}` 回推文件。
-- `*.wa.example.test`: Desktop WebApp public HTTP/WebSocket。Relay 通过 route 和 token 打开 Desktop stream，向 Desktop 发送 `ns=wa` 的 `http.request` 或 `websocket.connect` 元数据。
-- `share.example.test`: 对话分享只读站点。公开边缘网关将 `/share/{id}` 和 `/assets/conversation-export/*` 转发到 Relay；Tunnel API origin 也必须暴露相同资产路径，供动态 origin 的本地和落盘导出使用。前者以一次 SQLite 主键查询读取有效 HTML 并原字节返回，后者从编译期 `embed.FS` 返回 WebClient 内容寻址资产。
+- `*-wa.example.test`: Desktop WebApp public HTTP/WebSocket。Relay 通过 WebApp route 与所属 deviceKey 打开 Desktop stream，向 Desktop 发送 `ns=wa` 的 `http.request` 或 `websocket.connect` 元数据。
+- `share.example.test`: 对话分享只读站点。公开边缘网关将 `/share/{id}` 和 `/assets/conversation-export/*` 转发到 Relay；Tunnel API origin 也必须暴露相同资产路径，供动态 origin 的本地和落盘导出使用。普通分享以 SQLite 主键查询读取有效 HTML；一次性分享在普通查询未命中后以 `DELETE ... RETURNING` 原子取得并删除 HTML，并发只允许一个请求成功；两者都原字节返回。资产从编译期 `embed.FS` 返回 WebClient 内容寻址文件。
 
 ## 4. 目录结构
 
@@ -65,14 +65,15 @@ Relay 入口在 `cmd/relay/main.go`，启动顺序是：
 
 - `admin_users`: 本地管理用户。
 - `admin_sessions`: 本地管理登录 session，cookie 名为 `tunnel_hub_session`。
-- `tunnel_tokens`: Agent/Desktop tunnel token，仅存 hash 和 prefix。
+- `tunnel_tokens`: 普通 Agent tunnel token，仅存 hash 和 prefix。
 - `routes`: public Host 到 target/token 的映射。
-- `desktop_devices`: 用户维度的 Desktop 设备、随机 public Host、token 绑定。
+- `desktop_devices`: 用户维度的 Desktop 设备与随机 public Host。
 - `desktop_webapps`: Desktop 设备下的 WebApp，绑定独立随机 `*.wa` Host 和 route。
-- `agent_sessions`: Agent/Desktop tunnel 在线历史。
+- `agent_sessions`: 普通 Agent tunnel 在线历史。
+- `desktop_sessions`: Desktop tunnel 在线历史，以 deviceKey 关联设备。
 - `events`: 管理操作和系统事件。
 - `traffic_events`: Desktop/WebApp/普通 route 的访问统计。
-- `conversation_shares`: 用户创建的版本化不透明 HTML、会话关联、到期时间和撤销状态；公开 ID 必须不可预测，生成时使用 `share_` 前缀，但接收端只按 URL-safe 不透明 ID 校验。所有者身份来自官网 SSO JWT；Desktop main 是创建、列表、撤销的直接调用方，HTML 由 Desktop 常驻 Worker 使用 Agent Platform Snapshot 与 Agent WebClient 模板预先生成。Relay 只校验传输契约并原字节保存/返回，不解析 HTML，也不保留旧事件流双协议。
+- `conversation_shares`: 用户创建的版本化不透明 HTML、会话关联、绝对到期时间、撤销状态和一次性标记；公开 ID 必须不可预测，生成时使用 `share_` 前缀，但接收端只按 URL-safe 不透明 ID 校验。所有者身份来自官网 SSO JWT；Desktop main 是创建、列表、撤销的直接调用方，HTML 由 Desktop 常驻 Worker 使用 Agent Platform Snapshot 与 Agent WebClient 模板预先生成。Relay 只校验传输契约并原字节保存/返回，一次性记录在首次合法 GET 时原子删除；不解析 HTML，也不保留旧事件流双协议。
 - `conversation_share_access`: 每条分享最近一次成功公开访问时间；热更新与 HTML BLOB 分表，不保存访问日志或次数。
 
 注意：`admin_api_keys` 仍在 schema 中，但当前主 API 路径没有完整使用它，不要把它当成已上线能力写入 README。
@@ -123,12 +124,12 @@ Relay 入口在 `cmd/relay/main.go`，启动顺序是：
 - `FORBIDDEN_BRAND_TERMS` 只允许来自已忽略的 `.env` 或 CI 外部变量；提交前必须运行 fail-closed 的 `make verify-neutral`。
 - `.env.example` 的 SSO issuer 默认留空，并预留 public key file；需要调试 SSO 或 Desktop 注册时，必须同时配置 issuer 和有效 `configs/jwt-public.pem`。
 - Host 匹配必须统一经过 `internal/tunnel.NormalizeHost` 或等价逻辑，避免大小写、端口、尾点导致 route 绕过。
-- `proxy.Manager` 以 token 维护在线 Agent；同一 token 新连接会替换旧连接。新增功能时要考虑 token/session 的一对多和替换行为。
+- `proxy.Manager` 以 `{kind,id}` 维护在线连接：普通 Agent 使用 tokenId，Desktop 使用 deviceKey；同一 key 的新连接会原子替换旧连接。
 - HTTP 请求体当前在 Relay 侧完整缓冲，限制由 `MAX_REQUEST_BODY_BYTES` 控制。涉及大文件、流式上传或 backpressure 的改动要重点测试。
 - Desktop public Host 不使用 `deviceId`，由随机 label 加 `domains.desktopPublicBase` 生成；WebApp Host 由随机 label 加 `domains.webAppPublicBase` 生成。
 - Desktop/platform auth token 由 Desktop 侧校验，Relay 只负责把 query token 或 `bearer.<token>` subprotocol 透传给 Desktop。
 - 附件 API 的 Desktop 身份只来自 `<desktop>.m.example.test` Host；不得从 body、query 或其他客户端字段接受 `publicHost` 覆盖。
-- 管理 token 手动创建当前禁用；Desktop 注册会创建/轮换 tunnel token。
+- 管理 token 手动创建当前禁用；Desktop 注册不创建 tunnel token、device secret 或轮换凭据。
 - 对话显示资产必须由 Agent WebClient 同一次构建同步，路径中的 64 位 hash 是不可变集合身份；handler 只接受白名单路径并返回长期 immutable、CORS/CORP 与 `nosniff` 响应头。永久分享存在时不得清理历史集合。
 - Go 改动提交前运行 `gofmt -w` 和相关 `go test`。
 - React/Vite 改动同时运行 `tunnel-hub-public` 的 `npm test` 和 `npm run build`。Public 镜像构建不得注入运行时标题；容器启动时必须通过 `PUBLIC_SITE_TITLE` 生成纯文本 runtime 配置。
@@ -176,6 +177,6 @@ npm run dev
 - `.env`、SQLite 数据库、JWT key、真实 token、`configs/*.pem` 都不能提交。
 - 生产部署依赖反向代理正确转发 WebSocket upgrade；修改部署文档时要同时检查 wildcard Host 路由。
 - `*.m.example.test` 的 WebSocket upgrade 必须继续直达 Relay；普通 HTTP 在生产反向代理层应转到 `tunnel-hub-public`。如果普通 HTTP 到达 Relay，Relay 仍会返回 upgrade required。
-- `*.wa.example.test` 是 browser-facing WebApp 代理，不等同于 tester 中的 Desktop business namespace `ns=wa`。
+- `*-wa.example.test` 是 browser-facing WebApp 代理，不等同于 tester 中的 Desktop business namespace `ns=wa`。
 - `third_party/yamux` 是本地替换依赖，改动需要说明原因并跑完整隧道测试。
 - 如果环境限制导致无法运行验证命令，最终说明里必须明确列出未运行项和原因。

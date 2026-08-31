@@ -28,20 +28,12 @@ type Server struct {
 	ssoJWT  *auth.SSOJWTVerifier
 }
 
-func NewServer(db *store.DB, manager *proxy.Manager, cfg config.RelayConfig, logger *slog.Logger) (*Server, error) {
+func NewServer(db *store.DB, manager *proxy.Manager, cfg config.RelayConfig, logger *slog.Logger, ssoJWT *auth.SSOJWTVerifier) (*Server, error) {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	ssoJWT, err := auth.NewSSOJWTVerifier(auth.SSOJWTConfig{
-		Issuer:           cfg.SSOJWTIssuer,
-		Audience:         cfg.SSOJWTAudience,
-		UserIDClaim:      cfg.SSOJWTUserIDClaim,
-		AllowAnyAudience: cfg.SSOJWTAllowAnyAudience,
-		PublicKeyFile:    cfg.SSOJWTPublicKeyFile,
-		PublicKeyPEM:     cfg.SSOJWTPublicKeyPEM,
-	})
-	if err != nil {
-		return nil, err
+	if ssoJWT == nil {
+		return nil, errors.New("SSO JWT verifier is required")
 	}
 	return &Server{DB: db, Manager: manager, Config: cfg, Logger: logger, ssoJWT: ssoJWT}, nil
 }
@@ -407,7 +399,7 @@ func (s *Server) handleOverview(w http.ResponseWriter, r *http.Request) {
 		s.writeInternal(w, "list desktop webapps", err)
 		return
 	}
-	sessions, err := s.DB.ListAgentSessions(r.Context(), 500)
+	sessions, err := s.DB.ListDesktopSessions(r.Context(), 500)
 	if err != nil {
 		s.writeInternal(w, "list agent sessions", err)
 		return
@@ -424,18 +416,21 @@ func (s *Server) handleOverview(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	tokenToDevice := desktopIdentityByToken(devices)
 	var recentAt *time.Time
 	recentIdentity := ""
 	recentDevice := ""
 	if len(sessions) > 0 {
 		recentAt = &sessions[0].ConnectedAt
-		if device, ok := tokenToDevice[sessions[0].TokenID]; ok {
+		for _, device := range devices {
+			if device.DeviceKey != sessions[0].DeviceKey {
+				continue
+			}
 			recentIdentity = desktopIdentity(device)
 			recentDevice = device.DeviceName
 			if recentDevice == "" {
 				recentDevice = device.DeviceID
 			}
+			break
 		}
 	}
 	activeWebApps := 0
@@ -447,7 +442,7 @@ func (s *Server) handleOverview(w http.ResponseWriter, r *http.Request) {
 	metrics := s.Manager.Metrics()
 	writeJSON(w, http.StatusOK, overviewResponse{
 		Range:                  trafficRange,
-		DesktopConnectionCount: metrics.ActiveAgentCount,
+		DesktopConnectionCount: metrics.ActiveDesktopCount,
 		WebAppCount:            len(webApps),
 		TotalTrafficBytes:      totals.BytesIn + totals.BytesOut,
 		RecentConnectionAt:     recentAt,
@@ -455,7 +450,7 @@ func (s *Server) handleOverview(w http.ResponseWriter, r *http.Request) {
 		RecentDevice:           recentDevice,
 		Resources: overviewResourceSummary{
 			TotalDesktops:  len(devices),
-			OnlineDesktops: metrics.ActiveAgentCount,
+			OnlineDesktops: metrics.ActiveDesktopCount,
 			TotalWebApps:   len(webApps),
 			ActiveWebApps:  activeWebApps,
 			ActiveStreams:  metrics.ActiveStreams,
@@ -471,39 +466,32 @@ func (s *Server) handleDesktops(w http.ResponseWriter, r *http.Request) {
 		s.writeInternal(w, "list desktop devices", err)
 		return
 	}
-	tokens, err := s.DB.ListTokens(r.Context())
-	if err != nil {
-		s.writeInternal(w, "list tokens for desktops", err)
-		return
-	}
 	webApps, err := s.DB.ListDesktopWebApps(r.Context())
 	if err != nil {
 		s.writeInternal(w, "list desktop webapps", err)
 		return
 	}
-	sessions, err := s.DB.ListAgentSessions(r.Context(), 500)
+	sessions, err := s.DB.ListDesktopSessions(r.Context(), 500)
 	if err != nil {
 		s.writeInternal(w, "list desktop sessions", err)
 		return
 	}
-	statsByToken, err := s.DB.TrafficStatsByToken(r.Context())
+	statsByDevice, err := s.DB.TrafficStatsByDevice(r.Context())
 	if err != nil {
 		s.writeInternal(w, "desktop traffic stats", err)
 		return
 	}
 
-	activeByToken := make(map[string]proxy.ActiveAgentMetric)
-	for _, active := range s.Manager.ActiveAgents() {
-		activeByToken[active.TokenID] = active
+	activeByDevice := make(map[string]proxy.ActiveTunnelMetric)
+	for _, active := range s.Manager.ActiveTunnels() {
+		if active.Kind == proxy.ConnectionKindDesktop {
+			activeByDevice[active.ConnectionID] = active
+		}
 	}
-	tokenByID := make(map[string]store.TunnelToken)
-	for _, token := range tokens {
-		tokenByID[token.ID] = token
-	}
-	lastSessionByToken := make(map[string]store.AgentSession)
+	lastSessionByDevice := make(map[string]store.DesktopSession)
 	for _, session := range sessions {
-		if _, ok := lastSessionByToken[session.TokenID]; !ok {
-			lastSessionByToken[session.TokenID] = session
+		if _, ok := lastSessionByDevice[session.DeviceKey]; !ok {
+			lastSessionByDevice[session.DeviceKey] = session
 		}
 	}
 	webAppCountByDevice := make(map[string]int)
@@ -513,7 +501,6 @@ func (s *Server) handleDesktops(w http.ResponseWriter, r *http.Request) {
 
 	response := make([]desktopAdminResponse, 0, len(devices))
 	for _, device := range devices {
-		token := tokenByID[device.TokenID]
 		item := desktopAdminResponse{
 			DeviceID:    device.DeviceID,
 			DeviceName:  device.DeviceName,
@@ -522,21 +509,18 @@ func (s *Server) handleDesktops(w http.ResponseWriter, r *http.Request) {
 			OwnerName:   device.OwnerName,
 			PublicHost:  device.PublicHost,
 			PublicURL:   "https://" + device.PublicHost,
-			TokenID:     device.TokenID,
-			TokenName:   token.Name,
-			TokenActive: token.Active,
 			CreatedAt:   device.CreatedAt,
 			UpdatedAt:   device.UpdatedAt,
 			WebAppCount: webAppCountByDevice[device.DeviceKey],
-			Traffic:     statsByToken[device.TokenID],
+			Traffic:     statsByDevice[device.DeviceKey],
 		}
-		if active, ok := activeByToken[device.TokenID]; ok {
+		if active, ok := activeByDevice[device.DeviceKey]; ok {
 			item.Online = true
 			item.SessionID = active.SessionID
 			item.RemoteAddr = active.RemoteAddr
 			item.ConnectedAt = &active.ConnectedAt
 		}
-		if session, ok := lastSessionByToken[device.TokenID]; ok {
+		if session, ok := lastSessionByDevice[device.DeviceKey]; ok {
 			item.LastConnectedAt = &session.ConnectedAt
 		}
 		response = append(response, item)
@@ -574,9 +558,11 @@ func (s *Server) handleWebApps(w http.ResponseWriter, r *http.Request) {
 	for _, device := range devices {
 		deviceByKey[device.DeviceKey] = device
 	}
-	onlineTokenIDs := make(map[string]bool)
-	for _, active := range s.Manager.ActiveAgents() {
-		onlineTokenIDs[active.TokenID] = true
+	onlineDevices := make(map[string]bool)
+	for _, active := range s.Manager.ActiveTunnels() {
+		if active.Kind == proxy.ConnectionKindDesktop {
+			onlineDevices[active.ConnectionID] = true
+		}
 	}
 
 	response := make([]webAppAdminResponse, 0, len(webApps))
@@ -591,11 +577,10 @@ func (s *Server) handleWebApps(w http.ResponseWriter, r *http.Request) {
 			PublicHost:   webApp.PublicHost,
 			PublicURL:    "https://" + webApp.PublicHost,
 			TargetURL:    webApp.TargetURL,
-			TokenID:      route.TokenID,
 			DeviceID:     device.DeviceID,
 			DeviceName:   device.DeviceName,
 			Active:       webApp.Active,
-			Online:       onlineTokenIDs[route.TokenID],
+			Online:       onlineDevices[webApp.DeviceKey],
 			Route:        route,
 			RequestCount: stats.RequestCount,
 			LastAccessAt: stats.LastAt,
@@ -612,9 +597,14 @@ func (s *Server) handleActivity(w http.ResponseWriter, r *http.Request) {
 	objectType := normalizeActivityObjectType(r.URL.Query().Get("objectType"))
 	query := strings.TrimSpace(r.URL.Query().Get("q"))
 
-	sessions, err := s.DB.ListAgentSessions(r.Context(), 300)
+	agentSessions, err := s.DB.ListAgentSessions(r.Context(), 300)
 	if err != nil {
 		s.writeInternal(w, "list activity sessions", err)
+		return
+	}
+	desktopSessions, err := s.DB.ListDesktopSessions(r.Context(), 300)
+	if err != nil {
+		s.writeInternal(w, "list desktop activity sessions", err)
 		return
 	}
 	events, err := s.DB.ListEvents(r.Context(), 300)
@@ -627,12 +617,21 @@ func (s *Server) handleActivity(w http.ResponseWriter, r *http.Request) {
 		s.writeInternal(w, "list traffic activity", err)
 		return
 	}
+	devices, err := s.DB.ListDesktopDevices(r.Context())
+	if err != nil {
+		s.writeInternal(w, "list activity desktops", err)
+		return
+	}
+	deviceIDByKey := make(map[string]string, len(devices))
+	for _, device := range devices {
+		deviceIDByKey[device.DeviceKey] = device.DeviceID
+	}
 
-	items := make([]activityResponseItem, 0, len(sessions)+len(events)+len(trafficEvents))
-	for _, session := range sessions {
+	items := make([]activityResponseItem, 0, len(agentSessions)+len(desktopSessions)+len(events)+len(trafficEvents))
+	for _, session := range agentSessions {
 		items = appendActivityItem(items, activityResponseItem{
 			ID:         "session-connected-" + session.ID,
-			ObjectType: "desktop",
+			ObjectType: "agent",
 			Type:       "agent.connected",
 			Message:    "Agent connected",
 			Details:    session.RemoteAddr,
@@ -643,11 +642,35 @@ func (s *Server) handleActivity(w http.ResponseWriter, r *http.Request) {
 		if session.DisconnectedAt != nil {
 			items = appendActivityItem(items, activityResponseItem{
 				ID:         "session-disconnected-" + session.ID,
-				ObjectType: "desktop",
+				ObjectType: "agent",
 				Type:       "agent.disconnected",
 				Message:    "Agent disconnected",
 				Details:    session.RemoteAddr,
 				TokenID:    session.TokenID,
+				SessionID:  session.ID,
+				CreatedAt:  *session.DisconnectedAt,
+			}, objectType, query)
+		}
+	}
+	for _, session := range desktopSessions {
+		items = appendActivityItem(items, activityResponseItem{
+			ID:         "desktop-session-connected-" + session.ID,
+			ObjectType: "desktop",
+			Type:       "desktop.connected",
+			Message:    "Desktop connected",
+			Details:    session.RemoteAddr,
+			DeviceID:   session.DeviceID,
+			SessionID:  session.ID,
+			CreatedAt:  session.ConnectedAt,
+		}, objectType, query)
+		if session.DisconnectedAt != nil {
+			items = appendActivityItem(items, activityResponseItem{
+				ID:         "desktop-session-disconnected-" + session.ID,
+				ObjectType: "desktop",
+				Type:       "desktop.disconnected",
+				Message:    "Desktop disconnected",
+				Details:    session.RemoteAddr,
+				DeviceID:   session.DeviceID,
 				SessionID:  session.ID,
 				CreatedAt:  *session.DisconnectedAt,
 			}, objectType, query)
@@ -671,6 +694,7 @@ func (s *Server) handleActivity(w http.ResponseWriter, r *http.Request) {
 		if event.ObjectType == "desktop" {
 			message = "Desktop websocket"
 		}
+		deviceID := deviceIDByKey[event.DeviceID]
 		items = append(items, activityResponseItem{
 			ID:         "traffic-" + strconv.FormatInt(event.ID, 10),
 			ObjectType: event.ObjectType,
@@ -680,6 +704,7 @@ func (s *Server) handleActivity(w http.ResponseWriter, r *http.Request) {
 			PublicHost: event.PublicHost,
 			RouteID:    event.RouteID,
 			TokenID:    event.TokenID,
+			DeviceID:   deviceID,
 			SessionID:  event.SessionID,
 			StatusCode: event.StatusCode,
 			BytesIn:    event.BytesIn,
@@ -708,20 +733,26 @@ func (s *Server) handleSessionActions(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "not found")
 		return
 	}
-	session, err := s.DB.GetAgentSession(r.Context(), sessionID)
-	if errors.Is(err, store.ErrNotFound) {
-		writeError(w, http.StatusNotFound, "session not found")
-		return
-	}
-	if err != nil {
+	disconnected := false
+	if session, err := s.DB.GetAgentSession(r.Context(), sessionID); err == nil {
+		disconnected = session.DisconnectedAt != nil
+	} else if !errors.Is(err, store.ErrNotFound) {
 		s.writeInternal(w, "get agent session", err)
 		return
+	} else if session, err := s.DB.GetDesktopSession(r.Context(), sessionID); err == nil {
+		disconnected = session.DisconnectedAt != nil
+	} else if errors.Is(err, store.ErrNotFound) {
+		writeError(w, http.StatusNotFound, "session not found")
+		return
+	} else {
+		s.writeInternal(w, "get desktop session", err)
+		return
 	}
-	if session.DisconnectedAt != nil {
+	if disconnected {
 		writeError(w, http.StatusConflict, "session already disconnected")
 		return
 	}
-	if err := s.Manager.CloseSession(sessionID); errors.Is(err, proxy.ErrNoAgent) {
+	if err := s.Manager.CloseSession(sessionID); errors.Is(err, proxy.ErrNoTunnel) {
 		writeError(w, http.StatusConflict, "session is not active")
 		return
 	} else if err != nil {
@@ -754,9 +785,11 @@ func (s *Server) handleAgents(w http.ResponseWriter, r *http.Request) {
 		}
 		routesByToken[route.TokenID] = append(routesByToken[route.TokenID], route)
 	}
-	activeByToken := make(map[string]proxy.ActiveAgentMetric)
-	for _, agent := range s.Manager.ActiveAgents() {
-		activeByToken[agent.TokenID] = agent
+	activeByToken := make(map[string]proxy.ActiveTunnelMetric)
+	for _, agent := range s.Manager.ActiveTunnels() {
+		if agent.Kind == proxy.ConnectionKindAgent {
+			activeByToken[agent.ConnectionID] = agent
+		}
 	}
 	agents := make([]agentResponse, 0, len(tokens))
 	for _, token := range tokens {
@@ -781,12 +814,17 @@ func (s *Server) handleAgents(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleSessions(w http.ResponseWriter, r *http.Request) {
-	sessions, err := s.DB.ListAgentSessions(r.Context(), 100)
+	agents, err := s.DB.ListAgentSessions(r.Context(), 100)
 	if err != nil {
 		s.writeInternal(w, "list sessions", err)
 		return
 	}
-	writeJSON(w, http.StatusOK, sessions)
+	desktops, err := s.DB.ListDesktopSessions(r.Context(), 100)
+	if err != nil {
+		s.writeInternal(w, "list desktop sessions", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"agents": agents, "desktops": desktops})
 }
 
 func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
@@ -1016,9 +1054,6 @@ type desktopAdminResponse struct {
 	OwnerName       string             `json:"ownerName,omitempty"`
 	PublicHost      string             `json:"publicHost"`
 	PublicURL       string             `json:"publicUrl"`
-	TokenID         string             `json:"tokenId"`
-	TokenName       string             `json:"tokenName,omitempty"`
-	TokenActive     bool               `json:"tokenActive"`
 	Online          bool               `json:"online"`
 	SessionID       string             `json:"sessionId,omitempty"`
 	RemoteAddr      string             `json:"remoteAddr,omitempty"`
@@ -1037,7 +1072,6 @@ type webAppAdminResponse struct {
 	PublicHost   string             `json:"publicHost"`
 	PublicURL    string             `json:"publicUrl"`
 	TargetURL    string             `json:"targetUrl"`
-	TokenID      string             `json:"tokenId,omitempty"`
 	DeviceID     string             `json:"deviceId,omitempty"`
 	DeviceName   string             `json:"deviceName,omitempty"`
 	Active       bool               `json:"active"`
@@ -1063,6 +1097,7 @@ type activityResponseItem struct {
 	PublicHost string    `json:"publicHost,omitempty"`
 	RouteID    string    `json:"routeId,omitempty"`
 	TokenID    string    `json:"tokenId,omitempty"`
+	DeviceID   string    `json:"deviceId,omitempty"`
 	SessionID  string    `json:"sessionId,omitempty"`
 	StatusCode int       `json:"statusCode,omitempty"`
 	BytesIn    int64     `json:"bytesIn,omitempty"`
@@ -1232,19 +1267,11 @@ func normalizeTrafficRange(value string) string {
 
 func normalizeActivityObjectType(value string) string {
 	switch strings.TrimSpace(value) {
-	case "desktop", "webapp", "admin", "system":
+	case "agent", "desktop", "webapp", "admin", "system":
 		return strings.TrimSpace(value)
 	default:
 		return "all"
 	}
-}
-
-func desktopIdentityByToken(devices []store.DesktopDevice) map[string]store.DesktopDevice {
-	out := make(map[string]store.DesktopDevice, len(devices))
-	for _, device := range devices {
-		out[device.TokenID] = device
-	}
-	return out
 }
 
 func desktopIdentity(device store.DesktopDevice) string {
@@ -1253,7 +1280,7 @@ func desktopIdentity(device store.DesktopDevice) string {
 			return value
 		}
 	}
-	return device.TokenID
+	return device.PublicHost
 }
 
 func eventObjectType(eventType string) string {
@@ -1262,8 +1289,10 @@ func eventObjectType(eventType string) string {
 		return "admin"
 	case strings.HasPrefix(eventType, "route"), strings.HasPrefix(eventType, "service"), strings.HasPrefix(eventType, "desktop_webapp"):
 		return "webapp"
-	case strings.HasPrefix(eventType, "agent"), strings.HasPrefix(eventType, "desktop_device"), strings.HasPrefix(eventType, "token"):
+	case strings.HasPrefix(eventType, "desktop"):
 		return "desktop"
+	case strings.HasPrefix(eventType, "agent"), strings.HasPrefix(eventType, "token"):
+		return "agent"
 	default:
 		return "system"
 	}
@@ -1292,6 +1321,7 @@ func activityMatches(item activityResponseItem, query string) bool {
 		item.PublicHost,
 		item.RouteID,
 		item.TokenID,
+		item.DeviceID,
 		item.SessionID,
 		item.Error,
 	}, " "))

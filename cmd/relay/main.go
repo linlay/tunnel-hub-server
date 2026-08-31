@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"example.invalid/tunnel-hub-server/internal/admin"
+	"example.invalid/tunnel-hub-server/internal/auth"
 	"example.invalid/tunnel-hub-server/internal/config"
 	desktopapi "example.invalid/tunnel-hub-server/internal/desktop"
 	"example.invalid/tunnel-hub-server/internal/proxy"
@@ -47,14 +48,26 @@ func main() {
 		logger.Info("no local admin users configured; set ADMIN_USERNAME and ADMIN_PASSWORD to enable direct admin login")
 	}
 	manager := proxy.NewManager()
+	ssoJWT, err := auth.NewSSOJWTVerifier(auth.SSOJWTConfig{
+		Issuer:           cfg.SSOJWTIssuer,
+		Audience:         cfg.SSOJWTAudience,
+		UserIDClaim:      cfg.SSOJWTUserIDClaim,
+		AllowAnyAudience: cfg.SSOJWTAllowAnyAudience,
+		PublicKeyFile:    cfg.SSOJWTPublicKeyFile,
+		PublicKeyPEM:     cfg.SSOJWTPublicKeyPEM,
+	})
+	if err != nil {
+		log.Fatalf("configure SSO JWT verifier: %v", err)
+	}
 	relay := proxy.NewRelay(db, manager, logger, cfg.BrandID, cfg.DesktopPublicBaseDomain, cfg.WebAppPublicBaseDomain, cfg.MaxRequestBodyBytes)
+	relay.SetDesktopIdentityVerifier(ssoJWT, cfg.SSOJWTAllowMissingScope)
 	relay.SetMobileWebAppCookieSecure(cfg.MobileWebAppCookieSecure)
 	relay.SetTrustedProxyCIDRs(cfg.TrustedProxyCIDRs)
-	adminServer, err := admin.NewServer(db, manager, cfg, logger)
+	adminServer, err := admin.NewServer(db, manager, cfg, logger, ssoJWT)
 	if err != nil {
 		log.Fatalf("configure admin server: %v", err)
 	}
-	desktopServer, err := desktopapi.NewServer(db, cfg, logger)
+	desktopServer, err := desktopapi.NewServer(db, cfg, logger, ssoJWT)
 	if err != nil {
 		log.Fatalf("configure desktop server: %v", err)
 	}

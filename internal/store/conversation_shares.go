@@ -23,6 +23,7 @@ type ConversationShare struct {
 	CreatedAt       time.Time
 	ExpiresAt       *time.Time
 	LastAccessedAt  *time.Time
+	SingleUse       bool
 }
 
 func (db *DB) CreateConversationShare(
@@ -33,6 +34,7 @@ func (db *DB) CreateConversationShare(
 	htmlDocument []byte,
 	createdAt time.Time,
 	expiresAt *time.Time,
+	singleUse bool,
 ) (ConversationShare, error) {
 	ownerUserID = strings.TrimSpace(ownerUserID)
 	conversationID = strings.TrimSpace(conversationID)
@@ -56,6 +58,9 @@ func (db *DB) CreateConversationShare(
 	if expiresAt != nil && !expiresAt.After(createdAt) {
 		return ConversationShare{}, errors.New("expiration must be after creation")
 	}
+	if singleUse && expiresAt != nil {
+		return ConversationShare{}, errors.New("single-use share cannot have an expiration")
+	}
 	id, err := newConversationShareID()
 	if err != nil {
 		return ConversationShare{}, err
@@ -68,12 +73,14 @@ func (db *DB) CreateConversationShare(
 		HTMLDocument:    htmlDocument,
 		CreatedAt:       createdAt,
 		ExpiresAt:       expiresAt,
+		SingleUse:       singleUse,
 	}
 	_, err = db.sql.ExecContext(ctx, `
 		INSERT INTO conversation_shares (
-			id, owner_user_id, conversation_id, document_version, html_document, created_at, expires_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?)
-	`, share.ID, share.OwnerUserID, share.ConversationID, share.DocumentVersion, share.HTMLDocument, share.CreatedAt, share.ExpiresAt)
+			id, owner_user_id, conversation_id, document_version, html_document,
+			created_at, expires_at, single_use
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+	`, share.ID, share.OwnerUserID, share.ConversationID, share.DocumentVersion, share.HTMLDocument, share.CreatedAt, share.ExpiresAt, share.SingleUse)
 	return share, err
 }
 
@@ -94,7 +101,7 @@ func (db *DB) ListConversationShares(
 	rows, err := db.sql.QueryContext(ctx, `
 		SELECT shares.id, shares.owner_user_id, shares.conversation_id,
 		       shares.document_version, shares.created_at, shares.expires_at,
-		       access.last_accessed_at
+		       access.last_accessed_at, shares.single_use
 		FROM conversation_shares AS shares
 		LEFT JOIN conversation_share_access AS access ON access.share_id = shares.id
 		WHERE shares.owner_user_id = ?
@@ -119,6 +126,7 @@ func (db *DB) ListConversationShares(
 			&share.CreatedAt,
 			&share.ExpiresAt,
 			&share.LastAccessedAt,
+			&share.SingleUse,
 		); err != nil {
 			return nil, err
 		}
@@ -130,17 +138,35 @@ func (db *DB) ListConversationShares(
 	return shares, nil
 }
 
-func (db *DB) GetPublicConversationShare(ctx context.Context, id string, now time.Time) (ConversationShare, error) {
+func (db *DB) AcquirePublicConversationShare(ctx context.Context, id string, now time.Time) (ConversationShare, error) {
+	id = strings.TrimSpace(id)
+	now = now.UTC()
 	row := db.sql.QueryRowContext(ctx, `
-		SELECT id, document_version, html_document
+		SELECT id, document_version, html_document, single_use
 		FROM conversation_shares
 		WHERE id = ?
 		  AND document_version = ?
 		  AND revoked_at IS NULL
+		  AND single_use = 0
 		  AND (expires_at IS NULL OR expires_at > ?)
-	`, strings.TrimSpace(id), ConversationDocumentVersion, now.UTC())
+	`, id, ConversationDocumentVersion, now)
 	var share ConversationShare
-	if err := row.Scan(&share.ID, &share.DocumentVersion, &share.HTMLDocument); err != nil {
+	if err := row.Scan(&share.ID, &share.DocumentVersion, &share.HTMLDocument, &share.SingleUse); err == nil {
+		return share, nil
+	} else if !errors.Is(err, sql.ErrNoRows) {
+		return ConversationShare{}, err
+	}
+
+	row = db.sql.QueryRowContext(ctx, `
+		DELETE FROM conversation_shares
+		WHERE id = ?
+		  AND document_version = ?
+		  AND revoked_at IS NULL
+		  AND single_use = 1
+		  AND (expires_at IS NULL OR expires_at > ?)
+		RETURNING id, document_version, html_document, single_use
+	`, id, ConversationDocumentVersion, now)
+	if err := row.Scan(&share.ID, &share.DocumentVersion, &share.HTMLDocument, &share.SingleUse); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return ConversationShare{}, ErrNotFound
 		}

@@ -49,6 +49,7 @@ type conversationShareRecordResponse struct {
 	CreatedAt      string  `json:"createdAt"`
 	ExpiresAt      *string `json:"expiresAt"`
 	LastAccessedAt *string `json:"lastAccessedAt"`
+	SingleUse      bool    `json:"singleUse"`
 }
 
 type conversationShareListResponse struct {
@@ -60,7 +61,7 @@ func (s *Server) handleCreateConversationShare(w http.ResponseWriter, r *http.Re
 	if !ok {
 		return
 	}
-	expiration, err := parseConversationShareExpiration(r.Header.Get(conversationShareExpirationHeader))
+	policy, err := parseConversationShareExpiration(r.Header.Get(conversationShareExpirationHeader))
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
@@ -86,8 +87,8 @@ func (s *Server) handleCreateConversationShare(w http.ResponseWriter, r *http.Re
 	}
 	now := s.now().UTC()
 	var expiresAt *time.Time
-	if expiration != nil {
-		value := now.Add(*expiration)
+	if policy.duration > 0 {
+		value := now.Add(policy.duration)
 		expiresAt = &value
 	}
 	share, err := s.DB.CreateConversationShare(
@@ -98,6 +99,7 @@ func (s *Server) handleCreateConversationShare(w http.ResponseWriter, r *http.Re
 		html,
 		now,
 		expiresAt,
+		policy.singleUse,
 	)
 	if err != nil {
 		s.writeInternal(w, "create conversation share", err)
@@ -133,38 +135,32 @@ func (s *Server) handleListConversationShares(w http.ResponseWriter, r *http.Req
 	writeJSON(w, http.StatusOK, conversationShareListResponse{Items: items})
 }
 
-func parseConversationShareExpiration(value string) (*time.Duration, error) {
+type conversationShareExpirationPolicy struct {
+	duration  time.Duration
+	singleUse bool
+}
+
+func parseConversationShareExpiration(value string) (conversationShareExpirationPolicy, error) {
 	value = strings.TrimSpace(value)
 	if value == "" {
-		return nil, errors.New("conversation share expiration is required")
+		return conversationShareExpirationPolicy{}, errors.New("conversation share expiration is required")
 	}
-	var duration time.Duration
 	switch value {
-	case "5m":
-		duration = 5 * time.Minute
-	case "30m":
-		duration = 30 * time.Minute
-	case "1h":
-		duration = time.Hour
+	case "once":
+		return conversationShareExpirationPolicy{singleUse: true}, nil
 	case "3h":
-		duration = 3 * time.Hour
+		return conversationShareExpirationPolicy{duration: 3 * time.Hour}, nil
 	case "1d":
-		duration = 24 * time.Hour
-	case "5d":
-		duration = 5 * 24 * time.Hour
-	case "15d":
-		duration = 15 * 24 * time.Hour
+		return conversationShareExpirationPolicy{duration: 24 * time.Hour}, nil
+	case "7d":
+		return conversationShareExpirationPolicy{duration: 7 * 24 * time.Hour}, nil
 	case "30d":
-		duration = 30 * 24 * time.Hour
+		return conversationShareExpirationPolicy{duration: 30 * 24 * time.Hour}, nil
 	case "permanent":
-		return nil, nil
+		return conversationShareExpirationPolicy{}, nil
 	default:
-		return nil, errors.New("unsupported conversation share expiration")
+		return conversationShareExpirationPolicy{}, errors.New("unsupported conversation share expiration")
 	}
-	if duration <= 0 {
-		return nil, errors.New("conversation share expiration must be positive")
-	}
-	return &duration, nil
 }
 
 func formatConversationShareExpiration(value *time.Time) *string {
@@ -185,6 +181,7 @@ func conversationShareRecordResponseFromStore(
 		CreatedAt:      share.CreatedAt.Format("2006-01-02T15:04:05.000Z07:00"),
 		ExpiresAt:      formatConversationShareExpiration(share.ExpiresAt),
 		LastAccessedAt: formatConversationShareExpiration(share.LastAccessedAt),
+		SingleUse:      share.SingleUse,
 	}
 }
 
@@ -216,22 +213,24 @@ func (s *Server) handleGetPublicConversationSharePage(w http.ResponseWriter, r *
 		return
 	}
 	now := s.now().UTC()
-	share, err := s.DB.GetPublicConversationShare(r.Context(), id, now)
+	share, err := s.DB.AcquirePublicConversationShare(r.Context(), id, now)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			writePublicConversationShareError(w, http.StatusNotFound)
 			return
 		}
-		s.Logger.Error("get conversation share", "error", err)
+		s.Logger.Error("acquire conversation share", "error", err)
 		writePublicConversationShareError(w, http.StatusInternalServerError)
 		return
 	}
-	recordAccess := s.recordConversationShareAccess
-	if recordAccess == nil {
-		recordAccess = s.DB.RecordConversationShareAccess
-	}
-	if err := recordAccess(r.Context(), share.ID, now); err != nil {
-		s.Logger.Error("record conversation share access", "shareId", share.ID, "error", err)
+	if !share.SingleUse {
+		recordAccess := s.recordConversationShareAccess
+		if recordAccess == nil {
+			recordAccess = s.DB.RecordConversationShareAccess
+		}
+		if err := recordAccess(r.Context(), share.ID, now); err != nil {
+			s.Logger.Error("record conversation share access", "shareId", share.ID, "error", err)
+		}
 	}
 	setPublicConversationShareHeaders(w.Header())
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")

@@ -13,8 +13,8 @@ func TestManagerKeepsIndependentAgentsByToken(t *testing.T) {
 	sessionA, _ := newManagerTestSession(t)
 	sessionB, _ := newManagerTestSession(t)
 
-	manager.SetActive(&ActiveAgent{SessionID: "session_a", TokenID: "token_a", ConnectedAt: time.Now().UTC(), Yamux: sessionA})
-	manager.SetActive(&ActiveAgent{SessionID: "session_b", TokenID: "token_b", ConnectedAt: time.Now().UTC(), Yamux: sessionB})
+	manager.SetActive(&ActiveTunnel{SessionID: "session_a", Key: AgentConnectionKey("token_a"), ConnectedAt: time.Now().UTC(), Yamux: sessionA})
+	manager.SetActive(&ActiveTunnel{SessionID: "session_b", Key: AgentConnectionKey("token_b"), ConnectedAt: time.Now().UTC(), Yamux: sessionB})
 
 	metrics := manager.Metrics()
 	if metrics.ActiveAgentCount != 2 {
@@ -22,24 +22,25 @@ func TestManagerKeepsIndependentAgentsByToken(t *testing.T) {
 	}
 }
 
-func TestManagerReplacesOnlySameToken(t *testing.T) {
+func TestManagerReplacesOnlySameConnectionKey(t *testing.T) {
 	manager := NewManager()
 	oldSession, _ := newManagerTestSession(t)
 	newSession, _ := newManagerTestSession(t)
 
-	manager.SetActive(&ActiveAgent{SessionID: "session_old", TokenID: "token_a", ConnectedAt: time.Now().UTC(), Yamux: oldSession})
-	manager.SetActive(&ActiveAgent{SessionID: "session_new", TokenID: "token_a", ConnectedAt: time.Now().UTC(), Yamux: newSession})
+	manager.SetActive(&ActiveTunnel{SessionID: "session_old", Key: DesktopConnectionKey("device_a"), ConnectedAt: time.Now().UTC(), Yamux: oldSession})
+	manager.SetActive(&ActiveTunnel{SessionID: "session_new", Key: DesktopConnectionKey("device_a"), ConnectedAt: time.Now().UTC(), Yamux: newSession})
 
 	if !oldSession.IsClosed() {
 		t.Fatal("old session should be closed after same-token replacement")
 	}
 	manager.Clear("session_old")
 	metrics := manager.Metrics()
-	if metrics.ActiveAgentCount != 1 || metrics.TokenID != "token_a" || metrics.SessionID != "session_new" {
+	active, ok := manager.ActiveFor(DesktopConnectionKey("device_a"))
+	if metrics.ActiveDesktopCount != 1 || !ok || active.SessionID != "session_new" {
 		t.Fatalf("replacement should remain active: %+v", metrics)
 	}
 	manager.Clear("session_new")
-	if manager.Metrics().ActiveAgentCount != 0 {
+	if manager.Metrics().ActiveDesktopCount != 0 {
 		t.Fatal("new session should be cleared")
 	}
 }

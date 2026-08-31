@@ -31,7 +31,7 @@ type fakeUploadResult struct {
 }
 
 func TestRelayUploadRejectsMainHost(t *testing.T) {
-	relay := NewRelay(nil, NewManager(), nil, "example", "m.example.test", "wa.example.test", 64<<20)
+	relay := NewRelay(nil, NewManager(), nil, "example", "m.example.test", "example.test", 64<<20)
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/api/upload", nil)
 	req.Host = "hub.example.test"
@@ -44,7 +44,8 @@ func TestRelayUploadRejectsMainHost(t *testing.T) {
 func TestRelayUploadForwardsToDesktopAndServesPull(t *testing.T) {
 	db := openProxyTestDB(t)
 	manager := NewManager()
-	relay := NewRelay(db, manager, nil, "example", "m.example.test", "wa.example.test", 64<<20)
+	relay := NewRelay(db, manager, nil, "example", "m.example.test", "example.test", 64<<20)
+	identityToken := configureProxyDesktopIdentity(t, relay, "user_1")
 	server := newUploadRelayTestServer(t, relay)
 	defer server.Close()
 
@@ -52,8 +53,8 @@ func TestRelayUploadForwardsToDesktopAndServesPull(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	resultCh := make(chan fakeUploadResult, 1)
-	go runFakeUploadDesktop(t, ctx, server.URL, registration.AgentToken, resultCh, nil)
-	waitForAgentToken(t, manager, registration.Token.ID)
+	go runFakeUploadDesktop(t, ctx, server.URL, identityToken, resultCh, nil)
+	waitForDesktopConnection(t, manager, registration.Device.DeviceKey)
 
 	body, contentType := uploadMultipartBody(t, map[string]string{
 		"chatId":    "chat_upload",
@@ -119,7 +120,7 @@ func TestRelayUploadForwardsToDesktopAndServesPull(t *testing.T) {
 func TestRelayUploadRequiresFieldsAndDesktopOnline(t *testing.T) {
 	db := openProxyTestDB(t)
 	manager := NewManager()
-	relay := NewRelay(db, manager, nil, "example", "m.example.test", "wa.example.test", 64<<20)
+	relay := NewRelay(db, manager, nil, "example", "m.example.test", "example.test", 64<<20)
 	server := newUploadRelayTestServer(t, relay)
 	defer server.Close()
 	registration := registerUploadDesktop(t, db, "desk.m.example.test")
@@ -191,7 +192,7 @@ func TestRelayUploadRequiresFieldsAndDesktopOnline(t *testing.T) {
 }
 
 func TestRelayPullRejectsInvalidAndExpiredTickets(t *testing.T) {
-	relay := NewRelay(nil, NewManager(), nil, "example", "m.example.test", "wa.example.test", 64<<20)
+	relay := NewRelay(nil, NewManager(), nil, "example", "m.example.test", "example.test", 64<<20)
 	path := writePullFixture(t, "pull body")
 	relay.uploads.add(&pendingUpload{
 		ID:        "upload_ok",
@@ -235,17 +236,18 @@ func TestRelayPullRejectsInvalidAndExpiredTickets(t *testing.T) {
 func TestRelayUploadCleansPendingFileAfterDesktopError(t *testing.T) {
 	db := openProxyTestDB(t)
 	manager := NewManager()
-	relay := NewRelay(db, manager, nil, "example", "m.example.test", "wa.example.test", 64<<20)
+	relay := NewRelay(db, manager, nil, "example", "m.example.test", "example.test", 64<<20)
+	identityToken := configureProxyDesktopIdentity(t, relay, "user_1")
 	server := newUploadRelayTestServer(t, relay)
 	defer server.Close()
 
 	registration := registerUploadDesktop(t, db, "desk.m.example.test")
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go runFakeUploadDesktop(t, ctx, server.URL, registration.AgentToken, nil, func(stream *yamux.Stream, frame desktopBusinessRequest) {
+	go runFakeUploadDesktop(t, ctx, server.URL, identityToken, nil, func(stream *yamux.Stream, frame desktopBusinessRequest) {
 		_ = tunnel.WriteWSFrame(stream, websocket.TextMessage, []byte(`{"ns":"ap","frame":"error","type":"upload_failed","id":"`+frame.ID+`","code":502,"msg":"upload rejected"}`))
 	})
-	waitForAgentToken(t, manager, registration.Token.ID)
+	waitForDesktopConnection(t, manager, registration.Device.DeviceKey)
 
 	body, contentType := uploadMultipartBody(t, map[string]string{
 		"chatId": "chat_upload",
@@ -313,8 +315,9 @@ func runFakeUploadDesktop(t *testing.T, ctx context.Context, relayURL, token str
 	}
 	defer ws.Close()
 	open := tunnel.NewStreamRequest(tunnel.NamespaceDesktop, tunnel.FrameRequest, tunnel.TypeTunnelOpen, "tun_upload", &tunnel.StreamPayload{
-		AgentToken: token,
-		Client:     "example-desktop",
+		IdentityToken: token,
+		DeviceID:      "mac-mini",
+		Client:        "example-desktop",
 		Capabilities: []string{
 			"desktop.websocket",
 		},
