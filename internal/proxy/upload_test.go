@@ -42,6 +42,8 @@ func TestRelayUploadRejectsMainHost(t *testing.T) {
 }
 
 func TestRelayUploadForwardsToDesktopAndServesPull(t *testing.T) {
+	relayTempDir := t.TempDir()
+	t.Setenv("TMPDIR", relayTempDir)
 	db := openProxyTestDB(t)
 	manager := NewManager()
 	relay := NewRelay(db, manager, nil, "example", "m.example.test", "example.test", 64<<20)
@@ -115,6 +117,7 @@ func TestRelayUploadForwardsToDesktopAndServesPull(t *testing.T) {
 	case <-time.After(3 * time.Second):
 		t.Fatal("fake desktop did not receive upload")
 	}
+	assertDirectoryEmpty(t, relayTempDir)
 }
 
 func TestRelayUploadRequiresFieldsAndDesktopOnline(t *testing.T) {
@@ -234,6 +237,8 @@ func TestRelayPullRejectsInvalidAndExpiredTickets(t *testing.T) {
 }
 
 func TestRelayUploadCleansPendingFileAfterDesktopError(t *testing.T) {
+	relayTempDir := t.TempDir()
+	t.Setenv("TMPDIR", relayTempDir)
 	db := openProxyTestDB(t)
 	manager := NewManager()
 	relay := NewRelay(db, manager, nil, "example", "m.example.test", "example.test", 64<<20)
@@ -274,6 +279,7 @@ func TestRelayUploadCleansPendingFileAfterDesktopError(t *testing.T) {
 	if count != 0 {
 		t.Fatalf("pending uploads not cleaned: %d", count)
 	}
+	assertDirectoryEmpty(t, relayTempDir)
 }
 
 func newUploadRelayTestServer(t *testing.T, relay *Relay) *httptest.Server {

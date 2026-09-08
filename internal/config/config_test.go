@@ -75,6 +75,19 @@ func TestLoadRelayConfigSupportsTrustedProxyCIDRs(t *testing.T) {
 	}
 }
 
+func TestLoadRelayConfigSupportsIdentityDeviceValidation(t *testing.T) {
+	useTestRelayConfig(t)
+	t.Setenv("IDENTITY_API_BASE_URL", "https://identity.example.test")
+
+	cfg, err := LoadRelayConfigStrict()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.IdentityAPIBaseURL != "https://identity.example.test" {
+		t.Fatalf("IdentityAPIBaseURL = %q", cfg.IdentityAPIBaseURL)
+	}
+}
+
 func TestLoadRelayConfigSupportsRelaxedSSOCompatibility(t *testing.T) {
 	useTestRelayConfig(t)
 	t.Setenv("SSO_JWT_USER_ID_CLAIM", "userId")

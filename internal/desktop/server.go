@@ -15,15 +15,23 @@ import (
 
 	"example.invalid/tunnel-hub-server/internal/auth"
 	"example.invalid/tunnel-hub-server/internal/config"
+	"example.invalid/tunnel-hub-server/internal/devicelink"
+	"example.invalid/tunnel-hub-server/internal/proxy"
 	"example.invalid/tunnel-hub-server/internal/store"
 	"example.invalid/tunnel-hub-server/internal/tunnel"
 )
 
 const registerPath = "/api/desktop/devices/register"
 const conversationSharesPath = "/api/desktop/shares"
+const accountPresencePath = "/api/desktop/account-presence"
+const routeCredentialsPath = "/api/desktop/route-credentials"
+const routeCredentialJWKSPath = "/api/desktop/route-credential-jwks"
+const accountDeviceValidationPath = "/api/desktop/account-devices/validate"
 const publicConversationSharePagePath = "/share/"
 const publicHostRetryLimit = 8
 const publicLabelRandomBytes = 8
+
+var errAccountDeviceBinding = errors.New("account device identity does not match request")
 
 type Server struct {
 	DB                            *store.DB
@@ -32,6 +40,22 @@ type Server struct {
 	ssoJWT                        *auth.SSOJWTVerifier
 	now                           func() time.Time
 	recordConversationShareAccess func(context.Context, string, time.Time) error
+	manager                       desktopPresenceManager
+	routeCredentialSigner         *devicelink.RouteCredentialSigner
+	accountDeviceValidator        devicelink.AccountDeviceValidator
+}
+
+type desktopPresenceManager interface {
+	ActiveFor(proxy.ConnectionKey) (proxy.ActiveTunnelMetric, bool)
+}
+
+func (s *Server) SetDeviceLink(manager desktopPresenceManager, signer *devicelink.RouteCredentialSigner) {
+	s.manager = manager
+	s.routeCredentialSigner = signer
+}
+
+func (s *Server) SetAccountDeviceValidator(validator devicelink.AccountDeviceValidator) {
+	s.accountDeviceValidator = validator
 }
 
 func NewServer(db *store.DB, cfg config.RelayConfig, logger *slog.Logger, ssoJWT *auth.SSOJWTVerifier) (*Server, error) {
@@ -66,6 +90,30 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	switch {
+	case r.URL.Path == accountDeviceValidationPath:
+		if r.Method != http.MethodPost {
+			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+		s.handleAccountDeviceValidation(w, r)
+	case r.URL.Path == routeCredentialJWKSPath:
+		if r.Method != http.MethodGet {
+			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+		s.handleRouteCredentialJWKS(w)
+	case r.URL.Path == accountPresencePath:
+		if r.Method != http.MethodGet {
+			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+		s.handleAccountPresence(w, r)
+	case r.URL.Path == routeCredentialsPath:
+		if r.Method != http.MethodPost {
+			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+		s.handleIssueRouteCredential(w, r)
 	case r.URL.Path == conversationSharesPath:
 		switch r.Method {
 		case http.MethodPost:
@@ -94,6 +142,182 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func (s *Server) handleAccountPresence(w http.ResponseWriter, r *http.Request) {
+	principal, ok := s.authorizeAccountDevice(w, r)
+	if !ok {
+		return
+	}
+	if _, ok := s.validateAccountDevice(w, r, principal, ""); !ok {
+		return
+	}
+	if s.manager == nil {
+		writeError(w, http.StatusServiceUnavailable, "device presence unavailable")
+		return
+	}
+	records, err := s.DB.ListDesktopPresenceByOwner(r.Context(), principal.AccountID)
+	if err != nil {
+		s.writeInternal(w, "list desktop presence", err)
+		return
+	}
+	type presenceItem struct {
+		DeviceID        string     `json:"deviceId"`
+		Online          bool       `json:"online"`
+		ConnectedAt     *time.Time `json:"connectedAt"`
+		LastConnectedAt *time.Time `json:"lastConnectedAt"`
+	}
+	items := make([]presenceItem, 0, len(records))
+	for _, record := range records {
+		active, online := s.manager.ActiveFor(proxy.DesktopConnectionKey(record.DeviceKey))
+		var connectedAt *time.Time
+		if online {
+			value := active.ConnectedAt.UTC()
+			connectedAt = &value
+		}
+		items = append(items, presenceItem{
+			DeviceID: record.DeviceID, Online: online, ConnectedAt: connectedAt, LastConnectedAt: record.LastConnectedAt,
+		})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"schemaVersion": devicelink.SchemaVersionV1, "items": items})
+}
+
+func (s *Server) handleIssueRouteCredential(w http.ResponseWriter, r *http.Request) {
+	principal, ok := s.authorizeAccountDevice(w, r)
+	if !ok {
+		return
+	}
+	if s.manager == nil || s.routeCredentialSigner == nil {
+		writeError(w, http.StatusServiceUnavailable, "ROUTE_CREDENTIAL_UNAVAILABLE")
+		return
+	}
+	var payload struct {
+		TargetDesktopID string `json:"targetDesktopId"`
+		RequestID       string `json:"requestId"`
+	}
+	if err := decodeJSON(r, &payload); err != nil || !devicelink.IsUUID(payload.TargetDesktopID) || !devicelink.IsUUID(payload.RequestID) {
+		writeError(w, http.StatusBadRequest, "PROTOCOL_INCOMPATIBLE")
+		return
+	}
+	if _, ok := s.validateAccountDevice(w, r, principal, payload.TargetDesktopID); !ok {
+		return
+	}
+	target, err := s.DB.GetDesktopDeviceByOwnerAndID(r.Context(), principal.AccountID, payload.TargetDesktopID)
+	if err != nil {
+		if !errors.Is(err, store.ErrNotFound) {
+			s.writeInternal(w, "resolve route target", err)
+			return
+		}
+		writeError(w, http.StatusForbidden, "ACCOUNT_MISMATCH")
+		return
+	}
+	if _, online := s.manager.ActiveFor(proxy.DesktopConnectionKey(target.DeviceKey)); !online {
+		writeError(w, http.StatusConflict, devicelink.ErrorTargetOffline)
+		return
+	}
+	credential, routeContext, err := s.routeCredentialSigner.Sign(devicelink.RouteCredentialInput{
+		AccountID: principal.AccountID, SourceDeviceID: principal.DeviceID,
+		TargetDesktopID: payload.TargetDesktopID, RequestID: payload.RequestID,
+	}, s.now().UTC())
+	if err != nil {
+		s.writeInternal(w, "issue route credential", err)
+		return
+	}
+	auditDetails, _ := json.Marshal(map[string]string{
+		"accountId":       routeContext.AccountID,
+		"sourceDeviceId":  routeContext.SourceDeviceID,
+		"targetDesktopId": routeContext.TargetDesktopID,
+		"requestId":       routeContext.RequestID,
+		"jti":             routeContext.JTI,
+		"publicHost":      target.PublicHost,
+	})
+	if err := s.DB.AddEvent(r.Context(), "device_link.route_credential_issued", "Short-lived account route credential issued", string(auditDetails)); err != nil {
+		s.Logger.Error("record route credential audit", "error", err)
+	}
+	writeJSON(w, http.StatusCreated, map[string]any{
+		"schemaVersion": devicelink.SchemaVersionV1,
+		"credential":    credential,
+		"routeContext":  routeContext,
+		"webSocketUrl":  desktopWebSocketURL(target.PublicHost),
+		"tokenMode":     "query",
+	})
+}
+
+func (s *Server) handleRouteCredentialJWKS(w http.ResponseWriter) {
+	if s.routeCredentialSigner == nil {
+		writeError(w, http.StatusServiceUnavailable, "ROUTE_CREDENTIAL_UNAVAILABLE")
+		return
+	}
+	key, err := s.routeCredentialSigner.JWK()
+	if err != nil {
+		s.writeInternal(w, "read route credential public key", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"keys": []devicelink.RouteCredentialJWK{key}})
+}
+
+func desktopWebSocketURL(publicHost string) string {
+	host := tunnel.NormalizeHost(publicHost)
+	if host == "" {
+		return ""
+	}
+	return "wss://" + host + "/ws"
+}
+
+func (s *Server) authorizeAccountDevice(w http.ResponseWriter, r *http.Request) (auth.SSOJWTPrincipal, bool) {
+	principal, ok := s.authorizeRegistration(w, r)
+	if !ok {
+		return auth.SSOJWTPrincipal{}, false
+	}
+	if !principal.HasAccountDeviceIdentity() {
+		writeError(w, http.StatusForbidden, "account device identity required")
+		return auth.SSOJWTPrincipal{}, false
+	}
+	return principal, true
+}
+
+func (s *Server) validateAccountDevice(w http.ResponseWriter, r *http.Request, principal auth.SSOJWTPrincipal, deviceID string) (devicelink.DeviceValidation, bool) {
+	if s.accountDeviceValidator == nil {
+		writeError(w, http.StatusServiceUnavailable, "DEVICE_VALIDATION_UNAVAILABLE")
+		return devicelink.DeviceValidation{}, false
+	}
+	validation, err := s.accountDeviceValidator.Validate(r.Context(), requestBearer(r), principal.AccountID, principal.DeviceID, deviceID)
+	if err == nil {
+		return validation, true
+	}
+	if errors.Is(err, devicelink.ErrDeviceValidationRejected) {
+		writeError(w, http.StatusForbidden, "DEVICE_REVOKED")
+		return devicelink.DeviceValidation{}, false
+	}
+	s.writeInternal(w, "validate account device", err)
+	return devicelink.DeviceValidation{}, false
+}
+
+func (s *Server) handleAccountDeviceValidation(w http.ResponseWriter, r *http.Request) {
+	principal, ok := s.authorizeAccountDevice(w, r)
+	if !ok {
+		return
+	}
+	var payload struct {
+		DeviceID string `json:"deviceId"`
+	}
+	if err := decodeJSON(r, &payload); err != nil || !devicelink.IsUUID(payload.DeviceID) {
+		writeError(w, http.StatusBadRequest, "PROTOCOL_INCOMPATIBLE")
+		return
+	}
+	validation, ok := s.validateAccountDevice(w, r, principal, payload.DeviceID)
+	if !ok {
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"schemaVersion": devicelink.SchemaVersionV1, "validation": validation})
+}
+
+func requestBearer(r *http.Request) string {
+	value := strings.TrimSpace(r.Header.Get("Authorization"))
+	if len(value) < 7 || !strings.EqualFold(value[:7], "Bearer ") {
+		return ""
+	}
+	return strings.TrimSpace(value[7:])
+}
+
 func (s *Server) handleDeviceSubresource(w http.ResponseWriter, r *http.Request) {
 	deviceID, webAppName, ok := parseWebAppPath(r.URL.Path)
 	if !ok {
@@ -112,6 +336,11 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	if principal.HasAccountDeviceIdentity() {
+		if _, ok := s.validateAccountDevice(w, r, principal, ""); !ok {
+			return
+		}
+	}
 	var payload registerPayload
 	if err := decodeJSON(r, &payload); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid json")
@@ -125,6 +354,10 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 	}
 
 	result, err := s.registerDesktopDevice(r, principal, payload)
+	if errors.Is(err, errAccountDeviceBinding) {
+		writeError(w, http.StatusForbidden, "account device identity does not match request")
+		return
+	}
 	if errors.Is(err, store.ErrDesktopDeviceHostConflict) {
 		writeError(w, http.StatusConflict, "desktop public host already exists")
 		return
@@ -178,6 +411,9 @@ func (s *Server) handleRegisterWebApp(w http.ResponseWriter, r *http.Request, de
 }
 
 func (s *Server) registerDesktopDevice(r *http.Request, principal auth.SSOJWTPrincipal, payload registerPayload) (store.RegisterDesktopDeviceResult, error) {
+	if principal.HasAccountDeviceIdentity() && (principal.DeviceKind != "desktop" || principal.DeviceID != payload.DeviceID) {
+		return store.RegisterDesktopDeviceResult{}, errAccountDeviceBinding
+	}
 	var lastErr error
 	for attempt := 0; attempt < publicHostRetryLimit; attempt++ {
 		publicHost, err := s.randomDesktopPublicHost()
@@ -187,7 +423,7 @@ func (s *Server) registerDesktopDevice(r *http.Request, principal auth.SSOJWTPri
 		result, err := s.DB.RegisterDesktopDevice(r.Context(), store.RegisterDesktopDeviceInput{
 			DeviceID:    payload.DeviceID,
 			DeviceName:  payload.DeviceName,
-			OwnerUserID: principal.UserID,
+			OwnerUserID: principal.OwnerID(),
 			OwnerEmail:  principal.Email,
 			OwnerName:   principal.Name,
 			PublicHost:  publicHost,
@@ -211,7 +447,7 @@ func (s *Server) registerDesktopWebApp(r *http.Request, principal auth.SSOJWTPri
 			return store.RegisterDesktopWebAppResult{}, err
 		}
 		result, err := s.DB.RegisterDesktopWebApp(r.Context(), store.RegisterDesktopWebAppInput{
-			OwnerUserID: principal.UserID,
+			OwnerUserID: principal.OwnerID(),
 			DeviceID:    deviceID,
 			Name:        name,
 			PublicHost:  publicHost,

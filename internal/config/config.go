@@ -35,6 +35,11 @@ type RelayConfig struct {
 	SSOJWTAllowAnyAudience   bool
 	SSOJWTAllowAnyAdminRole  bool
 	SSOJWTAllowMissingScope  bool
+	RouteCredentialKeyFile   string
+	RouteCredentialKeyPEM    string
+	RouteCredentialKeyID     string
+	RouteCredentialAudience  string
+	IdentityAPIBaseURL       string
 	MaxRequestBodyBytes      int64
 	TrustedProxyCIDRs        string
 }
@@ -108,6 +113,11 @@ func LoadRelayConfigStrict() (RelayConfig, error) {
 		SSOJWTAllowAnyAudience:   envBool("SSO_JWT_ALLOW_ANY_AUDIENCE", false),
 		SSOJWTAllowAnyAdminRole:  envBool("SSO_JWT_ALLOW_ANY_ADMIN_ROLE", false),
 		SSOJWTAllowMissingScope:  envBool("SSO_JWT_ALLOW_MISSING_TUNNEL_SCOPE", false),
+		RouteCredentialKeyFile:   strings.TrimSpace(os.Getenv("ROUTE_CREDENTIAL_PRIVATE_KEY_FILE")),
+		RouteCredentialKeyPEM:    strings.TrimSpace(os.Getenv("ROUTE_CREDENTIAL_PRIVATE_KEY_PEM")),
+		RouteCredentialKeyID:     env("ROUTE_CREDENTIAL_KEY_ID", "route-v1"),
+		RouteCredentialAudience:  env("ROUTE_CREDENTIAL_AUDIENCE", "desktop-route"),
+		IdentityAPIBaseURL:       strings.TrimSpace(os.Getenv("IDENTITY_API_BASE_URL")),
 		MaxRequestBodyBytes:      envInt64("MAX_REQUEST_BODY_BYTES", 64<<20),
 		TrustedProxyCIDRs:        env("TRUSTED_PROXY_CIDRS", ""),
 	}, nil

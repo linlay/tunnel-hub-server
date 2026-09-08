@@ -1389,13 +1389,17 @@ func performRegisterWebApp(t *testing.T, server *Server, deviceID, name, body st
 }
 
 type testSSOJWTClaims struct {
-	Issuer   string
-	Audience string
-	UserID   string
-	Email    string
-	Role     string
-	Scope    string
-	Expires  time.Time
+	Issuer     string
+	Audience   string
+	UserID     string
+	AccountID  string
+	DeviceID   string
+	DeviceKind string
+	TrustLevel string
+	Email      string
+	Role       string
+	Scope      string
+	Expires    time.Time
 }
 
 func testSSOJWTKey(t *testing.T) (*rsa.PrivateKey, string) {
@@ -1419,17 +1423,21 @@ func signTestSSOJWT(t *testing.T, privateKey *rsa.PrivateKey, claims testSSOJWTC
 	t.Helper()
 	headerJSON, _ := json.Marshal(map[string]any{"alg": "RS256", "typ": "JWT", "kid": "test-key"})
 	claimsJSON, _ := json.Marshal(map[string]any{
-		"iss":     claims.Issuer,
-		"sub":     claims.UserID,
-		"aud":     claims.Audience,
-		"iat":     time.Now().Unix(),
-		"exp":     claims.Expires.Unix(),
-		"jti":     "test-jti",
-		"user_id": claims.UserID,
-		"email":   claims.Email,
-		"name":    "Desktop User",
-		"role":    claims.Role,
-		"scope":   claims.Scope,
+		"iss":         claims.Issuer,
+		"sub":         claims.UserID,
+		"aud":         claims.Audience,
+		"iat":         time.Now().Unix(),
+		"exp":         claims.Expires.Unix(),
+		"jti":         "test-jti",
+		"user_id":     claims.UserID,
+		"email":       claims.Email,
+		"name":        "Desktop User",
+		"role":        claims.Role,
+		"scope":       claims.Scope,
+		"account_id":  claims.AccountID,
+		"device_id":   claims.DeviceID,
+		"device_kind": claims.DeviceKind,
+		"trust_level": claims.TrustLevel,
 	})
 	headerPart := base64.RawURLEncoding.EncodeToString(headerJSON)
 	payloadPart := base64.RawURLEncoding.EncodeToString(claimsJSON)

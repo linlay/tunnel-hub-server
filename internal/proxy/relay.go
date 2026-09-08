@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"example.invalid/tunnel-hub-server/internal/auth"
+	"example.invalid/tunnel-hub-server/internal/devicelink"
 	"example.invalid/tunnel-hub-server/internal/store"
 	"example.invalid/tunnel-hub-server/internal/tunnel"
 	"github.com/gorilla/websocket"
@@ -33,6 +34,7 @@ type Relay struct {
 	MobileWebAppCookieSecure bool
 	desktopIdentityVerifier  *auth.SSOJWTVerifier
 	allowMissingTunnelScope  bool
+	accountDeviceValidator   devicelink.AccountDeviceValidator
 	trustedProxyCIDRs        []*net.IPNet
 	uploads                  *uploadStore
 	resources                *resourceStore
@@ -104,6 +106,10 @@ func (r *Relay) SetDesktopIdentityVerifier(verifier *auth.SSOJWTVerifier, allowM
 	r.allowMissingTunnelScope = allowMissingScope
 }
 
+func (r *Relay) SetAccountDeviceValidator(validator devicelink.AccountDeviceValidator) {
+	r.accountDeviceValidator = validator
+}
+
 func (r *Relay) HandleTunnel(w http.ResponseWriter, req *http.Request) {
 	clientRemoteAddr := r.clientRemoteAddr(req)
 	authorizations, authorizationPresent := req.Header[http.CanonicalHeaderKey("Authorization")]
@@ -140,7 +146,7 @@ func (r *Relay) HandleTunnel(w http.ResponseWriter, req *http.Request) {
 			Key:         AgentConnectionKey(token.ID),
 			RemoteAddr:  clientRemoteAddr,
 			ConnectedAt: dbSession.ConnectedAt,
-		}, time.Time{}, func() {
+		}, time.Time{}, nil, func() {
 			_ = r.DB.EndAgentSession(context.Background(), dbSession.ID)
 		})
 		return
@@ -193,7 +199,27 @@ func (r *Relay) HandleTunnel(w http.ResponseWriter, req *http.Request) {
 		_ = ws.WriteJSON(tunnel.NewErrorResponse(tunnel.NamespaceDesktop, tunnel.TypeTunnelOpen, open.ID, http.StatusForbidden, "tunnel scope required"))
 		return
 	}
-	device, err := r.DB.GetDesktopDeviceByOwnerAndID(req.Context(), principal.UserID, open.Payload.DeviceID)
+	if principal.HasAccountDeviceIdentity() && (principal.DeviceKind != "desktop" || principal.DeviceID != open.Payload.DeviceID) {
+		_ = ws.WriteJSON(tunnel.NewErrorResponse(tunnel.NamespaceDesktop, tunnel.TypeTunnelOpen, open.ID, http.StatusForbidden, "account device identity does not match tunnel"))
+		return
+	}
+	var revalidate func(context.Context) error
+	if principal.HasAccountDeviceIdentity() {
+		if r.accountDeviceValidator == nil {
+			_ = ws.WriteJSON(tunnel.NewErrorResponse(tunnel.NamespaceDesktop, tunnel.TypeTunnelOpen, open.ID, http.StatusServiceUnavailable, "account device validation is unavailable"))
+			return
+		}
+		validate := func(ctx context.Context) error {
+			_, err := r.accountDeviceValidator.Validate(ctx, open.Payload.IdentityToken, principal.AccountID, principal.DeviceID, open.Payload.DeviceID)
+			return err
+		}
+		if err := validate(req.Context()); err != nil {
+			_ = ws.WriteJSON(tunnel.NewErrorResponse(tunnel.NamespaceDesktop, tunnel.TypeTunnelOpen, open.ID, http.StatusForbidden, "account device is not active"))
+			return
+		}
+		revalidate = validate
+	}
+	device, err := r.DB.GetDesktopDeviceByOwnerAndID(req.Context(), principal.OwnerID(), open.Payload.DeviceID)
 	if err != nil {
 		if !errors.Is(err, store.ErrNotFound) {
 			r.Logger.Error("resolve desktop tunnel owner", "error", err)
@@ -224,12 +250,12 @@ func (r *Relay) HandleTunnel(w http.ResponseWriter, req *http.Request) {
 		Key:         DesktopConnectionKey(device.DeviceKey),
 		RemoteAddr:  clientRemoteAddr,
 		ConnectedAt: dbSession.ConnectedAt,
-	}, principal.ExpiresAt, func() {
+	}, principal.ExpiresAt, revalidate, func() {
 		_ = r.DB.EndDesktopSession(context.Background(), dbSession.ID)
 	})
 }
 
-func (r *Relay) serveTunnelSession(ws *websocket.Conn, active ActiveTunnel, expiresAt time.Time, finish func()) {
+func (r *Relay) serveTunnelSession(ws *websocket.Conn, active ActiveTunnel, expiresAt time.Time, revalidate func(context.Context) error, finish func()) {
 	conn := tunnel.NewWebSocketNetConn(ws)
 	config := yamux.DefaultConfig()
 	config.EnableKeepAlive = true
@@ -249,6 +275,28 @@ func (r *Relay) serveTunnelSession(ws *websocket.Conn, active ActiveTunnel, expi
 			_ = session.Close()
 		})
 		defer expiryTimer.Stop()
+	}
+	var validationTicker *time.Ticker
+	if revalidate != nil {
+		validationTicker = time.NewTicker(3 * time.Second)
+		defer validationTicker.Stop()
+		go func() {
+			for {
+				select {
+				case <-session.CloseChan():
+					return
+				case <-validationTicker.C:
+					ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+					err := revalidate(ctx)
+					cancel()
+					if err != nil {
+						_ = ws.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.ClosePolicyViolation, "identity revoked"), time.Now().Add(time.Second))
+						_ = session.Close()
+						return
+					}
+				}
+			}
+		}()
 	}
 	eventPrefix := string(active.Key.Kind)
 	eventSubject := "Agent"

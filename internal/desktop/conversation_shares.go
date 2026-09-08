@@ -93,7 +93,7 @@ func (s *Server) handleCreateConversationShare(w http.ResponseWriter, r *http.Re
 	}
 	share, err := s.DB.CreateConversationShare(
 		r.Context(),
-		principal.UserID,
+		principal.OwnerID(),
 		conversationID,
 		store.ConversationDocumentVersion,
 		html,
@@ -123,7 +123,7 @@ func (s *Server) handleListConversationShares(w http.ResponseWriter, r *http.Req
 		writeError(w, http.StatusServiceUnavailable, err.Error())
 		return
 	}
-	shares, err := s.DB.ListConversationShares(r.Context(), principal.UserID, conversationID, s.now().UTC())
+	shares, err := s.DB.ListConversationShares(r.Context(), principal.OwnerID(), conversationID, s.now().UTC())
 	if err != nil {
 		s.writeInternal(w, "list conversation shares", err)
 		return
@@ -195,7 +195,7 @@ func (s *Server) handleRevokeConversationShare(w http.ResponseWriter, r *http.Re
 		writeError(w, http.StatusNotFound, "share not found")
 		return
 	}
-	if err := s.DB.RevokeConversationShare(r.Context(), id, principal.UserID, s.now().UTC()); err != nil {
+	if err := s.DB.RevokeConversationShare(r.Context(), id, principal.OwnerID(), s.now().UTC()); err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			writeError(w, http.StatusNotFound, "share not found")
 			return

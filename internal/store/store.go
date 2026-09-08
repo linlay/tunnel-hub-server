@@ -145,6 +145,12 @@ type DesktopSession struct {
 	DisconnectedAt *time.Time `json:"disconnectedAt,omitempty"`
 }
 
+type DesktopPresenceRecord struct {
+	DeviceKey       string
+	DeviceID        string
+	LastConnectedAt *time.Time
+}
+
 type Event struct {
 	ID        int64     `json:"id"`
 	Type      string    `json:"type"`
@@ -498,6 +504,35 @@ func (db *DB) ListDesktopDevices(ctx context.Context) ([]DesktopDevice, error) {
 		devices = append(devices, device)
 	}
 	return devices, rows.Err()
+}
+
+func (db *DB) ListDesktopPresenceByOwner(ctx context.Context, ownerUserID string) ([]DesktopPresenceRecord, error) {
+	rows, err := db.sql.QueryContext(ctx, `
+		SELECT d.device_id, d.display_device_id, MAX(s.connected_at)
+		FROM desktop_devices d
+		LEFT JOIN desktop_sessions s ON s.device_id = d.device_id
+		WHERE d.owner_user_id = ?
+		GROUP BY d.device_id, d.display_device_id
+		ORDER BY d.display_device_id
+	`, strings.TrimSpace(ownerUserID))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := make([]DesktopPresenceRecord, 0)
+	for rows.Next() {
+		var item DesktopPresenceRecord
+		var lastConnectedAt sql.NullTime
+		if err := rows.Scan(&item.DeviceKey, &item.DeviceID, &lastConnectedAt); err != nil {
+			return nil, err
+		}
+		if lastConnectedAt.Valid {
+			value := lastConnectedAt.Time.UTC()
+			item.LastConnectedAt = &value
+		}
+		result = append(result, item)
+	}
+	return result, rows.Err()
 }
 
 func (db *DB) RegisterDesktopWebApp(ctx context.Context, input RegisterDesktopWebAppInput) (RegisterDesktopWebAppResult, error) {

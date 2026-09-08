@@ -27,6 +27,8 @@ type fakeResourceResult struct {
 }
 
 func TestRelayResourceRequestsDesktopAndReturnsPushedFile(t *testing.T) {
+	relayTempDir := t.TempDir()
+	t.Setenv("TMPDIR", relayTempDir)
 	db := openProxyTestDB(t)
 	manager := NewManager()
 	relay := NewRelay(db, manager, nil, "example", "m.example.test", "example.test", 64<<20)
@@ -95,6 +97,7 @@ func TestRelayResourceRequestsDesktopAndReturnsPushedFile(t *testing.T) {
 	case <-time.After(3 * time.Second):
 		t.Fatal("fake desktop did not receive resource request")
 	}
+	assertDirectoryEmpty(t, relayTempDir)
 }
 
 func TestRelayResourceEnforcesDesktopHostAuthAndSafeFile(t *testing.T) {
@@ -210,6 +213,8 @@ func TestWaitResourceReadyReturnsContextError(t *testing.T) {
 }
 
 func TestRelayResourceCleansPendingStateAfterDesktopError(t *testing.T) {
+	relayTempDir := t.TempDir()
+	t.Setenv("TMPDIR", relayTempDir)
 	db := openProxyTestDB(t)
 	manager := NewManager()
 	relay := NewRelay(db, manager, nil, "example", "m.example.test", "example.test", 64<<20)
@@ -242,6 +247,7 @@ func TestRelayResourceCleansPendingStateAfterDesktopError(t *testing.T) {
 	if count != 0 {
 		t.Fatalf("pending resources not cleaned: %d", count)
 	}
+	assertDirectoryEmpty(t, relayTempDir)
 }
 
 func newResourceRelayTestServer(t *testing.T, relay *Relay) *httptest.Server {

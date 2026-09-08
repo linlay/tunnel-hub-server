@@ -15,6 +15,7 @@ import (
 	"example.invalid/tunnel-hub-server/internal/auth"
 	"example.invalid/tunnel-hub-server/internal/config"
 	desktopapi "example.invalid/tunnel-hub-server/internal/desktop"
+	"example.invalid/tunnel-hub-server/internal/devicelink"
 	"example.invalid/tunnel-hub-server/internal/proxy"
 	"example.invalid/tunnel-hub-server/internal/shareassets"
 	"example.invalid/tunnel-hub-server/internal/store"
@@ -61,6 +62,14 @@ func main() {
 	}
 	relay := proxy.NewRelay(db, manager, logger, cfg.BrandID, cfg.DesktopPublicBaseDomain, cfg.WebAppPublicBaseDomain, cfg.MaxRequestBodyBytes)
 	relay.SetDesktopIdentityVerifier(ssoJWT, cfg.SSOJWTAllowMissingScope)
+	var accountDeviceValidator devicelink.AccountDeviceValidator
+	if cfg.IdentityAPIBaseURL != "" {
+		accountDeviceValidator, err = devicelink.NewIdentityDeviceValidator(cfg.IdentityAPIBaseURL, nil)
+		if err != nil {
+			log.Fatalf("configure Identity account device validation: %v", err)
+		}
+	}
+	relay.SetAccountDeviceValidator(accountDeviceValidator)
 	relay.SetMobileWebAppCookieSecure(cfg.MobileWebAppCookieSecure)
 	relay.SetTrustedProxyCIDRs(cfg.TrustedProxyCIDRs)
 	adminServer, err := admin.NewServer(db, manager, cfg, logger, ssoJWT)
@@ -71,6 +80,15 @@ func main() {
 	if err != nil {
 		log.Fatalf("configure desktop server: %v", err)
 	}
+	routeSigner, err := devicelink.LoadRouteCredentialSigner(
+		devicelink.RouteCredentialIssuer, cfg.RouteCredentialAudience, cfg.RouteCredentialKeyID,
+		cfg.RouteCredentialKeyFile, cfg.RouteCredentialKeyPEM,
+	)
+	if err != nil {
+		log.Fatalf("configure route credential signer: %v", err)
+	}
+	desktopServer.SetDeviceLink(manager, routeSigner)
+	desktopServer.SetAccountDeviceValidator(accountDeviceValidator)
 	conversationAssetHandler := shareassets.NewHandler()
 	static := staticHandler(cfg.WebsiteDist)
 

@@ -12,6 +12,8 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	"example.invalid/tunnel-hub-server/internal/devicelink"
 )
 
 var (
@@ -29,12 +31,27 @@ type SSOJWTConfig struct {
 }
 
 type SSOJWTPrincipal struct {
-	UserID    string
-	Email     string
-	Name      string
-	Role      string
-	Scope     string
-	ExpiresAt time.Time
+	UserID     string
+	AccountID  string
+	DeviceID   string
+	DeviceKind string
+	TrustLevel string
+	Email      string
+	Name       string
+	Role       string
+	Scope      string
+	ExpiresAt  time.Time
+}
+
+func (p SSOJWTPrincipal) OwnerID() string {
+	if p.AccountID != "" {
+		return p.AccountID
+	}
+	return p.UserID
+}
+
+func (p SSOJWTPrincipal) HasAccountDeviceIdentity() bool {
+	return p.AccountID != "" && p.DeviceID != ""
 }
 
 type SSOJWTVerifier struct {
@@ -192,13 +209,28 @@ func (v *SSOJWTVerifier) Verify(token string, now time.Time) (SSOJWTPrincipal, e
 	if userID == "" {
 		return SSOJWTPrincipal{}, errors.New("missing user id claim")
 	}
+	accountID := readStringClaim(claims, "account_id")
+	deviceID := readStringClaim(claims, "device_id")
+	deviceKind := strings.ToLower(readStringClaim(claims, "device_kind"))
+	trustLevel := strings.ToLower(readStringClaim(claims, "trust_level"))
+	if accountID != "" || deviceID != "" || deviceKind != "" || trustLevel != "" {
+		if accountID == "" || !devicelink.IsUUID(deviceID) ||
+			(deviceKind != string(devicelink.DeviceKindMobile) && deviceKind != string(devicelink.DeviceKindDesktop)) ||
+			(trustLevel != string(devicelink.TrustLevelSession) && trustLevel != string(devicelink.TrustLevelTrusted) && trustLevel != string(devicelink.TrustLevelFullyTrusted)) {
+			return SSOJWTPrincipal{}, errors.New("invalid account device claims")
+		}
+	}
 	return SSOJWTPrincipal{
-		UserID:    userID,
-		Email:     readStringClaim(claims, "email"),
-		Name:      readStringClaim(claims, "name"),
-		Role:      strings.ToLower(readStringClaim(claims, "role")),
-		Scope:     readStringClaim(claims, "scope"),
-		ExpiresAt: time.Unix(exp, 0).UTC(),
+		UserID:     userID,
+		AccountID:  accountID,
+		DeviceID:   deviceID,
+		DeviceKind: deviceKind,
+		TrustLevel: trustLevel,
+		Email:      readStringClaim(claims, "email"),
+		Name:       readStringClaim(claims, "name"),
+		Role:       strings.ToLower(readStringClaim(claims, "role")),
+		Scope:      readStringClaim(claims, "scope"),
+		ExpiresAt:  time.Unix(exp, 0).UTC(),
 	}, nil
 }
 

@@ -71,6 +71,38 @@ func TestSSOJWTVerifierStillRejectsFutureTokenInRelaxedAudienceMode(t *testing.T
 	}
 }
 
+func TestSSOJWTVerifierParsesCompleteAccountDeviceIdentity(t *testing.T) {
+	privateKey, publicKeyPEM := testJWTKey(t)
+	verifier, err := NewSSOJWTVerifier(SSOJWTConfig{
+		Issuer: "https://issuer.example.test/oidc", Audience: "tunnel", PublicKeyPEM: publicKeyPEM,
+	})
+	if err != nil {
+		t.Fatalf("new verifier: %v", err)
+	}
+	now := time.Now().UTC()
+	claims := map[string]any{
+		"iss": "https://issuer.example.test/oidc", "aud": []string{"app", "tunnel"}, "sub": "alice",
+		"account_id": "account-alice", "device_id": "11111111-1111-4111-8111-111111111111",
+		"device_kind": "mobile", "trust_level": "trusted", "scope": "app tunnel", "exp": now.Add(time.Hour).Unix(),
+	}
+	principal, err := verifier.Verify(signJWTClaims(t, privateKey, claims), now)
+	if err != nil {
+		t.Fatalf("verify account token: %v", err)
+	}
+	if principal.OwnerID() != "account-alice" || !principal.HasAccountDeviceIdentity() || principal.DeviceKind != "mobile" {
+		t.Fatalf("unexpected account principal: %+v", principal)
+	}
+
+	delete(claims, "trust_level")
+	if _, err := verifier.Verify(signJWTClaims(t, privateKey, claims), now); err == nil {
+		t.Fatal("incomplete account device claims were accepted")
+	}
+	claims["trust_level"] = "root"
+	if _, err := verifier.Verify(signJWTClaims(t, privateKey, claims), now); err == nil {
+		t.Fatal("unknown trust level was accepted")
+	}
+}
+
 func testJWTKey(t *testing.T) (*rsa.PrivateKey, string) {
 	t.Helper()
 	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
