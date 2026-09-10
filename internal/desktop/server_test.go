@@ -1252,7 +1252,14 @@ func newDesktopTestServerWithConfig(t *testing.T, cfg config.RelayConfig) (*Serv
 	if err != nil {
 		t.Fatalf("new desktop server: %v", err)
 	}
+	server.SetConversationShareRenderer(testConversationShareRenderer{})
 	return server, db
+}
+
+type testConversationShareRenderer struct{}
+
+func (testConversationShareRenderer) Render(snapshot []byte, _ string) ([]byte, error) {
+	return append([]byte(nil), snapshot...), nil
 }
 
 func desktopTestVerifier(t *testing.T, cfg config.RelayConfig) *auth.SSOJWTVerifier {

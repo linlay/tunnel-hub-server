@@ -71,7 +71,8 @@ func main() {
 	if err != nil {
 		log.Fatalf("configure desktop server: %v", err)
 	}
-	conversationAssetHandler := shareassets.NewHandler()
+	conversationAssets := shareassets.NewBundle()
+	desktopServer.SetConversationShareRenderer(conversationAssets)
 	static := staticHandler(cfg.WebsiteDist)
 
 	root := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -91,7 +92,7 @@ func main() {
 		case r.URL.Path == "/api/components":
 			adminServer.ServeComponents(w, r)
 		case strings.HasPrefix(r.URL.Path, shareassets.PublicPathPrefix):
-			conversationAssetHandler.ServeHTTP(w, r)
+			conversationAssets.ServeHTTP(w, r)
 		case strings.HasPrefix(r.URL.Path, "/api/desktop") || strings.HasPrefix(r.URL.Path, "/share/"):
 			desktopServer.ServeHTTP(w, r)
 		case strings.HasPrefix(r.URL.Path, "/api/admin"):

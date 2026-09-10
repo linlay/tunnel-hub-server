@@ -1,7 +1,7 @@
 GO ?= go
 MODULE_PREP = GOTOOLCHAIN=local $(GO) run ./tools/moduleprep
 
-.PHONY: run-relay run-agent test build docker-build verify-neutral
+.PHONY: run-relay run-agent test build docker-build verify-neutral migrate-conversation-shares
 
 run-relay:
 	$(MODULE_PREP) run -package ./cmd/relay -- $(ARGS)
@@ -23,3 +23,8 @@ docker-build:
 
 verify-neutral:
 	GOTOOLCHAIN=local $(GO) run ./tools/neutralcheck
+
+migrate-conversation-shares:
+	@test -n "$(DB)" || (echo "DB is required" && exit 1)
+	@test -n "$(BACKUP)" || (echo "BACKUP is required" && exit 1)
+	$(MODULE_PREP) run -package ./tools/migrate-conversation-shares -- -db "$(DB)" -backup "$(BACKUP)"
