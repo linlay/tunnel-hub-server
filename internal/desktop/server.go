@@ -32,6 +32,15 @@ type Server struct {
 	ssoJWT                        *auth.SSOJWTVerifier
 	now                           func() time.Time
 	recordConversationShareAccess func(context.Context, string, time.Time) error
+	conversationShareRenderer     conversationShareRenderer
+}
+
+type conversationShareRenderer interface {
+	Render(snapshot []byte, assetOrigin string) ([]byte, error)
+}
+
+func (s *Server) SetConversationShareRenderer(renderer conversationShareRenderer) {
+	s.conversationShareRenderer = renderer
 }
 
 func NewServer(db *store.DB, cfg config.RelayConfig, logger *slog.Logger, ssoJWT *auth.SSOJWTVerifier) (*Server, error) {

@@ -14,8 +14,8 @@ func TestConversationShareCreateReadExpireAndRevoke(t *testing.T) {
 	ctx := context.Background()
 	now := time.Date(2026, time.August, 17, 1, 2, 3, 0, time.UTC)
 	expiresAt := now.Add(720 * time.Hour)
-	html := []byte("<!doctype html><title>Release plan</title>")
-	share, err := db.CreateConversationShare(ctx, "owner-a", "chat-a", ConversationDocumentVersion, html, now, &expiresAt, false)
+	snapshot := []byte(`{"version":1,"title":"Release plan"}`)
+	share, err := db.CreateConversationShare(ctx, "owner-a", "chat-a", ConversationSnapshotVersion, snapshot, now, &expiresAt, false)
 	if err != nil {
 		t.Fatalf("create share: %v", err)
 	}
@@ -39,7 +39,7 @@ func TestConversationShareCreateReadExpireAndRevoke(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get share: %v", err)
 	}
-	if string(found.HTMLDocument) != string(html) || found.DocumentVersion != ConversationDocumentVersion {
+	if string(found.SnapshotJSON) != string(snapshot) || found.SnapshotVersion != ConversationSnapshotVersion {
 		t.Fatalf("unexpected public share: %#v", found)
 	}
 	accessedAt := now.Add(time.Minute)
@@ -81,8 +81,8 @@ func TestConversationSharePermanentRemainsReadableUntilRevoked(t *testing.T) {
 		ctx,
 		"owner-a",
 		"chat-permanent",
-		ConversationDocumentVersion,
-		[]byte("<p>permanent</p>"),
+		ConversationSnapshotVersion,
+		[]byte(`{"version":1,"title":"permanent"}`),
 		now,
 		nil,
 		false,
@@ -104,7 +104,7 @@ func TestConversationSharePermanentRemainsReadableUntilRevoked(t *testing.T) {
 	}
 }
 
-func TestConversationShareCreateValidatesDocument(t *testing.T) {
+func TestConversationShareCreateValidatesSnapshot(t *testing.T) {
 	db := openTestDB(t)
 	now := time.Now().UTC()
 	for _, tc := range []struct {
@@ -112,20 +112,20 @@ func TestConversationShareCreateValidatesDocument(t *testing.T) {
 		owner          string
 		conversationID string
 		version        int
-		document       []byte
+		snapshot       []byte
 		expiresAt      *time.Time
 		singleUse      bool
 	}{
-		{name: "owner", conversationID: "chat-a", version: 1, document: []byte("x"), expiresAt: timePointer(now.Add(time.Hour))},
-		{name: "conversation empty", owner: "owner", version: 1, document: []byte("x"), expiresAt: timePointer(now.Add(time.Hour))},
-		{name: "conversation", owner: "owner", conversationID: strings.Repeat("x", MaxConversationShareConversationIDBytes+1), version: 1, document: []byte("x"), expiresAt: timePointer(now.Add(time.Hour))},
-		{name: "version", owner: "owner", conversationID: "chat-a", version: 2, document: []byte("x"), expiresAt: timePointer(now.Add(time.Hour))},
+		{name: "owner", conversationID: "chat-a", version: 1, snapshot: []byte("x"), expiresAt: timePointer(now.Add(time.Hour))},
+		{name: "conversation empty", owner: "owner", version: 1, snapshot: []byte("x"), expiresAt: timePointer(now.Add(time.Hour))},
+		{name: "conversation", owner: "owner", conversationID: strings.Repeat("x", MaxConversationShareConversationIDBytes+1), version: 1, snapshot: []byte("x"), expiresAt: timePointer(now.Add(time.Hour))},
+		{name: "version", owner: "owner", conversationID: "chat-a", version: 2, snapshot: []byte("x"), expiresAt: timePointer(now.Add(time.Hour))},
 		{name: "empty", owner: "owner", conversationID: "chat-a", version: 1, expiresAt: timePointer(now.Add(time.Hour))},
-		{name: "expiration", owner: "owner", conversationID: "chat-a", version: 1, document: []byte("x"), expiresAt: timePointer(now)},
-		{name: "single use expiration", owner: "owner", conversationID: "chat-a", version: 1, document: []byte("x"), expiresAt: timePointer(now.Add(time.Hour)), singleUse: true},
+		{name: "expiration", owner: "owner", conversationID: "chat-a", version: 1, snapshot: []byte("x"), expiresAt: timePointer(now)},
+		{name: "single use expiration", owner: "owner", conversationID: "chat-a", version: 1, snapshot: []byte("x"), expiresAt: timePointer(now.Add(time.Hour)), singleUse: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if _, err := db.CreateConversationShare(context.Background(), tc.owner, tc.conversationID, tc.version, tc.document, now, tc.expiresAt, tc.singleUse); err == nil {
+			if _, err := db.CreateConversationShare(context.Background(), tc.owner, tc.conversationID, tc.version, tc.snapshot, now, tc.expiresAt, tc.singleUse); err == nil {
 				t.Fatal("expected validation error")
 			}
 		})
@@ -140,17 +140,17 @@ func TestConversationShareLookupDoesNotRequireGeneratedPrefix(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
 	now := time.Now().UTC()
-	html := []byte("<p>opaque</p>")
+	snapshot := []byte(`{"version":1,"title":"opaque"}`)
 	_, err := db.sql.ExecContext(ctx, `
 		INSERT INTO conversation_shares (
-			id, owner_user_id, conversation_id, document_version, html_document, created_at, expires_at
+			id, owner_user_id, conversation_id, snapshot_version, snapshot_json, created_at, expires_at
 		) VALUES (?, ?, ?, ?, ?, ?, ?)
-	`, "opaque-abc_123", "owner-a", "chat-a", ConversationDocumentVersion, html, now, now.Add(time.Hour))
+	`, "opaque-abc_123", "owner-a", "chat-a", ConversationSnapshotVersion, snapshot, now, now.Add(time.Hour))
 	if err != nil {
 		t.Fatalf("insert prefixless share: %v", err)
 	}
 	found, err := db.AcquirePublicConversationShare(ctx, "opaque-abc_123", now)
-	if err != nil || string(found.HTMLDocument) != string(html) {
+	if err != nil || string(found.SnapshotJSON) != string(snapshot) {
 		t.Fatalf("prefixless lookup=%#v err=%v", found, err)
 	}
 }
@@ -159,13 +159,13 @@ func TestConversationShareSingleUseIsAtomicallyDeletedOnFirstAcquire(t *testing.
 	db := openTestDB(t)
 	ctx := context.Background()
 	now := time.Date(2026, time.August, 17, 1, 2, 3, 0, time.UTC)
-	html := []byte("<!doctype html><title>Read once</title>")
+	snapshot := []byte(`{"version":1,"title":"Read once"}`)
 	share, err := db.CreateConversationShare(
 		ctx,
 		"owner-a",
 		"chat-once",
-		ConversationDocumentVersion,
-		html,
+		ConversationSnapshotVersion,
+		snapshot,
 		now,
 		nil,
 		true,
@@ -185,7 +185,7 @@ func TestConversationShareSingleUseIsAtomicallyDeletedOnFirstAcquire(t *testing.
 		go func() {
 			defer wait.Done()
 			acquired, acquireErr := db.AcquirePublicConversationShare(ctx, share.ID, now)
-			if acquireErr == nil && (string(acquired.HTMLDocument) != string(html) || !acquired.SingleUse) {
+			if acquireErr == nil && (string(acquired.SnapshotJSON) != string(snapshot) || !acquired.SingleUse) {
 				acquireErr = errors.New("acquired single-use document does not match")
 			}
 			results <- acquireErr
