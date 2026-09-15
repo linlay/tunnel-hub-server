@@ -16,7 +16,7 @@
 - `hub.example.test`: 管理前端、`/api/admin`、`/api/desktop`、`/api/components` 和 `/tunnel`；不提供附件业务 API。
 - `*.m.example.test`: 普通设备 Host 打开 Desktop public mini site；`<device>-<frontendPort>.m.example.test` 的全部请求，以及普通设备 Host 的 WebSocket upgrade、`POST /api/upload` 和 `GET /api/resource` 请求进入 Relay。
 - `*-wa.example.test`: Desktop WebApp 反向代理入口，支持 HTTP 和 WebSocket，并由 `*.example.test` 单层泛域名覆盖。
-- `share.example.test`: 对话分享的公开只读 origin；边缘网关将 `/share/*` 和 `/assets/conversation-export/*` 转发到 Relay。前者返回已存储的轻量 HTML，后者返回 WebClient 构建的内容寻址显示资源。
+- `share.example.test`: 对话分享的公开只读 origin；边缘网关将 `/share/*` 和 `/assets/conversation-export/*` 转发到 Relay。前者用已存储 Snapshot 和当前模板动态生成 HTML，后者返回当前分享渲染资源。
 
 WebApp 有两条独立链路：
 
@@ -253,18 +253,18 @@ curl -X POST https://hub.example.test/api/desktop/devices/register \
 
 创建、读取和撤销对话分享：
 
-Relay 把 Desktop 常驻 Worker 已渲染、由 Desktop main 原样转发的完整 HTML 当作不透明字节保存，不解析 DOM、标题、消息或事件。正文最大 20 MiB，必须是非空 UTF-8。创建请求必须同时提供 `X-Conversation-Document-Version: 1`、非空 `X-Conversation-ID` 和 `X-Conversation-Share-Expiration`；时效只接受 `once`、`3h`、`1d`、`7d`、`30d`、`permanent`。任一 Header 缺失或非法都会在读取正文前返回 400。生产调用方是 Desktop main：Worker 从 Platform 请求 Snapshot、从 WebClient 请求模板，生成后由 main 创建、列表和撤销；Platform 不接收 Tunnel token，也不感知模板或分享生命周期。下面命令只用于服务端联调。
+Relay 保存 Desktop 上传的 `ConversationSnapshotV1` JSON，匿名访问时安全注入当前唯一分享模板。正文最大 20 MiB。创建请求必须提供 `Content-Type: application/json`、`X-Conversation-Snapshot-Version: 1`、非空 `X-Conversation-ID` 和 `X-Conversation-Share-Expiration`；时效只接受 `once`、`3h`、`1d`、`7d`、`30d`、`permanent`。Desktop 不再下载模板或生成分享 HTML；本地 HTML 导出仍是独立功能。下面命令只用于服务端联调。
 
 ```bash
 curl -X POST https://hub.example.test/api/desktop/shares \
   -H "Authorization: Bearer $OFFICIAL_SSO_JWT" \
-  -H "Content-Type: text/html; charset=utf-8" \
-  -H "X-Conversation-Document-Version: 1" \
+  -H "Content-Type: application/json" \
+  -H "X-Conversation-Snapshot-Version: 1" \
   -H "X-Conversation-ID: chat_xxx" \
   -H "X-Conversation-Share-Expiration: 30d" \
-  --data-binary @conversation.html
+  --data-binary @conversation-snapshot.json
 
-curl 'https://hub.example.test/api/desktop/shares?conversationId=chat_xxx' \
+curl https://hub.example.test/api/desktop/shares \
   -H "Authorization: Bearer $OFFICIAL_SSO_JWT"
 
 curl https://share.example.test/share/share_xxx
@@ -275,9 +275,11 @@ curl -X DELETE https://hub.example.test/api/desktop/shares/share_xxx \
   -H "Authorization: Bearer $OFFICIAL_SSO_JWT"
 ```
 
-创建和列表响应固定包含 `singleUse`。`createdAt`、有限 `expiresAt` 与非空 `lastAccessedAt` 使用 RFC3339；`once` 与 `permanent` 的 `expiresAt`、尚未访问的 `lastAccessedAt` 明确返回 JSON `null`，两者由 `singleUse` 区分。列表只返回当前所有者、指定会话下仍有效的元数据，不读取 HTML。匿名 `GET /share/{id}` 只返回仍有效且未撤销的原始 HTML bytes，媒体类型为 `text/html; charset=utf-8`，并设置 `no-store`、`nosniff`、`noindex` 与 `no-referrer`。普通链接成功 GET 会 best-effort 更新独立访问元数据行，写入失败不影响正文；一次性链接使用 SQLite `DELETE ... RETURNING` 原子取得并删除正文，并发访问严格只有一个请求成功。链接预览器、机器人和安全扫描器的 GET 同样会消费一次性链接；HEAD 与其他方法不会消费。已消费、撤销、到期和未知 ID 统一返回最小 404 HTML；永久链接也可由所有者撤销。
+创建和列表响应固定包含 `conversationId` 和 `singleUse`。列表按创建时间倒序返回当前所有者在所有会话下仍有效的元数据，不读取 Snapshot，也不接受查询参数。匿名 `GET /share/{id}` 使用当前模板渲染仍有效且未撤销的 Snapshot，媒体类型为 `text/html; charset=utf-8`。普通链接成功 GET 会 best-effort 更新独立访问元数据；一次性链接使用 SQLite `DELETE ... RETURNING` 原子取得并删除 Snapshot，并发访问严格只有一个请求成功。HEAD 与其他方法不会消费；已消费、撤销、到期和未知 ID 统一返回最小 404 HTML。
 
-`GET/HEAD /assets/conversation-export/{sha256}/{file}` 只提供随 Relay 编译的白名单资产，响应使用精确 MIME、`nosniff`、跨 origin 读取许可和一年 `immutable` 缓存。资产目录是追加式发布：已经被模板引用的 hash 不允许覆盖或删除，分享撤销也不删除公共显示资源。
+`GET/HEAD /assets/conversation-export/{sha256}/{file}` 只提供随 Relay 编译的当前 manifest 白名单资产；旧 Hash 固定返回 404。分享渲染包由 WebClient 显式同步后随 Relay 原子发布，普通 WebClient 发布不修改它。
+
+旧库升级时必须先停止 Relay，再执行 `make migrate-conversation-shares DB=/path/relay.db BACKUP=/path/relay.pre-snapshot.db`。工具先创建 SQLite 备份，再严格提取并校验所有 V1 Snapshot；任一记录失败则事务整体回滚。确认部署和校验完成后删除一次性迁移工具。
 
 注册 Desktop WebApp：
 

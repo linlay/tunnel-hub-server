@@ -1,6 +1,7 @@
 package desktop
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -15,13 +16,13 @@ import (
 	"example.invalid/tunnel-hub-server/internal/store"
 )
 
-const maxConversationShareBytes int64 = 20 * 1024 * 1024
-const conversationDocumentVersion = "1"
-const conversationDocumentVersionHeader = "X-Conversation-Document-Version"
+const maxConversationSnapshotBytes int64 = 20 * 1024 * 1024
+const conversationSnapshotVersion = "1"
+const conversationSnapshotVersionHeader = "X-Conversation-Snapshot-Version"
 const conversationShareExpirationHeader = "X-Conversation-Share-Expiration"
 const conversationShareConversationIDHeader = "X-Conversation-ID"
 
-var errConversationShareTooLarge = errors.New("conversation HTML document is too large")
+var errConversationShareTooLarge = errors.New("conversation snapshot is too large")
 
 type conversationShareSizeError struct {
 	actual int64
@@ -29,9 +30,9 @@ type conversationShareSizeError struct {
 
 func (e *conversationShareSizeError) Error() string {
 	return fmt.Sprintf(
-		"conversation HTML document is %d bytes; limit is %d bytes (20 MiB)",
+		"conversation snapshot is %d bytes; limit is %d bytes (20 MiB)",
 		e.actual,
-		maxConversationShareBytes,
+		maxConversationSnapshotBytes,
 	)
 }
 
@@ -45,6 +46,7 @@ func newConversationShareSizeError(actual int64) error {
 
 type conversationShareRecordResponse struct {
 	ID             string  `json:"id"`
+	ConversationID string  `json:"conversationId"`
 	URL            string  `json:"url"`
 	CreatedAt      string  `json:"createdAt"`
 	ExpiresAt      *string `json:"expiresAt"`
@@ -71,7 +73,7 @@ func (s *Server) handleCreateConversationShare(w http.ResponseWriter, r *http.Re
 		writeError(w, http.StatusBadRequest, "invalid conversation id")
 		return
 	}
-	html, err := decodeConversationHTML(r)
+	snapshot, err := decodeConversationSnapshot(r)
 	if err != nil {
 		status := http.StatusBadRequest
 		if errors.Is(err, errConversationShareTooLarge) {
@@ -95,8 +97,8 @@ func (s *Server) handleCreateConversationShare(w http.ResponseWriter, r *http.Re
 		r.Context(),
 		principal.UserID,
 		conversationID,
-		store.ConversationDocumentVersion,
-		html,
+		store.ConversationSnapshotVersion,
+		snapshot,
 		now,
 		expiresAt,
 		policy.singleUse,
@@ -113,9 +115,8 @@ func (s *Server) handleListConversationShares(w http.ResponseWriter, r *http.Req
 	if !ok {
 		return
 	}
-	conversationID := strings.TrimSpace(r.URL.Query().Get("conversationId"))
-	if !store.ValidConversationShareConversationID(conversationID) {
-		writeError(w, http.StatusBadRequest, "invalid conversation id")
+	if r.URL.RawQuery != "" {
+		writeError(w, http.StatusBadRequest, "conversation share list does not accept query parameters")
 		return
 	}
 	shareURL, err := s.conversationShareBaseURL()
@@ -123,7 +124,7 @@ func (s *Server) handleListConversationShares(w http.ResponseWriter, r *http.Req
 		writeError(w, http.StatusServiceUnavailable, err.Error())
 		return
 	}
-	shares, err := s.DB.ListConversationShares(r.Context(), principal.UserID, conversationID, s.now().UTC())
+	shares, err := s.DB.ListConversationShares(r.Context(), principal.UserID, s.now().UTC())
 	if err != nil {
 		s.writeInternal(w, "list conversation shares", err)
 		return
@@ -177,6 +178,7 @@ func conversationShareRecordResponseFromStore(
 ) conversationShareRecordResponse {
 	return conversationShareRecordResponse{
 		ID:             share.ID,
+		ConversationID: share.ConversationID,
 		URL:            strings.TrimSuffix(shareURL, "/") + "/" + url.PathEscape(share.ID),
 		CreatedAt:      share.CreatedAt.Format("2006-01-02T15:04:05.000Z07:00"),
 		ExpiresAt:      formatConversationShareExpiration(share.ExpiresAt),
@@ -232,11 +234,22 @@ func (s *Server) handleGetPublicConversationSharePage(w http.ResponseWriter, r *
 			s.Logger.Error("record conversation share access", "shareId", share.ID, "error", err)
 		}
 	}
+	if s.conversationShareRenderer == nil {
+		s.Logger.Error("render conversation share", "shareId", share.ID, "error", "renderer unavailable")
+		writePublicConversationShareError(w, http.StatusInternalServerError)
+		return
+	}
+	html, err := s.conversationShareRenderer.Render(share.SnapshotJSON, s.Config.SharePublicBaseURL)
+	if err != nil {
+		s.Logger.Error("render conversation share", "shareId", share.ID, "error", err)
+		writePublicConversationShareError(w, http.StatusInternalServerError)
+		return
+	}
 	setPublicConversationShareHeaders(w.Header())
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.Header().Set("Content-Length", strconv.Itoa(len(share.HTMLDocument)))
+	w.Header().Set("Content-Length", strconv.Itoa(len(html)))
 	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write(share.HTMLDocument)
+	_, _ = w.Write(html)
 }
 
 func writePublicConversationShareError(w http.ResponseWriter, status int) {
@@ -257,37 +270,43 @@ func setPublicConversationShareHeaders(header http.Header) {
 	header.Set("Referrer-Policy", "no-referrer")
 }
 
-func decodeConversationHTML(r *http.Request) ([]byte, error) {
+func decodeConversationSnapshot(r *http.Request) ([]byte, error) {
 	mediaType, params, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
-	if err != nil || mediaType != "text/html" {
-		return nil, errors.New("Content-Type must be text/html")
+	if err != nil || mediaType != "application/json" {
+		return nil, errors.New("Content-Type must be application/json")
 	}
 	for name := range params {
 		if name != "charset" {
-			return nil, errors.New("HTML document has unsupported media type parameters")
+			return nil, errors.New("conversation snapshot has unsupported media type parameters")
 		}
 	}
 	if charset, ok := params["charset"]; ok && !strings.EqualFold(charset, "utf-8") {
-		return nil, errors.New("HTML document charset must be utf-8")
+		return nil, errors.New("conversation snapshot charset must be utf-8")
 	}
-	if r.Header.Get(conversationDocumentVersionHeader) != conversationDocumentVersion {
-		return nil, errors.New("unsupported conversation document version")
+	if r.Header.Get(conversationSnapshotVersionHeader) != conversationSnapshotVersion {
+		return nil, errors.New("unsupported conversation snapshot version")
 	}
-	if r.ContentLength > maxConversationShareBytes {
+	if r.ContentLength > maxConversationSnapshotBytes {
 		return nil, newConversationShareSizeError(r.ContentLength)
 	}
-	limited := io.LimitReader(r.Body, maxConversationShareBytes+1)
-	html, err := io.ReadAll(limited)
+	limited := io.LimitReader(r.Body, maxConversationSnapshotBytes+1)
+	snapshot, err := io.ReadAll(limited)
 	if err != nil {
-		return nil, errors.New("invalid HTML document")
+		return nil, errors.New("invalid conversation snapshot")
 	}
-	if int64(len(html)) > maxConversationShareBytes {
-		return nil, newConversationShareSizeError(int64(len(html)))
+	if int64(len(snapshot)) > maxConversationSnapshotBytes {
+		return nil, newConversationShareSizeError(int64(len(snapshot)))
 	}
-	if len(html) == 0 || !utf8.Valid(html) {
-		return nil, errors.New("HTML document must be non-empty UTF-8")
+	if len(snapshot) == 0 || !utf8.Valid(snapshot) || !json.Valid(snapshot) {
+		return nil, errors.New("conversation snapshot must be valid UTF-8 JSON")
 	}
-	return html, nil
+	var envelope struct {
+		Version int `json:"version"`
+	}
+	if err := json.Unmarshal(snapshot, &envelope); err != nil || envelope.Version != store.ConversationSnapshotVersion {
+		return nil, errors.New("unsupported conversation snapshot version")
+	}
+	return snapshot, nil
 }
 
 func conversationShareIDFromPath(path, prefix string) (string, bool) {

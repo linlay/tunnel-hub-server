@@ -39,7 +39,7 @@ Relay 入口在 `cmd/relay/main.go`，启动顺序是：
 - `*.m.example.test/api/upload`: Mobile 上传入口，只从请求 Host 确定 Desktop，内部发送 `ns=ap`, `type=/api/upload`；multipart 不允许携带 `publicHost`。
 - `*.m.example.test/api/resource`: Mobile 资源入口，内部发送 `ns=ap`, `type=/api/resource` 和 `{file,pushURL}`；Desktop 通过 ticket 保护的 `/api/push/{id}` 回推文件。
 - `*-wa.example.test`: Desktop WebApp public HTTP/WebSocket。Relay 通过 WebApp route 与所属 deviceKey 打开 Desktop stream，向 Desktop 发送 `ns=wa` 的 `http.request` 或 `websocket.connect` 元数据。
-- `share.example.test`: 对话分享只读站点。公开边缘网关将 `/share/{id}` 和 `/assets/conversation-export/*` 转发到 Relay；Tunnel API origin 也必须暴露相同资产路径，供动态 origin 的本地和落盘导出使用。普通分享以 SQLite 主键查询读取有效 HTML；一次性分享在普通查询未命中后以 `DELETE ... RETURNING` 原子取得并删除 HTML，并发只允许一个请求成功；两者都原字节返回。资产从编译期 `embed.FS` 返回 WebClient 内容寻址文件。
+- `share.example.test`: 对话分享只读站点。公开边缘网关将 `/share/{id}` 和 `/assets/conversation-export/*` 转发到 Relay；Tunnel API origin 也暴露分享模板。Relay 从 SQLite 读取 `ConversationSnapshotV1`，注入当前唯一模板后返回 HTML；一次性分享仍以 `DELETE ... RETURNING` 原子消费。模板、manifest 和内容寻址资产由 WebClient 的独立发布命令整体替换，并从编译期 `embed.FS` 返回。
 
 ## 4. 目录结构
 
@@ -53,7 +53,7 @@ Relay 入口在 `cmd/relay/main.go`，启动顺序是：
 - `tools/neutralcheck`: 使用外部禁用词扫描 Git 跟踪文件和待提交的新文件。
 - `internal/desktop`: Desktop device 和 Desktop WebApp 注册 API。
 - `internal/proxy`: Relay/Agent 转发实现、yamux session、active agent manager、traffic event 记录。
-- `internal/shareassets`: 公开对话显示资产的只读 handler 与编译期文件；目录按 asset-set hash 追加，不覆盖或删除已发布集合。
+- `internal/shareassets`: 公开对话显示模板、manifest、当前唯一 asset-set 与服务端渲染器；不保留旧 Hash 集合或兼容分支。
 - `internal/store`: SQLite schema、migration、DAO 和领域模型。
 - `internal/tunnel`: 隧道协议结构、JSON frame、WebSocket frame、Host/path/upstream 工具。
 - `deploy`: Nginx/Caddy 示例配置。
@@ -73,8 +73,8 @@ Relay 入口在 `cmd/relay/main.go`，启动顺序是：
 - `desktop_sessions`: Desktop tunnel 在线历史，以 deviceKey 关联设备。
 - `events`: 管理操作和系统事件。
 - `traffic_events`: Desktop/WebApp/普通 route 的访问统计。
-- `conversation_shares`: 用户创建的版本化不透明 HTML、会话关联、绝对到期时间、撤销状态和一次性标记；公开 ID 必须不可预测，生成时使用 `share_` 前缀，但接收端只按 URL-safe 不透明 ID 校验。所有者身份来自官网 SSO JWT；Desktop main 是创建、列表、撤销的直接调用方，HTML 由 Desktop 常驻 Worker 使用 Agent Platform Snapshot 与 Agent WebClient 模板预先生成。Relay 只校验传输契约并原字节保存/返回，一次性记录在首次合法 GET 时原子删除；不解析 HTML，也不保留旧事件流双协议。
-- `conversation_share_access`: 每条分享最近一次成功公开访问时间；热更新与 HTML BLOB 分表，不保存访问日志或次数。
+- `conversation_shares`: 用户创建的 `ConversationSnapshotV1` JSON、会话关联、绝对到期时间、撤销状态和一次性标记；公开 ID 必须不可预测。所有者身份来自官网 SSO JWT，Desktop main 直接上传 Snapshot。Relay 严格校验 JSON 和版本，公开读取时用当前模板渲染；一次性记录在首次合法 GET 时原子删除。不保留 HTML 上传或旧 Header 兼容路径。
+- `conversation_share_access`: 每条分享最近一次成功公开访问时间；热更新与 Snapshot BLOB 分表，不保存访问日志或次数。
 
 注意：`admin_api_keys` 仍在 schema 中，但当前主 API 路径没有完整使用它，不要把它当成已上线能力写入 README。
 
@@ -99,7 +99,7 @@ Relay 入口在 `cmd/relay/main.go`，启动顺序是：
 - `GET /api/components`
 - `POST /api/desktop/devices/register`
 - `PUT /api/desktop/devices/{deviceId}/webapps/{name}`
-- `POST /api/desktop/shares`, `GET /api/desktop/shares?conversationId=...`, `DELETE /api/desktop/shares/{shareId}`
+- `POST /api/desktop/shares`, `GET /api/desktop/shares`, `DELETE /api/desktop/shares/{shareId}`
 - `GET /share/{shareId}`
 - `GET/HEAD /assets/conversation-export/{assetSet}/{file}`
 - `POST https://<desktop>.m.example.test/api/upload`

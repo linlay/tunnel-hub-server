@@ -3,6 +3,7 @@ package shareassets
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io/fs"
 	"net/http"
@@ -18,8 +19,8 @@ func TestEmbeddedAssetSetDirectoryMatchesContentHash(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(sets) == 0 {
-		t.Fatal("no embedded conversation export asset sets")
+	if len(sets) != 1 {
+		t.Fatalf("embedded conversation export asset sets=%d want=1", len(sets))
 	}
 	for _, set := range sets {
 		if !set.IsDir() || len(set.Name()) != 64 {
@@ -83,6 +84,61 @@ func TestHandlerServesImmutableCrossOriginAssets(t *testing.T) {
 	}
 }
 
+func TestHandlerServesCurrentTemplateWithoutCaching(t *testing.T) {
+	handler := NewHandler()
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, TemplatePublicPath, nil))
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), snapshotMarker) {
+		t.Fatalf("GET status=%d body=%q", response.Code, response.Body.String())
+	}
+	if got := response.Header().Get("Cache-Control"); got != "no-store" {
+		t.Fatalf("Cache-Control=%q", got)
+	}
+	if got := response.Header().Get("Access-Control-Allow-Origin"); got != "*" {
+		t.Fatalf("Access-Control-Allow-Origin=%q", got)
+	}
+}
+
+func TestHandlerServesEveryCurrentManifestAsset(t *testing.T) {
+	var manifest assetManifest
+	content, err := embeddedFiles.ReadFile("conversation-assets.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(content, &manifest); err != nil {
+		t.Fatal(err)
+	}
+	bundle := NewBundle()
+	for _, file := range manifest.Files {
+		response := httptest.NewRecorder()
+		requestPath := PublicPathPrefix + manifest.AssetSet + "/" + file.Path
+		bundle.ServeHTTP(response, httptest.NewRequest(http.MethodGet, requestPath, nil))
+		if response.Code != http.StatusOK || response.Body.Len() == 0 {
+			t.Fatalf("asset=%s status=%d bytes=%d", file.Path, response.Code, response.Body.Len())
+		}
+	}
+}
+
+func TestBundleRendersHTMLSafeSnapshotWithCurrentAssets(t *testing.T) {
+	bundle := NewBundle()
+	snapshot := []byte(`{"version":1,"title":"</script>&  "}`)
+	html, err := bundle.Render(snapshot, "https://share.example.test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := string(html)
+	if strings.Contains(body, `</script>&`) ||
+		!strings.Contains(body, `\u003c/script\u003e\u0026\u2028\u2029`) {
+		t.Fatalf("snapshot was not HTML escaped: %q", body)
+	}
+	if strings.Contains(body, assetOriginMarker) || strings.Contains(body, snapshotMarker) {
+		t.Fatal("rendered page still contains template markers")
+	}
+	if !strings.Contains(body, "https://share.example.test/assets/conversation-export/"+bundle.assetSet+"/runtime.js") {
+		t.Fatal("rendered page does not reference the current asset set")
+	}
+}
+
 func TestHandlerRejectsInvalidPathsAndMethods(t *testing.T) {
 	handler := NewHandler()
 	for _, requestPath := range []string{
@@ -91,6 +147,7 @@ func TestHandlerRejectsInvalidPathsAndMethods(t *testing.T) {
 		PublicPathPrefix + "v1/" + strings.Repeat("a", 64) + "/runtime.js",
 		PublicPathPrefix + strings.Repeat("a", 64) + "/../runtime.js",
 		PublicPathPrefix + strings.Repeat("a", 64) + "/missing.js",
+		PublicPathPrefix + strings.Repeat("b", 64) + "/runtime.js",
 	} {
 		response := httptest.NewRecorder()
 		handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, requestPath, nil))
