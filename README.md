@@ -264,7 +264,7 @@ curl -X POST https://hub.example.test/api/desktop/shares \
   -H "X-Conversation-Share-Expiration: 30d" \
   --data-binary @conversation-snapshot.json
 
-curl 'https://hub.example.test/api/desktop/shares?conversationId=chat_xxx' \
+curl https://hub.example.test/api/desktop/shares \
   -H "Authorization: Bearer $OFFICIAL_SSO_JWT"
 
 curl https://share.example.test/share/share_xxx
@@ -275,7 +275,7 @@ curl -X DELETE https://hub.example.test/api/desktop/shares/share_xxx \
   -H "Authorization: Bearer $OFFICIAL_SSO_JWT"
 ```
 
-创建和列表响应固定包含 `singleUse`。列表只返回当前所有者、指定会话下仍有效的元数据，不读取 Snapshot。匿名 `GET /share/{id}` 使用当前模板渲染仍有效且未撤销的 Snapshot，媒体类型为 `text/html; charset=utf-8`。普通链接成功 GET 会 best-effort 更新独立访问元数据；一次性链接使用 SQLite `DELETE ... RETURNING` 原子取得并删除 Snapshot，并发访问严格只有一个请求成功。HEAD 与其他方法不会消费；已消费、撤销、到期和未知 ID 统一返回最小 404 HTML。
+创建和列表响应固定包含 `conversationId` 和 `singleUse`。列表按创建时间倒序返回当前所有者在所有会话下仍有效的元数据，不读取 Snapshot，也不接受查询参数。匿名 `GET /share/{id}` 使用当前模板渲染仍有效且未撤销的 Snapshot，媒体类型为 `text/html; charset=utf-8`。普通链接成功 GET 会 best-effort 更新独立访问元数据；一次性链接使用 SQLite `DELETE ... RETURNING` 原子取得并删除 Snapshot，并发访问严格只有一个请求成功。HEAD 与其他方法不会消费；已消费、撤销、到期和未知 ID 统一返回最小 404 HTML。
 
 `GET/HEAD /assets/conversation-export/{sha256}/{file}` 只提供随 Relay 编译的当前 manifest 白名单资产；旧 Hash 固定返回 404。分享渲染包由 WebClient 显式同步后随 Relay 原子发布，普通 WebClient 发布不修改它。
 

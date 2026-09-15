@@ -1813,8 +1813,10 @@ CREATE TABLE IF NOT EXISTS conversation_share_access (
 	FOREIGN KEY (share_id) REFERENCES conversation_shares(id) ON DELETE CASCADE
 );
 
-CREATE INDEX IF NOT EXISTS idx_conversation_shares_owner_conversation_created
-	ON conversation_shares(owner_user_id, conversation_id, created_at DESC);
+DROP INDEX IF EXISTS idx_conversation_shares_owner_conversation_created;
+
+CREATE INDEX IF NOT EXISTS idx_conversation_shares_owner_created
+	ON conversation_shares(owner_user_id, created_at DESC, id DESC);
 
 CREATE TABLE IF NOT EXISTS traffic_events (
 	id INTEGER PRIMARY KEY AUTOINCREMENT,
