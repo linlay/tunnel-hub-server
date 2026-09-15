@@ -99,7 +99,7 @@ Relay 入口在 `cmd/relay/main.go`，启动顺序是：
 - `GET /api/components`
 - `POST /api/desktop/devices/register`
 - `PUT /api/desktop/devices/{deviceId}/webapps/{name}`
-- `POST /api/desktop/shares`, `GET /api/desktop/shares?conversationId=...`, `DELETE /api/desktop/shares/{shareId}`
+- `POST /api/desktop/shares`, `GET /api/desktop/shares`, `DELETE /api/desktop/shares/{shareId}`
 - `GET /share/{shareId}`
 - `GET/HEAD /assets/conversation-export/{assetSet}/{file}`
 - `POST https://<desktop>.m.example.test/api/upload`

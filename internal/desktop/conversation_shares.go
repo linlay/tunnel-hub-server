@@ -46,6 +46,7 @@ func newConversationShareSizeError(actual int64) error {
 
 type conversationShareRecordResponse struct {
 	ID             string  `json:"id"`
+	ConversationID string  `json:"conversationId"`
 	URL            string  `json:"url"`
 	CreatedAt      string  `json:"createdAt"`
 	ExpiresAt      *string `json:"expiresAt"`
@@ -114,9 +115,8 @@ func (s *Server) handleListConversationShares(w http.ResponseWriter, r *http.Req
 	if !ok {
 		return
 	}
-	conversationID := strings.TrimSpace(r.URL.Query().Get("conversationId"))
-	if !store.ValidConversationShareConversationID(conversationID) {
-		writeError(w, http.StatusBadRequest, "invalid conversation id")
+	if r.URL.RawQuery != "" {
+		writeError(w, http.StatusBadRequest, "conversation share list does not accept query parameters")
 		return
 	}
 	shareURL, err := s.conversationShareBaseURL()
@@ -124,7 +124,7 @@ func (s *Server) handleListConversationShares(w http.ResponseWriter, r *http.Req
 		writeError(w, http.StatusServiceUnavailable, err.Error())
 		return
 	}
-	shares, err := s.DB.ListConversationShares(r.Context(), principal.UserID, conversationID, s.now().UTC())
+	shares, err := s.DB.ListConversationShares(r.Context(), principal.UserID, s.now().UTC())
 	if err != nil {
 		s.writeInternal(w, "list conversation shares", err)
 		return
@@ -178,6 +178,7 @@ func conversationShareRecordResponseFromStore(
 ) conversationShareRecordResponse {
 	return conversationShareRecordResponse{
 		ID:             share.ID,
+		ConversationID: share.ConversationID,
 		URL:            strings.TrimSuffix(shareURL, "/") + "/" + url.PathEscape(share.ID),
 		CreatedAt:      share.CreatedAt.Format("2006-01-02T15:04:05.000Z07:00"),
 		ExpiresAt:      formatConversationShareExpiration(share.ExpiresAt),

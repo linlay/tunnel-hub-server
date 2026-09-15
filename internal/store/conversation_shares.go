@@ -87,16 +87,11 @@ func (db *DB) CreateConversationShare(
 func (db *DB) ListConversationShares(
 	ctx context.Context,
 	ownerUserID string,
-	conversationID string,
 	now time.Time,
 ) ([]ConversationShare, error) {
 	ownerUserID = strings.TrimSpace(ownerUserID)
-	conversationID = strings.TrimSpace(conversationID)
 	if ownerUserID == "" {
 		return nil, errors.New("owner user id is required")
-	}
-	if !ValidConversationShareConversationID(conversationID) {
-		return nil, errors.New("invalid conversation id")
 	}
 	rows, err := db.sql.QueryContext(ctx, `
 		SELECT shares.id, shares.owner_user_id, shares.conversation_id,
@@ -105,12 +100,11 @@ func (db *DB) ListConversationShares(
 		FROM conversation_shares AS shares
 		LEFT JOIN conversation_share_access AS access ON access.share_id = shares.id
 		WHERE shares.owner_user_id = ?
-		  AND shares.conversation_id = ?
 		  AND shares.snapshot_version = ?
 		  AND shares.revoked_at IS NULL
 		  AND (shares.expires_at IS NULL OR shares.expires_at > ?)
 		ORDER BY shares.created_at DESC, shares.id DESC
-	`, ownerUserID, conversationID, ConversationSnapshotVersion, now.UTC())
+	`, ownerUserID, ConversationSnapshotVersion, now.UTC())
 	if err != nil {
 		return nil, err
 	}
