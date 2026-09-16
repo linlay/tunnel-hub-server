@@ -12,6 +12,7 @@ import (
 )
 
 const ConversationSnapshotVersion = 1
+const MaxConversationSnapshotBytes = 20 << 20
 const MaxConversationShareConversationIDBytes = 255
 
 type ConversationShare struct {
@@ -38,10 +39,13 @@ func (db *DB) CreateConversationShare(
 ) (ConversationShare, error) {
 	ownerUserID = strings.TrimSpace(ownerUserID)
 	conversationID = strings.TrimSpace(conversationID)
-	createdAt = createdAt.UTC()
+	createdAt = databaseTime(createdAt)
 	if expiresAt != nil {
-		normalized := expiresAt.UTC()
+		normalized := databaseTime(*expiresAt)
 		expiresAt = &normalized
+	}
+	if err := ValidateTextLength("ownerUserId", ownerUserID, 255); err != nil {
+		return ConversationShare{}, err
 	}
 	if ownerUserID == "" {
 		return ConversationShare{}, errors.New("owner user id is required")
@@ -51,6 +55,9 @@ func (db *DB) CreateConversationShare(
 	}
 	if snapshotVersion != ConversationSnapshotVersion {
 		return ConversationShare{}, errors.New("unsupported conversation snapshot version")
+	}
+	if len(snapshotJSON) > MaxConversationSnapshotBytes {
+		return ConversationShare{}, errors.New("conversation snapshot is too large")
 	}
 	if len(snapshotJSON) == 0 {
 		return ConversationShare{}, errors.New("conversation snapshot is required")
@@ -104,7 +111,7 @@ func (db *DB) ListConversationShares(
 		  AND shares.revoked_at IS NULL
 		  AND (shares.expires_at IS NULL OR shares.expires_at > ?)
 		ORDER BY shares.created_at DESC, shares.id DESC
-	`, ownerUserID, ConversationSnapshotVersion, now.UTC())
+	`, ownerUserID, ConversationSnapshotVersion, databaseTime(now))
 	if err != nil {
 		return nil, err
 	}
@@ -134,7 +141,7 @@ func (db *DB) ListConversationShares(
 
 func (db *DB) AcquirePublicConversationShare(ctx context.Context, id string, now time.Time) (ConversationShare, error) {
 	id = strings.TrimSpace(id)
-	now = now.UTC()
+	now = databaseTime(now)
 	row := db.sql.QueryRowContext(ctx, `
 		SELECT id, snapshot_version, snapshot_json, single_use
 		FROM conversation_shares
@@ -151,21 +158,31 @@ func (db *DB) AcquirePublicConversationShare(ctx context.Context, id string, now
 		return ConversationShare{}, err
 	}
 
-	row = db.sql.QueryRowContext(ctx, `
-		DELETE FROM conversation_shares
-		WHERE id = ?
-		  AND snapshot_version = ?
-		  AND revoked_at IS NULL
-		  AND single_use = 1
-		  AND (expires_at IS NULL OR expires_at > ?)
-		RETURNING id, snapshot_version, snapshot_json, single_use
-	`, id, ConversationSnapshotVersion, now)
+	tx, err := db.sql.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelReadCommitted})
+	if err != nil {
+		return ConversationShare{}, err
+	}
+	defer tx.Rollback()
+	row = tx.QueryRowContext(ctx, `
+        SELECT id, snapshot_version, snapshot_json, single_use
+        FROM conversation_shares
+        WHERE id = ? AND snapshot_version = ? AND revoked_at IS NULL
+          AND single_use = 1 AND (expires_at IS NULL OR expires_at > ?)
+        FOR UPDATE
+    `, id, ConversationSnapshotVersion, now)
 	if err := row.Scan(&share.ID, &share.SnapshotVersion, &share.SnapshotJSON, &share.SingleUse); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return ConversationShare{}, ErrNotFound
 		}
 		return ConversationShare{}, err
 	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM conversation_shares WHERE id = ?`, id); err != nil {
+		return ConversationShare{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return ConversationShare{}, err
+	}
+
 	return share, nil
 }
 
@@ -174,7 +191,7 @@ func (db *DB) RevokeConversationShare(ctx context.Context, id, ownerUserID strin
 		UPDATE conversation_shares
 		SET revoked_at = ?
 		WHERE id = ? AND owner_user_id = ? AND revoked_at IS NULL
-	`, revokedAt.UTC(), strings.TrimSpace(id), strings.TrimSpace(ownerUserID))
+	`, databaseTime(revokedAt), strings.TrimSpace(id), strings.TrimSpace(ownerUserID))
 	if err != nil {
 		return err
 	}
@@ -192,8 +209,8 @@ func (db *DB) RecordConversationShareAccess(ctx context.Context, id string, acce
 	_, err := db.sql.ExecContext(ctx, `
 		INSERT INTO conversation_share_access (share_id, last_accessed_at)
 		VALUES (?, ?)
-		ON CONFLICT(share_id) DO UPDATE SET last_accessed_at = excluded.last_accessed_at
-	`, strings.TrimSpace(id), accessedAt.UTC())
+		ON DUPLICATE KEY UPDATE last_accessed_at = GREATEST(last_accessed_at, ?)
+	`, strings.TrimSpace(id), databaseTime(accessedAt), databaseTime(accessedAt))
 	return err
 }
 

@@ -16,7 +16,7 @@ import (
 	"example.invalid/tunnel-hub-server/internal/store"
 )
 
-const maxConversationSnapshotBytes int64 = 20 * 1024 * 1024
+const maxConversationSnapshotBytes int64 = store.MaxConversationSnapshotBytes
 const conversationSnapshotVersion = "1"
 const conversationSnapshotVersionHeader = "X-Conversation-Snapshot-Version"
 const conversationShareExpirationHeader = "X-Conversation-Share-Expiration"

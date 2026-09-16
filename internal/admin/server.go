@@ -16,6 +16,7 @@ import (
 	"example.invalid/tunnel-hub-server/internal/config"
 	"example.invalid/tunnel-hub-server/internal/proxy"
 	"example.invalid/tunnel-hub-server/internal/store"
+	"example.invalid/tunnel-hub-server/internal/tunnel"
 )
 
 const adminSessionCookieName = "tunnel_hub_session"
@@ -976,6 +977,12 @@ type routePayload struct {
 }
 
 func (p routePayload) Validate() error {
+	if err := store.ValidateTextLength("publicHost", tunnel.NormalizeHost(p.PublicHost), 255); err != nil {
+		return err
+	}
+	if err := store.ValidateTextLength("tokenId", strings.TrimSpace(p.TokenID), 128); err != nil {
+		return err
+	}
 	if strings.TrimSpace(p.PublicHost) == "" {
 		return errors.New("publicHost is required")
 	}
@@ -995,6 +1002,9 @@ type servicePayload struct {
 }
 
 func (p servicePayload) Validate() error {
+	if err := store.ValidateTextLength("tokenId", strings.TrimSpace(p.TokenID), 128); err != nil {
+		return err
+	}
 	if strings.TrimSpace(p.TargetURL) == "" {
 		return errors.New("targetUrl is required")
 	}

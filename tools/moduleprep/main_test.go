@@ -70,6 +70,7 @@ func TestPrepareTemporaryTreeIncludesUntrackedSourceAndExcludesLocalFiles(t *tes
 	writeTestFile(t, filepath.Join(source, "internal", "tracked.go"), "package internal\n\nimport _ \"example.invalid/tunnel-hub-server/other\"\n")
 	writeTestFile(t, filepath.Join(source, "internal", "new.go"), "package internal\n")
 	writeTestFile(t, filepath.Join(source, ".env"), "SECRET=do-not-copy\n")
+	writeTestFile(t, filepath.Join(source, ".env.test.local"), "TEST_MYSQL_PASSWORD=do-not-copy\n")
 	writeTestFile(t, filepath.Join(source, "bin", "relay"), "build output\n")
 
 	target := "github.com/example/tunnel-hub-server"
@@ -82,7 +83,7 @@ func TestPrepareTemporaryTreeIncludesUntrackedSourceAndExcludesLocalFiles(t *tes
 	assertTestFileContains(t, filepath.Join(temporary, "go.mod"), "module "+target)
 	assertTestFileContains(t, filepath.Join(temporary, "internal", "tracked.go"), target+"/other")
 	assertTestFileContains(t, filepath.Join(temporary, "internal", "new.go"), "package internal")
-	for _, excluded := range []string{".env", filepath.Join("bin", "relay")} {
+	for _, excluded := range []string{".env", ".env.test.local", filepath.Join("bin", "relay")} {
 		if _, err := os.Stat(filepath.Join(temporary, excluded)); !os.IsNotExist(err) {
 			t.Fatalf("excluded file copied to temporary tree: %s", excluded)
 		}
@@ -91,7 +92,7 @@ func TestPrepareTemporaryTreeIncludesUntrackedSourceAndExcludesLocalFiles(t *tes
 }
 
 func TestExcludedWorktreePath(t *testing.T) {
-	for _, path := range []string{".env", ".local/runtime.json", "bin/relay", "web/node_modules/pkg/index.js", "web/dist/index.js", "output/build/app", "configs/key.pem", "data/local.sqlite"} {
+	for _, path := range []string{".env", ".env.test.local", ".local/runtime.json", "bin/relay", "web/node_modules/pkg/index.js", "web/dist/index.js", "output/build/app", "configs/key.pem", "data/local.sqlite"} {
 		if !excludedWorktreePath(path) {
 			t.Fatalf("expected excluded path: %s", path)
 		}

@@ -10,6 +10,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
+	"example.invalid/tunnel-hub-server/internal/testutil/mysqltest"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -583,11 +584,15 @@ func publicRequestBody(t *testing.T, relayURL, host string) string {
 
 func openProxyTestDB(t *testing.T) *store.DB {
 	t.Helper()
-	db, err := store.Open(":memory:")
+	db, err := store.Open(context.Background(), mysqltest.NewConfig(t))
 	if err != nil {
 		t.Fatalf("open db: %v", err)
 	}
-	t.Cleanup(func() { _ = db.Close() })
+	t.Cleanup(func() {
+		if err := db.Close(); err != nil {
+			t.Errorf("close database: %v", err)
+		}
+	})
 	if err := db.Migrate(context.Background()); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}

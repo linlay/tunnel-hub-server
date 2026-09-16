@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"errors"
+	"example.invalid/tunnel-hub-server/internal/testutil/mysqltest"
 	"fmt"
 	"net"
 	"net/http"
@@ -751,11 +752,15 @@ func newAdminTestServer(t *testing.T) (*Server, *store.DB) {
 
 func newAdminTestServerWithConfig(t *testing.T, cfg config.RelayConfig) (*Server, *store.DB) {
 	t.Helper()
-	db, err := store.Open(":memory:")
+	db, err := store.Open(context.Background(), mysqltest.NewConfig(t))
 	if err != nil {
 		t.Fatalf("open db: %v", err)
 	}
-	t.Cleanup(func() { _ = db.Close() })
+	t.Cleanup(func() {
+		if err := db.Close(); err != nil {
+			t.Errorf("close database: %v", err)
+		}
+	})
 	if err := db.Migrate(context.Background()); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}

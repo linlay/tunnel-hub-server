@@ -280,7 +280,7 @@ func copyWorktree(sourceRoot, destinationRoot string) error {
 func excludedWorktreePath(path string) bool {
 	cleaned := filepath.ToSlash(filepath.Clean(path))
 	base := filepath.Base(cleaned)
-	if cleaned == ".env" || strings.HasPrefix(cleaned, ".local/") || hasDirectory(cleaned, "node_modules") || hasDirectory(cleaned, "dist") || hasDirectory(cleaned, "build") || hasDirectory(cleaned, "bin") {
+	if cleaned == ".env" || (strings.HasPrefix(base, ".env.") && base != ".env.example") || strings.HasPrefix(cleaned, ".local/") || hasDirectory(cleaned, "node_modules") || hasDirectory(cleaned, "dist") || hasDirectory(cleaned, "build") || hasDirectory(cleaned, "bin") {
 		return true
 	}
 	extension := strings.ToLower(filepath.Ext(base))

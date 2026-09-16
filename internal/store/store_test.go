@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"example.invalid/tunnel-hub-server/internal/testutil/mysqltest"
 	"testing"
 	"time"
 )
@@ -94,78 +95,6 @@ func TestDesktopSessionsAndTrafficUseDeviceIdentity(t *testing.T) {
 	}
 }
 
-func TestMigrateDesktopIdentityPreservesAgentAndDesktopData(t *testing.T) {
-	db, err := Open(":memory:")
-	if err != nil {
-		t.Fatalf("open: %v", err)
-	}
-	t.Cleanup(func() { _ = db.Close() })
-	now := time.Now().UTC()
-	legacySchema := `
-		CREATE TABLE tunnel_tokens (id TEXT PRIMARY KEY, name TEXT NOT NULL, token_hash TEXT NOT NULL, token_prefix TEXT NOT NULL, active BOOLEAN NOT NULL, created_at TIMESTAMP NOT NULL, last_used_at TIMESTAMP);
-		CREATE TABLE routes (id TEXT PRIMARY KEY, public_host TEXT NOT NULL UNIQUE, target_url TEXT NOT NULL, token_id TEXT, active BOOLEAN NOT NULL, created_at TIMESTAMP NOT NULL, updated_at TIMESTAMP NOT NULL);
-		CREATE TABLE desktop_devices (device_id TEXT PRIMARY KEY, display_device_id TEXT, device_name TEXT, owner_user_id TEXT, owner_email TEXT, owner_name TEXT, device_secret_hash TEXT, token_id TEXT, route_id TEXT, public_host TEXT NOT NULL UNIQUE, target_url TEXT, created_at TIMESTAMP NOT NULL, updated_at TIMESTAMP NOT NULL);
-		CREATE TABLE desktop_webapps (id TEXT PRIMARY KEY, device_id TEXT NOT NULL, name TEXT NOT NULL, route_id TEXT NOT NULL, public_host TEXT NOT NULL UNIQUE, target_url TEXT NOT NULL, active BOOLEAN NOT NULL, created_at TIMESTAMP NOT NULL, updated_at TIMESTAMP NOT NULL);
-		CREATE TABLE agent_sessions (id TEXT PRIMARY KEY, token_id TEXT NOT NULL, remote_addr TEXT NOT NULL, connected_at TIMESTAMP NOT NULL, disconnected_at TIMESTAMP);
-		CREATE TABLE traffic_events (id INTEGER PRIMARY KEY AUTOINCREMENT, object_type TEXT NOT NULL, public_host TEXT NOT NULL DEFAULT '', route_id TEXT, token_id TEXT, session_id TEXT, kind TEXT NOT NULL, method TEXT NOT NULL DEFAULT '', path TEXT NOT NULL DEFAULT '', status_code INTEGER NOT NULL DEFAULT 0, bytes_in INTEGER NOT NULL DEFAULT 0, bytes_out INTEGER NOT NULL DEFAULT 0, error TEXT NOT NULL DEFAULT '', occurred_at TIMESTAMP NOT NULL);
-	`
-	if _, err := db.sql.Exec(legacySchema); err != nil {
-		t.Fatalf("create legacy schema: %v", err)
-	}
-	for _, statement := range []struct {
-		query string
-		args  []any
-	}{
-		{`INSERT INTO tunnel_tokens VALUES (?, ?, ?, ?, 1, ?, NULL)`, []any{"desktop-token", "desktop", "hash", "desk", now}},
-		{`INSERT INTO tunnel_tokens VALUES (?, ?, ?, ?, 1, ?, NULL)`, []any{"agent-token", "agent", "hash", "agent", now}},
-		{`INSERT INTO routes VALUES (?, ?, ?, ?, 1, ?, ?)`, []any{"webapp-route", "abcdefghijk23-wa.example.test", "http://127.0.0.1:5173", "desktop-token", now, now}},
-		{`INSERT INTO routes VALUES (?, ?, ?, ?, 1, ?, ?)`, []any{"legacy-route", "legacy.example.test", "http://127.0.0.1:3000", "desktop-token", now, now}},
-		{`INSERT INTO routes VALUES (?, ?, ?, ?, 1, ?, ?)`, []any{"agent-route", "agent.example.test", "http://127.0.0.1:8080", "agent-token", now, now}},
-		{`INSERT INTO desktop_devices VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, []any{"device-key", "mac-lan", "Mac LAN", "user-1", "one@example.test", "Owner", "secret", "desktop-token", "legacy-route", "desk.m.example.test", "http://127.0.0.1:7082", now, now}},
-		{`INSERT INTO desktop_webapps VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?)`, []any{"webapp", "device-key", "notes", "webapp-route", "abcdefghijk23-wa.example.test", "http://127.0.0.1:5173", now, now}},
-		{`INSERT INTO agent_sessions VALUES (?, ?, ?, ?, NULL)`, []any{"desktop-session", "desktop-token", "127.0.0.1", now}},
-		{`INSERT INTO agent_sessions VALUES (?, ?, ?, ?, NULL)`, []any{"agent-session", "agent-token", "127.0.0.2", now}},
-		{`INSERT INTO traffic_events (object_type, public_host, token_id, session_id, kind, bytes_in, bytes_out, occurred_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, []any{"desktop", "desk.m.example.test", "desktop-token", "desktop-session", "websocket", 3, 5, now}},
-	} {
-		if _, err := db.sql.Exec(statement.query, statement.args...); err != nil {
-			t.Fatalf("seed legacy data: %v", err)
-		}
-	}
-	if err := db.Migrate(context.Background()); err != nil {
-		t.Fatalf("migrate: %v", err)
-	}
-	if err := db.Migrate(context.Background()); err != nil {
-		t.Fatalf("idempotent migrate: %v", err)
-	}
-	if hasTokenColumn, err := db.tableHasColumn(context.Background(), "desktop_devices", "token_id"); err != nil || hasTokenColumn {
-		t.Fatalf("desktop token column remains: has=%v err=%v", hasTokenColumn, err)
-	}
-	tokens, err := db.ListTokens(context.Background())
-	if err != nil || len(tokens) != 1 || tokens[0].ID != "agent-token" {
-		t.Fatalf("tokens = %+v, %v", tokens, err)
-	}
-	desktopSessions, err := db.ListDesktopSessions(context.Background(), 10)
-	if err != nil || len(desktopSessions) != 1 || desktopSessions[0].ID != "desktop-session" {
-		t.Fatalf("desktop sessions = %+v, %v", desktopSessions, err)
-	}
-	agentSessions, err := db.ListAgentSessions(context.Background(), 10)
-	if err != nil || len(agentSessions) != 1 || agentSessions[0].ID != "agent-session" {
-		t.Fatalf("agent sessions = %+v, %v", agentSessions, err)
-	}
-	webappRoute, err := db.GetActiveDesktopWebAppRouteByHost(context.Background(), "abcdefghijk23-wa.example.test")
-	if err != nil || webappRoute.Route.TokenID != "" || !webappRoute.Route.Active {
-		t.Fatalf("webapp route = %+v, %v", webappRoute, err)
-	}
-	legacyRoute, err := db.GetRouteByHost(context.Background(), "legacy.example.test")
-	if err != nil || legacyRoute.Active || legacyRoute.TokenID != "" {
-		t.Fatalf("legacy route = %+v, %v", legacyRoute, err)
-	}
-	events, err := db.ListTrafficEvents(context.Background(), 10, "desktop", "")
-	if err != nil || len(events) != 1 || events[0].DeviceID != "device-key" || events[0].TokenID != "" {
-		t.Fatalf("traffic = %+v, %v", events, err)
-	}
-}
-
 func TestConversationShareSchemaRejectsSingleUseWithExpiration(t *testing.T) {
 	assertConversationShareSingleUseExpirationConstraint(t, openTestDB(t), "share_invalid_fresh_once")
 }
@@ -185,11 +114,15 @@ func assertConversationShareSingleUseExpirationConstraint(t *testing.T, db *DB, 
 
 func openTestDB(t *testing.T) *DB {
 	t.Helper()
-	db, err := Open(":memory:")
+	db, err := Open(context.Background(), mysqltest.NewConfig(t))
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
-	t.Cleanup(func() { _ = db.Close() })
+	t.Cleanup(func() {
+		if err := db.Close(); err != nil {
+			t.Errorf("close database: %v", err)
+		}
+	})
 	if err := db.Migrate(context.Background()); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}

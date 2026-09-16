@@ -18,7 +18,13 @@ func useTestRelayConfig(t *testing.T) {
 	t.Helper()
 	setValidBrandEnv(t)
 	t.Setenv("RELAY_ADDR", ":18081")
-	t.Setenv("RELAY_DB_PATH", ":memory:")
+	t.Setenv("MYSQL_HOST", "127.0.0.1")
+	t.Setenv("MYSQL_DATABASE", "tunnel_test")
+	t.Setenv("MYSQL_USER", "tunnel_test")
+	t.Setenv("MYSQL_PASSWORD", "test-password")
+	for _, key := range []string{"MYSQL_PORT", "MYSQL_TLS", "MYSQL_TLS_CA_FILE", "MYSQL_MAX_OPEN_CONNS", "MYSQL_MAX_IDLE_CONNS"} {
+		t.Setenv(key, "")
+	}
 	t.Setenv("SSO_JWT_ISSUER", "https://issuer.example.test")
 	t.Setenv("SSO_JWT_PUBLIC_KEY_FILE", "test-public.pem")
 	t.Setenv("SSO_JWT_AUDIENCE", "tunnel")
@@ -102,7 +108,7 @@ func TestLoadRelayConfigRequiresEnvironmentSpecificValues(t *testing.T) {
 		"RELAY_PUBLIC_URL",
 		"SHARE_PUBLIC_BASE_URL",
 		"RELAY_ADDR",
-		"RELAY_DB_PATH",
+		"MYSQL_HOST", "MYSQL_DATABASE", "MYSQL_USER", "MYSQL_PASSWORD",
 		"SSO_JWT_ISSUER",
 		"SSO_JWT_AUDIENCE",
 		"SSO_JWT_USER_ID_CLAIM",
