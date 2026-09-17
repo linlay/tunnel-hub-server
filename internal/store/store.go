@@ -20,8 +20,16 @@ var (
 )
 
 type DB struct {
-	sql *sql.DB
+	sql      *sql.DB
+	database databaseType
 }
+
+type databaseType uint8
+
+const (
+	databaseMySQL databaseType = iota
+	databaseSQLite
+)
 
 type Route struct {
 	ID         string    `json:"id"`
@@ -389,7 +397,7 @@ func (db *DB) RegisterDesktopDevice(ctx context.Context, input RegisterDesktopDe
 		return RegisterDesktopDeviceResult{}, errors.New("publicHost is required")
 	}
 
-	tx, err := db.sql.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelReadCommitted})
+	tx, err := db.beginWriteTx(ctx)
 	if err != nil {
 		return RegisterDesktopDeviceResult{}, err
 	}
@@ -400,11 +408,11 @@ func (db *DB) RegisterDesktopDevice(ctx context.Context, input RegisterDesktopDe
 		}
 	}()
 
-	device, err := lockDesktopDeviceByOwnerAndDisplayTx(ctx, tx, input.OwnerUserID, input.DeviceID)
+	device, err := db.lockDesktopDeviceByOwnerAndDisplayTx(ctx, tx, input.OwnerUserID, input.DeviceID)
 	if errors.Is(err, ErrNotFound) {
 		result, err := createDesktopDeviceRegistration(ctx, tx, input)
 		if err != nil {
-			if !isDuplicateKey(err) {
+			if !db.isDuplicateKey(err) {
 				return RegisterDesktopDeviceResult{}, err
 			}
 			_ = tx.Rollback()
@@ -505,7 +513,7 @@ func (db *DB) RegisterDesktopWebApp(ctx context.Context, input RegisterDesktopWe
 		return RegisterDesktopWebAppResult{}, errors.New("targetUrl is required")
 	}
 
-	tx, err := db.sql.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelReadCommitted})
+	tx, err := db.beginWriteTx(ctx)
 	if err != nil {
 		return RegisterDesktopWebAppResult{}, err
 	}
@@ -516,7 +524,7 @@ func (db *DB) RegisterDesktopWebApp(ctx context.Context, input RegisterDesktopWe
 		}
 	}()
 
-	device, err := lockDesktopDeviceByOwnerAndDisplayTx(ctx, tx, input.OwnerUserID, input.DeviceID)
+	device, err := db.lockDesktopDeviceByOwnerAndDisplayTx(ctx, tx, input.OwnerUserID, input.DeviceID)
 	if err != nil {
 		return RegisterDesktopWebAppResult{}, err
 	}
@@ -527,11 +535,11 @@ func (db *DB) RegisterDesktopWebApp(ctx context.Context, input RegisterDesktopWe
 		}
 		route, err := insertRouteTx(ctx, tx, input.PublicHost, input.TargetURL, input.Active, "")
 		if err != nil {
-			return RegisterDesktopWebAppResult{}, desktopHostError(err)
+			return RegisterDesktopWebAppResult{}, db.desktopHostError(err)
 		}
 		webApp, err := insertDesktopWebAppTx(ctx, tx, device.DeviceKey, input.Name, route)
 		if err != nil {
-			return RegisterDesktopWebAppResult{}, desktopHostError(err)
+			return RegisterDesktopWebAppResult{}, db.desktopHostError(err)
 		}
 		if err := tx.Commit(); err != nil {
 			return RegisterDesktopWebAppResult{}, err
@@ -793,7 +801,7 @@ func (db *DB) ListTrafficEvents(ctx context.Context, limit int, objectType, quer
 		args = append(args, objectType)
 	}
 	if query != "" {
-		clauses = append(clauses, "(public_host COLLATE utf8mb4_0900_as_ci LIKE ? OR route_id COLLATE utf8mb4_0900_as_ci LIKE ? OR token_id COLLATE utf8mb4_0900_as_ci LIKE ? OR device_id COLLATE utf8mb4_0900_as_ci LIKE ? OR session_id COLLATE utf8mb4_0900_as_ci LIKE ? OR kind COLLATE utf8mb4_0900_as_ci LIKE ? OR method COLLATE utf8mb4_0900_as_ci LIKE ? OR path COLLATE utf8mb4_0900_as_ci LIKE ? OR error COLLATE utf8mb4_0900_as_ci LIKE ?)")
+		clauses = append(clauses, db.trafficSearchClause())
 		like := "%" + query + "%"
 		for i := 0; i < 9; i++ {
 			args = append(args, like)
@@ -841,7 +849,7 @@ func (db *DB) TrafficStatsByPublicHost(ctx context.Context) (map[string]TrafficS
 	stats := make(map[string]TrafficStats)
 	for rows.Next() {
 		var key string
-		value, err := scanTrafficStatsWithKey(rows, &key)
+		value, err := db.scanTrafficStatsWithKey(rows, &key)
 		if err != nil {
 			return nil, err
 		}
@@ -864,7 +872,7 @@ func (db *DB) TrafficStatsByToken(ctx context.Context) (map[string]TrafficStats,
 	stats := make(map[string]TrafficStats)
 	for rows.Next() {
 		var key string
-		value, err := scanTrafficStatsWithKey(rows, &key)
+		value, err := db.scanTrafficStatsWithKey(rows, &key)
 		if err != nil {
 			return nil, err
 		}
@@ -887,7 +895,7 @@ func (db *DB) TrafficStatsByDevice(ctx context.Context) (map[string]TrafficStats
 	stats := make(map[string]TrafficStats)
 	for rows.Next() {
 		var key string
-		value, err := scanTrafficStatsWithKey(rows, &key)
+		value, err := db.scanTrafficStatsWithKey(rows, &key)
 		if err != nil {
 			return nil, err
 		}
@@ -901,7 +909,7 @@ func (db *DB) TrafficTotals(ctx context.Context) (TrafficStats, error) {
 		SELECT COUNT(*), COALESCE(SUM(bytes_in), 0), COALESCE(SUM(bytes_out), 0), MAX(occurred_at)
 		FROM traffic_events
 	`)
-	return scanTrafficStatsNoKey(row)
+	return db.scanTrafficStatsNoKey(row)
 }
 
 func createDesktopDeviceRegistration(ctx context.Context, tx *sql.Tx, input RegisterDesktopDeviceInput) (RegisterDesktopDeviceResult, error) {
@@ -1004,11 +1012,11 @@ func getRouteByHostTx(ctx context.Context, tx *sql.Tx, host string) (Route, erro
 	return scanRoute(row)
 }
 
-func lockDesktopDeviceByOwnerAndDisplayTx(ctx context.Context, tx *sql.Tx, ownerUserID, deviceID string) (DesktopDevice, error) {
+func (db *DB) lockDesktopDeviceByOwnerAndDisplayTx(ctx context.Context, tx *sql.Tx, ownerUserID, deviceID string) (DesktopDevice, error) {
 	row := tx.QueryRowContext(ctx, `
 		SELECT device_id, display_device_id, device_name, owner_user_id, owner_email, owner_name, public_host, created_at, updated_at
 		FROM desktop_devices
-		WHERE owner_user_id = ? AND display_device_id = ? FOR UPDATE
+		WHERE owner_user_id = ? AND display_device_id = ?`+db.forUpdateClause()+`
 	`, strings.TrimSpace(ownerUserID), strings.TrimSpace(deviceID))
 	return scanDesktopDevice(row)
 }
@@ -1222,7 +1230,10 @@ func scanTrafficEvents(rows *sql.Rows) ([]TrafficEvent, error) {
 	return events, rows.Err()
 }
 
-func scanTrafficStatsWithKey(row rowScanner, key *string) (TrafficStats, error) {
+func (db *DB) scanTrafficStatsWithKey(row rowScanner, key *string) (TrafficStats, error) {
+	if db.database == databaseSQLite {
+		return scanSQLiteTrafficStatsWithKey(row, key)
+	}
 	var stats TrafficStats
 	var lastAt sql.NullTime
 	if err := row.Scan(key, &stats.RequestCount, &stats.BytesIn, &stats.BytesOut, &lastAt); err != nil {
@@ -1234,7 +1245,10 @@ func scanTrafficStatsWithKey(row rowScanner, key *string) (TrafficStats, error) 
 	return stats, nil
 }
 
-func scanTrafficStatsNoKey(row rowScanner) (TrafficStats, error) {
+func (db *DB) scanTrafficStatsNoKey(row rowScanner) (TrafficStats, error) {
+	if db.database == databaseSQLite {
+		return scanSQLiteTrafficStatsNoKey(row)
+	}
 	var stats TrafficStats
 	var lastAt sql.NullTime
 	if err := row.Scan(&stats.RequestCount, &stats.BytesIn, &stats.BytesOut, &lastAt); err != nil {

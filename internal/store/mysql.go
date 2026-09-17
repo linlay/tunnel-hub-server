@@ -88,7 +88,7 @@ func Open(ctx context.Context, cfg config.MySQLConfig) (*DB, error) {
 		_ = pool.Close()
 		return nil, err
 	}
-	return &DB{sql: pool}, nil
+	return &DB{sql: pool, database: databaseMySQL}, nil
 }
 
 func validateMySQLServer(version string, packet int64) error {
@@ -105,8 +105,7 @@ func validateMySQLServer(version string, packet int64) error {
 
 func (db *DB) Close() error { return db.sql.Close() }
 
-// Migrate creates only the current schema. Existing tables are never rewritten.
-func (db *DB) Migrate(ctx context.Context) error {
+func (db *DB) migrateMySQL(ctx context.Context) error {
 	for _, statement := range strings.Split(schema, ";") {
 		if strings.TrimSpace(statement) == "" {
 			continue
@@ -118,16 +117,9 @@ func (db *DB) Migrate(ctx context.Context) error {
 	return nil
 }
 
-func isDuplicateKey(err error) bool {
+func isMySQLDuplicateKey(err error) bool {
 	var databaseError *mysql.MySQLError
 	return errors.As(err, &databaseError) && databaseError.Number == 1062
 }
 
 func databaseTime(value time.Time) time.Time { return value.UTC().Truncate(time.Microsecond) }
-
-func desktopHostError(err error) error {
-	if isDuplicateKey(err) {
-		return ErrDesktopDeviceHostConflict
-	}
-	return err
-}

@@ -36,7 +36,13 @@ func run() error {
 		return fmt.Errorf("load config: %w", err)
 	}
 
-	db, err := store.Open(context.Background(), cfg.MySQL)
+	var db *store.DB
+	switch cfg.DatabaseType {
+	case config.DatabaseSQLite:
+		db, err = store.OpenSQLite(context.Background(), cfg.SQLitePath)
+	default:
+		db, err = store.Open(context.Background(), cfg.MySQL)
+	}
 	if err != nil {
 		return fmt.Errorf("open db: %w", err)
 	}
@@ -121,7 +127,11 @@ func run() error {
 		}
 	})
 
-	logger.Info("relay listening", "addr", cfg.Addr, "mysql_host", cfg.MySQL.Host, "mysql_port", cfg.MySQL.Port, "mysql_database", cfg.MySQL.Database)
+	if cfg.DatabaseType == config.DatabaseSQLite {
+		logger.Info("relay listening", "addr", cfg.Addr, "database_type", string(cfg.DatabaseType), "sqlite_path", cfg.SQLitePath)
+	} else {
+		logger.Info("relay listening", "addr", cfg.Addr, "mysql_host", cfg.MySQL.Host, "mysql_port", cfg.MySQL.Port, "mysql_database", cfg.MySQL.Database)
+	}
 	if err := http.ListenAndServe(cfg.Addr, root); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		return fmt.Errorf("listen: %w", err)
 	}

@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -40,10 +41,31 @@ func TestMySQLConnectionConfiguration(t *testing.T) {
 	if driver.Timeout != 5*time.Second || driver.ReadTimeout != 30*time.Second || driver.WriteTimeout != 30*time.Second {
 		t.Fatal("incorrect timeouts")
 	}
+	if driver.Collation != "utf8mb4_bin" || driver.Params["time_zone"] != "'+00:00'" || driver.Params["sql_mode"] != "'STRICT_TRANS_TABLES,NO_ENGINE_SUBSTITUTION'" || driver.MaxAllowedPacket != 0 {
+		t.Fatal("incorrect MySQL session configuration")
+	}
+	if !strings.Contains(driver.FormatDSN(), "timeTruncate=1µs") {
+		t.Fatalf("microsecond truncation missing from DSN: %s", driver.FormatDSN())
+	}
 	cfg.TLS = false
 	driver, err = mysqlConfig(cfg)
 	if err != nil || driver.TLS != nil {
 		t.Fatal("explicit plaintext configuration failed")
+	}
+}
+
+func TestMySQLDialectBehaviorRemainsSelectedByDefault(t *testing.T) {
+	db := &DB{}
+	if db.forUpdateClause() != " FOR UPDATE" || db.castID("id") != "CAST(id AS CHAR)" || !strings.Contains(db.trafficSearchClause(), "utf8mb4_0900_as_ci") {
+		t.Fatal("default database behavior is not MySQL")
+	}
+	duplicate := fmt.Errorf("wrapped: %w", &mysql.MySQLError{Number: 1062, Message: "duplicate"})
+	if !db.isDuplicateKey(duplicate) {
+		t.Fatal("wrapped MySQL duplicate key was not recognized")
+	}
+	foreignKey := &mysql.MySQLError{Number: 1452, Message: "foreign key"}
+	if db.isDuplicateKey(foreignKey) {
+		t.Fatal("MySQL foreign-key error was classified as duplicate key")
 	}
 }
 

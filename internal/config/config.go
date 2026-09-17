@@ -14,6 +14,8 @@ type RelayConfig struct {
 	ProductName              string
 	PublicSiteTitle          string
 	Addr                     string
+	DatabaseType             DatabaseType
+	SQLitePath               string
 	MySQL                    MySQLConfig
 	RelayPublicURL           string
 	AdminHost                string
@@ -61,7 +63,7 @@ func LoadRelayConfigStrict() (RelayConfig, error) {
 	if err != nil || portErr != nil || portNumber < 1 || portNumber > 65535 {
 		return RelayConfig{}, fmt.Errorf("RELAY_ADDR is invalid")
 	}
-	mysqlConfig, err := loadMySQLConfig()
+	databaseType, sqlitePath, mysqlConfig, err := loadDatabaseConfig()
 	if err != nil {
 		return RelayConfig{}, err
 	}
@@ -87,6 +89,8 @@ func LoadRelayConfigStrict() (RelayConfig, error) {
 		ProductName:              brand.Brand.ProductName,
 		PublicSiteTitle:          brand.Brand.PublicSiteTitle,
 		Addr:                     addr,
+		DatabaseType:             databaseType,
+		SQLitePath:               sqlitePath,
 		MySQL:                    mysqlConfig,
 		RelayPublicURL:           brand.Endpoints.RelayPublicURL,
 		AdminHost:                env("ADMIN_HOST", ""),

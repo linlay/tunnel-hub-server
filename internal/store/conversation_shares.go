@@ -158,7 +158,7 @@ func (db *DB) AcquirePublicConversationShare(ctx context.Context, id string, now
 		return ConversationShare{}, err
 	}
 
-	tx, err := db.sql.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelReadCommitted})
+	tx, err := db.beginWriteTx(ctx)
 	if err != nil {
 		return ConversationShare{}, err
 	}
@@ -168,8 +168,7 @@ func (db *DB) AcquirePublicConversationShare(ctx context.Context, id string, now
         FROM conversation_shares
         WHERE id = ? AND snapshot_version = ? AND revoked_at IS NULL
           AND single_use = 1 AND (expires_at IS NULL OR expires_at > ?)
-        FOR UPDATE
-    `, id, ConversationSnapshotVersion, now)
+	`+db.forUpdateClause(), id, ConversationSnapshotVersion, now)
 	if err := row.Scan(&share.ID, &share.SnapshotVersion, &share.SnapshotJSON, &share.SingleUse); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return ConversationShare{}, ErrNotFound
@@ -206,6 +205,14 @@ func (db *DB) RevokeConversationShare(ctx context.Context, id, ownerUserID strin
 }
 
 func (db *DB) RecordConversationShareAccess(ctx context.Context, id string, accessedAt time.Time) error {
+	if db.database == databaseSQLite {
+		_, err := db.sql.ExecContext(ctx, `
+			INSERT INTO conversation_share_access (share_id, last_accessed_at)
+			VALUES (?, ?)
+			ON CONFLICT(share_id) DO UPDATE SET last_accessed_at = MAX(last_accessed_at, excluded.last_accessed_at)
+		`, strings.TrimSpace(id), databaseTime(accessedAt))
+		return err
+	}
 	_, err := db.sql.ExecContext(ctx, `
 		INSERT INTO conversation_share_access (share_id, last_accessed_at)
 		VALUES (?, ?)

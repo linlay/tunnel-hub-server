@@ -18,6 +18,8 @@ func useTestRelayConfig(t *testing.T) {
 	t.Helper()
 	setValidBrandEnv(t)
 	t.Setenv("RELAY_ADDR", ":18081")
+	t.Setenv("DATABASE_TYPE", "")
+	t.Setenv("RELAY_DB_PATH", "")
 	t.Setenv("MYSQL_HOST", "127.0.0.1")
 	t.Setenv("MYSQL_DATABASE", "tunnel_test")
 	t.Setenv("MYSQL_USER", "tunnel_test")
@@ -29,6 +31,52 @@ func useTestRelayConfig(t *testing.T) {
 	t.Setenv("SSO_JWT_PUBLIC_KEY_FILE", "test-public.pem")
 	t.Setenv("SSO_JWT_AUDIENCE", "tunnel")
 	t.Setenv("SSO_JWT_USER_ID_CLAIM", "sub")
+}
+
+func TestLoadRelayConfigSelectsDatabase(t *testing.T) {
+	t.Run("MySQL remains the default", func(t *testing.T) {
+		useTestRelayConfig(t)
+		t.Setenv("RELAY_DB_PATH", "/unrelated/relay.sqlite")
+		cfg, err := LoadRelayConfigStrict()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if cfg.DatabaseType != DatabaseMySQL || cfg.SQLitePath != "" || cfg.MySQL.Host != "127.0.0.1" {
+			t.Fatalf("database config = %+v", cfg)
+		}
+	})
+
+	t.Run("SQLite does not load MySQL settings", func(t *testing.T) {
+		useTestRelayConfig(t)
+		t.Setenv("DATABASE_TYPE", "sqlite")
+		t.Setenv("RELAY_DB_PATH", "data/relay.sqlite")
+		for _, key := range []string{"MYSQL_HOST", "MYSQL_DATABASE", "MYSQL_USER", "MYSQL_PASSWORD"} {
+			t.Setenv(key, "")
+		}
+		cfg, err := LoadRelayConfigStrict()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if cfg.DatabaseType != DatabaseSQLite || cfg.SQLitePath != "data/relay.sqlite" || cfg.MySQL != (MySQLConfig{}) {
+			t.Fatalf("database config = %+v", cfg)
+		}
+	})
+
+	t.Run("SQLite path is required", func(t *testing.T) {
+		useTestRelayConfig(t)
+		t.Setenv("DATABASE_TYPE", "sqlite")
+		if _, err := LoadRelayConfigStrict(); err == nil || err.Error() != "RELAY_DB_PATH is required" {
+			t.Fatalf("error = %v", err)
+		}
+	})
+
+	t.Run("unknown database type is rejected", func(t *testing.T) {
+		useTestRelayConfig(t)
+		t.Setenv("DATABASE_TYPE", "postgres")
+		if _, err := LoadRelayConfigStrict(); err == nil || err.Error() != "DATABASE_TYPE must be mysql or sqlite" {
+			t.Fatalf("error = %v", err)
+		}
+	})
 }
 
 func TestLoadRelayConfigSupportsLegacyBootstrapAdminEnv(t *testing.T) {

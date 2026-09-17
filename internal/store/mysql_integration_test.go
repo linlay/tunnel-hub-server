@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -14,6 +15,7 @@ import (
 )
 
 func TestMySQLSchemaInitializationCanResume(t *testing.T) {
+	requireMySQLIntegration(t)
 	cfg := mysqltest.NewConfig(t)
 	db, err := Open(context.Background(), cfg)
 	if err != nil {
@@ -56,7 +58,7 @@ func TestMySQLSchemaInitializationCanResume(t *testing.T) {
 }
 
 func TestMySQLConcurrentDesktopRegistrations(t *testing.T) {
-	db := openTestDB(t)
+	db := openMySQLTestDB(t)
 	ctx := context.Background()
 	const workers = 16
 	results := make(chan RegisterDesktopDeviceResult, workers)
@@ -102,7 +104,7 @@ func TestMySQLConcurrentDesktopRegistrations(t *testing.T) {
 }
 
 func TestMySQLWebAppFailureRollsBackRoute(t *testing.T) {
-	db := openTestDB(t)
+	db := openMySQLTestDB(t)
 	ctx := context.Background()
 	_, err := db.RegisterDesktopDevice(ctx, RegisterDesktopDeviceInput{OwnerUserID: "owner", DeviceID: "device", PublicHost: "device.m.example.test"})
 	if err != nil {
@@ -123,7 +125,7 @@ func TestMySQLWebAppFailureRollsBackRoute(t *testing.T) {
 }
 
 func TestMySQLConcurrentAdminDisable(t *testing.T) {
-	db := openTestDB(t)
+	db := openMySQLTestDB(t)
 	ctx := context.Background()
 	first, err := db.CreateAdminUser(ctx, "first", "password")
 	if err != nil {
@@ -158,7 +160,7 @@ func TestMySQLConcurrentAdminDisable(t *testing.T) {
 }
 
 func TestMySQLIdentityBoundariesAndUnchangedUpdates(t *testing.T) {
-	db := openTestDB(t)
+	db := openMySQLTestDB(t)
 	ctx := context.Background()
 	for i, owner := range []string{"Owner", "owner", strings.Repeat("中", 255)} {
 		_, err := db.RegisterDesktopDevice(ctx, RegisterDesktopDeviceInput{OwnerUserID: owner, DeviceID: "device", PublicHost: fmt.Sprintf("device%d.m.example.test", i)})
@@ -193,7 +195,7 @@ func TestMySQLIdentityBoundariesAndUnchangedUpdates(t *testing.T) {
 }
 
 func TestMySQLLargeSnapshotAndMicrosecondTimes(t *testing.T) {
-	db := openTestDB(t)
+	db := openMySQLTestDB(t)
 	ctx := context.Background()
 	prefix, suffix := []byte(`{"version":1,"title":"`), []byte(`"}`)
 	snapshot := append(append(prefix, bytes.Repeat([]byte("x"), MaxConversationSnapshotBytes-len(prefix)-len(suffix))...), suffix...)
@@ -225,6 +227,13 @@ func TestMySQLLargeSnapshotAndMicrosecondTimes(t *testing.T) {
 	listed, err = db.ListConversationShares(ctx, "owner", now)
 	if err != nil || listed[0].LastAccessedAt == nil || !listed[0].LastAccessedAt.Equal(databaseTime(now.Add(time.Minute))) {
 		t.Fatal("access timestamp regressed", err)
+	}
+}
+
+func requireMySQLIntegration(t *testing.T) {
+	t.Helper()
+	if os.Getenv("TEST_DATABASE_TYPE") == "sqlite" {
+		t.Skip("MySQL-specific integration test")
 	}
 }
 

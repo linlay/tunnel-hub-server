@@ -11,7 +11,6 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"errors"
-	"example.invalid/tunnel-hub-server/internal/testutil/mysqltest"
 	"fmt"
 	"io"
 	"net"
@@ -26,6 +25,7 @@ import (
 	"example.invalid/tunnel-hub-server/internal/config"
 	"example.invalid/tunnel-hub-server/internal/proxy"
 	"example.invalid/tunnel-hub-server/internal/store"
+	"example.invalid/tunnel-hub-server/internal/testutil/dbtest"
 	"example.invalid/tunnel-hub-server/internal/tunnel"
 	"github.com/gorilla/websocket"
 	"github.com/hashicorp/yamux"
@@ -1277,19 +1277,7 @@ func desktopTestVerifier(t *testing.T, cfg config.RelayConfig) *auth.SSOJWTVerif
 
 func openDesktopTestDB(t *testing.T) *store.DB {
 	t.Helper()
-	db, err := store.Open(context.Background(), mysqltest.NewConfig(t))
-	if err != nil {
-		t.Fatalf("open db: %v", err)
-	}
-	t.Cleanup(func() {
-		if err := db.Close(); err != nil {
-			t.Errorf("close database: %v", err)
-		}
-	})
-	if err := db.Migrate(context.Background()); err != nil {
-		t.Fatalf("migrate: %v", err)
-	}
-	return db
+	return dbtest.Open(t)
 }
 
 func createDesktopTestAgentToken(t *testing.T, db *store.DB, name string) (string, store.TunnelToken) {

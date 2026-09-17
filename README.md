@@ -28,7 +28,7 @@ WebApp 有两条独立链路：
 ### 前置要求
 
 - Go 1.25
-- MySQL 8.0.16+，InnoDB，`max_allowed_packet >= 67108864`（64 MiB）
+- MySQL 8.0.16+（InnoDB，`max_allowed_packet >= 67108864`）或本地 SQLite 文件
 - Docker / Docker Compose
 - OpenSSL，可选，用于从官网 SSO 私钥导出 JWT 公钥
 - 一个可用的官网 SSO JWT 公钥，生产和 Desktop 注册 API 必需
@@ -42,7 +42,7 @@ make test
 make run-relay
 ```
 
-复制 `.env.example` 后，在已忽略的 `.env` 中填写 `GO_MODULE_PATH`、运行时身份、域名、Relay 地址、MySQL 连接账号和 SSO 校验参数。仓库不提交任何环境的真实身份值。
+复制 `.env.example` 后，在已忽略的 `.env` 中填写 `GO_MODULE_PATH`、运行时身份、域名、Relay 地址、数据库类型及 SSO 校验参数。MySQL 是默认存储；单实例部署也可以显式选择 SQLite。仓库不提交任何环境的真实身份值。
 
 Relay 启动要求同时提供 SSO issuer、audience、用户 ID claim，以及文件或 PEM 形式的有效 JWT 公钥。缺少任何一项都会在监听端口前失败并指出字段。
 
@@ -78,7 +78,15 @@ cp .env.example .env
 docker compose up --build
 ```
 
-`docker-compose.yml` 会把 `.env` 中的 `GO_MODULE_PATH` 作为构建参数传给 server，并把运行时配置注入 server/public；Relay 连接外部 MySQL，JWT 公钥以只读文件挂载；Public 容器只接收 `PUBLIC_SITE_TITLE`。启动前请确认 `.env` 和 `configs/jwt-public.pem` 均已准备好。
+`docker-compose.yml` 会把 `.env` 中的 `GO_MODULE_PATH` 作为构建参数传给 server，并把运行时配置注入 server/public；默认 Relay 连接外部 MySQL，JWT 公钥以只读文件挂载；Public 容器只接收 `PUBLIC_SITE_TITLE`。启动前请确认 `.env` 和 `configs/jwt-public.pem` 均已准备好。
+
+SQLite 单实例部署使用同一镜像和可选覆盖文件：
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.sqlite.yml up -d --build
+```
+
+该覆盖文件把 `./data` 挂载到容器并使用 `/data/relay.sqlite`。不要让多个 Relay 实例或主机同时使用同一个 SQLite 文件。
 
 ## 3. 配置说明
 
@@ -132,6 +140,15 @@ GitHub 和 GitLab CI 应分别设置各自仓库对应的 `GO_MODULE_PATH`。同
 | `MAX_REQUEST_BODY_BYTES` | `67108864` | Relay 缓冲 HTTP 请求体的最大字节数。 |
 | `TRUSTED_PROXY_CIDRS` | 空 | 可信反向代理 CIDR，命中后才读取 `X-Real-IP` / `X-Forwarded-For`；生产 Docker + nginx 建议 `172.23.0.1/32,127.0.0.1/32,::1/128`。 |
 
+### 数据库环境变量
+
+| 名称 | 默认值 | 说明 |
+| --- | --- | --- |
+| `DATABASE_TYPE` | `mysql` | 可选 `mysql` 或 `sqlite`；缺省仍使用 MySQL。 |
+| `RELAY_DB_PATH` | 无 | SQLite 模式必填；父目录必须已存在且可写。MySQL 模式忽略。 |
+
+数据库类型只在启动时选择。连接失败不会自动回退到另一种数据库，两种数据库之间也不会自动同步或迁移数据。
+
 ### MySQL 环境变量
 
 | 名称 | 默认值 | 说明 |
@@ -157,7 +174,9 @@ GRANT CREATE, REFERENCES, SELECT, INSERT, UPDATE, DELETE
 
 服务端须配置 `max_allowed_packet=64M` 或更高。应用启动校验版本、连接与传输上限，不满足时在监听前失败。连接超时 5 秒、读写超时各 30 秒，连接最大生命周期 3 分钟。时间统一使用 UTC `DATETIME(6)`，精度为微秒；标识符按大小写区分，文本使用 `utf8mb4`。分享正文为 `LONGBLOB`，API 上限仍为 20 MiB。
 
-启动逐表执行幂等建表；中途失败可以修复原因后重启，已有成功创建的表保留。MySQL DDL 不保证整套 schema 事务回滚。不提供自动字段修补、历史 schema 转换或数据库类型选择开关。
+MySQL 启动逐表执行幂等建表；中途失败可以修复原因后重启，已有成功创建的表保留。MySQL DDL 不保证整套 schema 事务回滚，现有连接池、TLS、字符集和并发事务语义保持不变。
+
+SQLite 使用 WAL、外键约束、5 秒 busy timeout 和单连接池。新库在一个事务中建立当前 schema 并写入版本；带有历史表但没有当前版本标记的旧 SQLite 文件会被拒绝，不执行旧字段修补或历史数据迁移。
 
 ### Agent 环境变量
 
@@ -218,7 +237,7 @@ docker compose up -d --build
 - `hub.example.test/api/admin`, `/api/desktop`, `/api/components`, `/tunnel`: 转发到 Relay；`/api/upload`、`/api/resource` 和旧 `/api/download` 明确返回 404。
 - `*.m.example.test`: `<device>-<frontendPort>.m.example.test` 的全部路径，以及普通设备 Host 的 WebSocket upgrade、`POST /api/upload` 和 `GET /api/resource` 转发到 Relay；普通 `<device>.m.example.test` HTTP 转发到 public Desktop site。
 - `*-wa.example.test`: 由 `*.example.test` 通配符入口直接转发到 Relay。
-- `share.example.test/share/*` 由公开边缘网关直接转发到 Relay。Relay 查询 MySQL 后返回 HTML；`/assets/conversation-export/*` 在分享 origin 和 Tunnel API origin 都返回编入 Relay 的不可变 JS/CSS/font 资产，供线上分享、落盘导出和本地 loopback 环境复用。HTML 资源 origin 由 Desktop Worker 按当前 Tunnel 配置注入，不绑定固定域名。
+- `share.example.test/share/*` 由公开边缘网关直接转发到 Relay。Relay 查询当前配置的数据库后返回 HTML；`/assets/conversation-export/*` 在分享 origin 和 Tunnel API origin 都返回编入 Relay 的不可变 JS/CSS/font 资产，供线上分享、落盘导出和本地 loopback 环境复用。HTML 资源 origin 由 Desktop Worker 按当前 Tunnel 配置注入，不绑定固定域名。
 
 Tunnel 端模板在 `deploy/nginx/tunnel-hub.conf.template` 和 `deploy/caddy/Caddyfile.template`，其中包含分享 origin 的 `/share/*`，以及分享/Tunnel API 两个 origin 的 `/assets/conversation-export/*` 直连 Relay 规则。上线前必须替换全部 `{{...}}` 占位符；分享关闭时删除分享 Host block。
 
@@ -246,10 +265,10 @@ docker logs tunnel-hub-server
 
 ### 数据与备份
 
-- 数据由外部 MySQL 管理，备份与恢复使用部署环境的 MySQL 运维流程。
-- 应用只在已存在的专用库中创建当前表结构，不创建数据库或账号，不自动升级不兼容的旧表。
-- 首次上线顺序：准备专用空库和账号 → 配置环境变量 → 停止旧 Relay → 启动新 Relay 建表 → 初始化管理员 → 验证注册、路由、分享。
-- 历史数据库文件和 Docker 卷不自动删除。需要回退时，停止新版，再使用旧版及其原始数据；新版产生的 MySQL 数据不会同步回旧库。
+- MySQL 数据的备份与恢复使用部署环境的 MySQL 运维流程。SQLite 部署应在停止 Relay 或完成一致性快照后备份数据库文件及 WAL 状态。
+- MySQL 模式只在已存在的专用库中创建当前表结构，不创建数据库或账号；SQLite 模式创建配置路径对应的新文件。两者都不自动升级不兼容的旧表。
+- 首次上线顺序：准备 MySQL 空库和账号或 SQLite 可写父目录 → 配置环境变量 → 停止旧 Relay → 启动新 Relay 建表 → 初始化管理员 → 验证注册、路由、分享。
+- 历史数据库文件和 Docker 卷不自动删除。数据库类型切换会看到另一套独立数据，不会同步账号、Token、设备映射或分享链接。
 
 ### 常用 API
 
@@ -303,11 +322,11 @@ curl -X DELETE https://hub.example.test/api/desktop/shares/share_xxx \
   -H "Authorization: Bearer $OFFICIAL_SSO_JWT"
 ```
 
-创建和列表响应固定包含 `conversationId` 和 `singleUse`。列表按创建时间倒序返回当前所有者在所有会话下仍有效的元数据，不读取 Snapshot，也不接受查询参数。匿名 `GET /share/{id}` 使用当前模板渲染仍有效且未撤销的 Snapshot，媒体类型为 `text/html; charset=utf-8`。普通链接成功 GET 会 best-effort 更新独立访问元数据；一次性链接在 MySQL 事务内使用 `SELECT ... FOR UPDATE` 读取并锁定记录，再删除并提交；提交成功才返回 Snapshot，并发访问严格只有一个请求成功。HEAD 与其他方法不会消费；已消费、撤销、到期和未知 ID 统一返回最小 404 HTML。
+创建和列表响应固定包含 `conversationId` 和 `singleUse`。列表按创建时间倒序返回当前所有者在所有会话下仍有效的元数据，不读取 Snapshot，也不接受查询参数。匿名 `GET /share/{id}` 使用当前模板渲染仍有效且未撤销的 Snapshot，媒体类型为 `text/html; charset=utf-8`。普通链接成功 GET 会 best-effort 更新独立访问元数据；一次性链接在写事务内读取、删除并提交，提交成功才返回 Snapshot，并发访问严格只有一个请求成功。MySQL 使用行锁，SQLite 使用立即写事务。HEAD 与其他方法不会消费；已消费、撤销、到期和未知 ID 统一返回最小 404 HTML。
 
 `GET/HEAD /assets/conversation-export/{sha256}/{file}` 只提供随 Relay 编译的当前 manifest 白名单资产；旧 Hash 固定返回 404。分享渲染包由 WebClient 显式同步后随 Relay 原子发布，普通 WebClient 发布不修改它。
 
-本版本使用全新 MySQL 数据库，不导入旧数据，不包含历史数据库迁移工具或双库回退逻辑。原账号、Token、设备映射和分享链接不会自动恢复，需重新初始化或注册。
+本版本使用全新 MySQL 数据库或全新、带版本标记的 SQLite 库，不导入旧数据，不包含历史数据库迁移工具或双库回退逻辑。原账号、Token、设备映射和分享链接不会自动恢复，需重新初始化或注册。
 
 注册 Desktop WebApp：
 
@@ -357,20 +376,21 @@ curl https://hub.example.test/api/components
 - Desktop 注册响应字段 `relayUrl`、`publicHost`、`publicUrl`、`webSocketUrl` 保持不变；Desktop 与移动 WebApp 继续动态消费这些值。
 - 发布前核对对应环境仓库的 `tunnelHub.relayUrl` 与 `RELAY_PUBLIC_URL` 完全一致，本仓库不修改 sibling 应用。
 - `tunnel-hub-tester` 的远程附件 helper 仍限制在其既有域名，非当前品牌环境只保证可手工填写 URL 做普通 WebSocket 调试，附件适配另行处理。
-- 顺序为：在部署环境准备完整运行时变量，渲染代理模板，最后同时发布 Relay、public 与代理配置。应用按当前 MySQL schema 初始化专用空库；不要指向已有其他业务数据的库。
+- 顺序为：在部署环境准备完整运行时变量，渲染代理模板，最后同时发布 Relay、public 与代理配置。应用按所选数据库的当前 schema 初始化专用空库或新 SQLite 文件；不要指向已有其他业务数据的库。
 - HTTP 上传失败：检查 `MAX_REQUEST_BODY_BYTES`，当前 Relay 会完整缓冲请求体。
 
 ## 6. 开发命令
 
 ```bash
 make test
+make test-sqlite
 GO_MODULE_PATH=example.invalid/tunnel-hub-server GOTOOLCHAIN=local go run ./tools/moduleprep exec -- go test ./internal/proxy -run Test
 GO_MODULE_PATH=example.invalid/tunnel-hub-server GOTOOLCHAIN=local go run ./tools/moduleprep exec -- go test ./internal/admin -run Test
 make verify-neutral
 gofmt -w ./cmd ./internal
 ```
 
-数据库测试必须连接独立 MySQL 8.0 测试服务，账号需能创建/删除 `tunnel_test_*` 临时库，并拥有库内 DDL/DML 权限。测试从不读取生产 `MYSQL_*`，不接受固定测试库名，每个测试使用随机命名的库并在结束时清理。缺少配置或清理失败均使测试失败，不会跳过。
+`make test` 保持 MySQL 回归语义，必须连接独立 MySQL 8.0 测试服务；账号需能创建/删除 `tunnel_test_*` 临时库，并拥有库内 DDL/DML 权限。测试从不读取生产 `MYSQL_*`，不接受固定测试库名，每个测试使用随机命名的库并在结束时清理。缺少配置或清理失败均使测试失败，不会跳过。
 
 ```bash
 export TEST_MYSQL_HOST=127.0.0.1
@@ -385,6 +405,14 @@ make build
 make verify-neutral
 ```
 
+SQLite 回归不依赖外部数据库，使用临时文件并在测试结束时清理：
+
+```bash
+make test-sqlite
+# 配置 TEST_MYSQL_* 后同时运行两套：
+make test-all
+```
+
 测试账号应仅在独立测试实例使用，不得授予应用生产账号全局建库/删库权限。测试异常中断后可检查并清理本次测试创建的 `tunnel_test_*` 库；归属不明的库不要删除。
 
-提交前至少运行 `make test` 和 `make verify-neutral`。协议、转发、鉴权、配置、存储相关改动需要补充或更新对应 `*_test.go`。
+提交前至少运行 `make test-all` 和 `make verify-neutral`。协议、转发、鉴权、配置、存储相关改动需要补充或更新对应 `*_test.go`。

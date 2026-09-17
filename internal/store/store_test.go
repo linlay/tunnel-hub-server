@@ -2,9 +2,12 @@ package store
 
 import (
 	"context"
-	"example.invalid/tunnel-hub-server/internal/testutil/mysqltest"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
+
+	"example.invalid/tunnel-hub-server/internal/testutil/mysqltest"
 )
 
 func TestAgentRouteAndTokenRemainSupported(t *testing.T) {
@@ -114,7 +117,24 @@ func assertConversationShareSingleUseExpirationConstraint(t *testing.T, db *DB, 
 
 func openTestDB(t *testing.T) *DB {
 	t.Helper()
+	if os.Getenv("TEST_DATABASE_TYPE") == "sqlite" {
+		db, err := OpenSQLite(context.Background(), filepath.Join(t.TempDir(), "relay.sqlite"))
+		return finishOpeningTestDB(t, db, err)
+	}
+	return openMySQLTestDB(t)
+}
+
+func openMySQLTestDB(t *testing.T) *DB {
+	t.Helper()
+	if os.Getenv("TEST_DATABASE_TYPE") == "sqlite" {
+		t.Skip("MySQL-specific integration test")
+	}
 	db, err := Open(context.Background(), mysqltest.NewConfig(t))
+	return finishOpeningTestDB(t, db, err)
+}
+
+func finishOpeningTestDB(t *testing.T, db *DB, err error) *DB {
+	t.Helper()
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
