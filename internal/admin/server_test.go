@@ -23,6 +23,7 @@ import (
 	"example.invalid/tunnel-hub-server/internal/config"
 	"example.invalid/tunnel-hub-server/internal/proxy"
 	"example.invalid/tunnel-hub-server/internal/store"
+	"example.invalid/tunnel-hub-server/internal/testutil/dbtest"
 	"github.com/hashicorp/yamux"
 )
 
@@ -751,14 +752,7 @@ func newAdminTestServer(t *testing.T) (*Server, *store.DB) {
 
 func newAdminTestServerWithConfig(t *testing.T, cfg config.RelayConfig) (*Server, *store.DB) {
 	t.Helper()
-	db, err := store.Open(":memory:")
-	if err != nil {
-		t.Fatalf("open db: %v", err)
-	}
-	t.Cleanup(func() { _ = db.Close() })
-	if err := db.Migrate(context.Background()); err != nil {
-		t.Fatalf("migrate: %v", err)
-	}
+	db := dbtest.Open(t)
 	verifier, err := auth.NewSSOJWTVerifier(auth.SSOJWTConfig{
 		Issuer: cfg.SSOJWTIssuer, Audience: cfg.SSOJWTAudience, UserIDClaim: cfg.SSOJWTUserIDClaim,
 		AllowAnyAudience: cfg.SSOJWTAllowAnyAudience, PublicKeyFile: cfg.SSOJWTPublicKeyFile, PublicKeyPEM: cfg.SSOJWTPublicKeyPEM,

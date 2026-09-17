@@ -261,6 +261,10 @@ func (s *Server) authorizeRegistration(w http.ResponseWriter, r *http.Request) (
 		writeError(w, http.StatusForbidden, "tunnel scope required")
 		return auth.SSOJWTPrincipal{}, false
 	}
+	if err := store.ValidateTextLength("ownerUserId", principal.UserID, 255); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return auth.SSOJWTPrincipal{}, false
+	}
 	return principal, true
 }
 

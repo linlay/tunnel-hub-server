@@ -1,0 +1,7 @@
+services:
+  server:
+    environment:
+      DATABASE_TYPE: sqlite
+      RELAY_DB_PATH: /data/relay.sqlite
+    volumes:
+      - ./data:/data

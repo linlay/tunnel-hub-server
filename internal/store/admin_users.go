@@ -66,7 +66,11 @@ func (db *DB) EnsureAdminUser(ctx context.Context, username, password string) (A
 		return AdminUser{}, false, err
 	}
 	created, err := db.CreateAdminUser(ctx, username, password)
-	return created, true, err
+	if db.isDuplicateKey(err) {
+		existing, lookupErr := db.GetAdminUserByUsername(ctx, username)
+		return existing.AdminUser, false, lookupErr
+	}
+	return created, err == nil, err
 }
 
 func (db *DB) AdminUserCount(ctx context.Context) (int64, error) {
@@ -85,6 +89,9 @@ func (db *DB) CreateAdminUserWithStatus(ctx context.Context, username, password,
 
 func (db *DB) createAdminUser(ctx context.Context, username, password, status string) (AdminUser, error) {
 	username = normalizeUsername(username)
+	if err := ValidateTextLength("username", username, 255); err != nil {
+		return AdminUser{}, err
+	}
 	if username == "" {
 		return AdminUser{}, errors.New("username is required")
 	}
@@ -99,7 +106,7 @@ func (db *DB) createAdminUser(ctx context.Context, username, password, status st
 	if err != nil {
 		return AdminUser{}, err
 	}
-	now := time.Now().UTC()
+	now := databaseTime(time.Now())
 	result, err := db.sql.ExecContext(ctx, `
 		INSERT INTO admin_users (username, password_hash, status, created_at, updated_at)
 		VALUES (?, ?, ?, ?, ?)
@@ -122,7 +129,7 @@ func (db *DB) createAdminUser(ctx context.Context, username, password, status st
 
 func (db *DB) ListAdminUsers(ctx context.Context) ([]AdminUser, error) {
 	rows, err := db.sql.QueryContext(ctx, `
-		SELECT CAST(id AS TEXT), username, status, created_at, updated_at, last_login_at
+		SELECT `+db.castID("id")+`, username, status, created_at, updated_at, last_login_at
 		FROM admin_users
 		ORDER BY username ASC
 	`)
@@ -144,7 +151,7 @@ func (db *DB) ListAdminUsers(ctx context.Context) ([]AdminUser, error) {
 
 func (db *DB) GetAdminUser(ctx context.Context, id string) (AdminUserWithPassword, error) {
 	row := db.sql.QueryRowContext(ctx, `
-		SELECT CAST(id AS TEXT), username, password_hash, status, created_at, updated_at, last_login_at
+		SELECT `+db.castID("id")+`, username, password_hash, status, created_at, updated_at, last_login_at
 		FROM admin_users
 		WHERE id = ?
 	`, strings.TrimSpace(id))
@@ -152,9 +159,40 @@ func (db *DB) GetAdminUser(ctx context.Context, id string) (AdminUserWithPasswor
 }
 
 func (db *DB) UpdateAdminUser(ctx context.Context, id string, patch AdminUserPatch) (AdminUser, error) {
-	user, err := db.GetAdminUser(ctx, id)
+	id = strings.TrimSpace(id)
+	tx, err := db.beginWriteTx(ctx)
 	if err != nil {
 		return AdminUser{}, err
+	}
+	defer tx.Rollback()
+	// Admin users are few. Lock in primary-key order so two concurrent disables
+	// cannot each observe the other as the last remaining active user.
+	rows, err := tx.QueryContext(ctx, `SELECT `+db.castID("id")+`, username, password_hash, status, created_at, updated_at, last_login_at FROM admin_users ORDER BY id`+db.forUpdateClause())
+	if err != nil {
+		return AdminUser{}, err
+	}
+	var user AdminUserWithPassword
+	active := 0
+	for rows.Next() {
+		candidate, scanErr := scanAdminUserWithPassword(rows)
+		if scanErr != nil {
+			rows.Close()
+			return AdminUser{}, scanErr
+		}
+		if candidate.Status == "active" {
+			active++
+		}
+		if candidate.ID == id {
+			user = candidate
+		}
+	}
+	scanErr := rows.Err()
+	rows.Close()
+	if scanErr != nil {
+		return AdminUser{}, scanErr
+	}
+	if user.ID == "" {
+		return AdminUser{}, ErrUserNotFound
 	}
 
 	username := user.Username
@@ -165,6 +203,10 @@ func (db *DB) UpdateAdminUser(ctx context.Context, id string, patch AdminUserPat
 		}
 	}
 
+	if err := ValidateTextLength("username", username, 255); err != nil {
+		return AdminUser{}, err
+	}
+
 	status := user.Status
 	if patch.Status != nil {
 		status, err = normalizeAdminUserStatus(*patch.Status)
@@ -172,8 +214,8 @@ func (db *DB) UpdateAdminUser(ctx context.Context, id string, patch AdminUserPat
 			return AdminUser{}, err
 		}
 		if user.Status == "active" && status == "disabled" {
-			if err := db.ensureNotLastActiveAdmin(ctx, id); err != nil {
-				return AdminUser{}, err
+			if active <= 1 {
+				return AdminUser{}, ErrLastActiveUser
 			}
 		}
 	}
@@ -189,8 +231,8 @@ func (db *DB) UpdateAdminUser(ctx context.Context, id string, patch AdminUserPat
 		}
 	}
 
-	now := time.Now().UTC()
-	result, err := db.sql.ExecContext(ctx, `
+	now := databaseTime(time.Now())
+	result, err := tx.ExecContext(ctx, `
 		UPDATE admin_users
 		SET username = ?, password_hash = ?, status = ?, updated_at = ?
 		WHERE id = ?
@@ -204,6 +246,9 @@ func (db *DB) UpdateAdminUser(ctx context.Context, id string, patch AdminUserPat
 	}
 	if affected == 0 {
 		return AdminUser{}, ErrUserNotFound
+	}
+	if err := tx.Commit(); err != nil {
+		return AdminUser{}, err
 	}
 	updated, err := db.GetAdminUser(ctx, id)
 	if err != nil {
@@ -219,7 +264,7 @@ func (db *DB) DisableAdminUser(ctx context.Context, id string) (AdminUser, error
 
 func (db *DB) GetAdminUserByUsername(ctx context.Context, username string) (AdminUserWithPassword, error) {
 	row := db.sql.QueryRowContext(ctx, `
-		SELECT CAST(id AS TEXT), username, password_hash, status, created_at, updated_at, last_login_at
+		SELECT `+db.castID("id")+`, username, password_hash, status, created_at, updated_at, last_login_at
 		FROM admin_users
 		WHERE username = ?
 	`, normalizeUsername(username))
@@ -237,7 +282,7 @@ func (db *DB) VerifyAdminLogin(ctx context.Context, username, password string) (
 	if !auth.VerifySecret(password, user.PasswordHash) {
 		return AdminUser{}, ErrInvalidPassword
 	}
-	now := time.Now().UTC()
+	now := databaseTime(time.Now())
 	_, err = db.sql.ExecContext(ctx, `
 		UPDATE admin_users
 		SET last_login_at = ?, updated_at = ?
@@ -259,7 +304,7 @@ func (db *DB) CreateAdminSession(ctx context.Context, userID string, ttl time.Du
 	if err != nil {
 		return AdminSession{}, err
 	}
-	now := time.Now().UTC()
+	now := databaseTime(time.Now())
 	session := AdminSession{
 		ID:         newID("admin_session"),
 		UserID:     strings.TrimSpace(userID),
@@ -284,7 +329,7 @@ func (db *DB) AuthenticateAdminSession(ctx context.Context, token string, now ti
 		return AdminUser{}, ErrSessionNotFound
 	}
 	row := db.sql.QueryRowContext(ctx, `
-		SELECT CAST(u.id AS TEXT), u.username, u.status, u.created_at, u.updated_at, u.last_login_at, s.expires_at
+		SELECT `+db.castID("u.id")+`, u.username, u.status, u.created_at, u.updated_at, u.last_login_at, s.expires_at
 		FROM admin_sessions s
 		JOIN admin_users u ON u.id = s.user_id
 		WHERE s.session_hash = ?
@@ -304,47 +349,13 @@ func (db *DB) AuthenticateAdminSession(ctx context.Context, token string, now ti
 		UPDATE admin_sessions
 		SET last_seen_at = ?
 		WHERE session_hash = ?
-	`, now.UTC(), hashSessionToken(token))
+	`, databaseTime(now), hashSessionToken(token))
 	return user, nil
 }
 
 func (db *DB) DeleteAdminSession(ctx context.Context, token string) error {
 	_, err := db.sql.ExecContext(ctx, `DELETE FROM admin_sessions WHERE session_hash = ?`, hashSessionToken(token))
 	return err
-}
-
-func (db *DB) ensureAdminUserColumns(ctx context.Context) error {
-	if err := db.ensureColumn(ctx, "admin_users", "status", "TEXT NOT NULL DEFAULT 'active'"); err != nil {
-		return err
-	}
-	if err := db.ensureColumn(ctx, "admin_users", "updated_at", "TIMESTAMP"); err != nil {
-		return err
-	}
-	if err := db.ensureColumn(ctx, "admin_users", "last_login_at", "TIMESTAMP"); err != nil {
-		return err
-	}
-	_, err := db.sql.ExecContext(ctx, `
-		UPDATE admin_users
-		SET status = COALESCE(NULLIF(status, ''), 'active'),
-			updated_at = COALESCE(updated_at, created_at)
-		WHERE status IS NULL OR status = '' OR updated_at IS NULL
-	`)
-	return err
-}
-
-func (db *DB) ensureNotLastActiveAdmin(ctx context.Context, id string) error {
-	var count int64
-	if err := db.sql.QueryRowContext(ctx, `
-		SELECT COUNT(*)
-		FROM admin_users
-		WHERE status = 'active' AND CAST(id AS TEXT) <> ?
-	`, strings.TrimSpace(id)).Scan(&count); err != nil {
-		return err
-	}
-	if count == 0 {
-		return ErrLastActiveUser
-	}
-	return nil
 }
 
 func scanAdminUser(scanner rowScanner) (AdminUser, error) {

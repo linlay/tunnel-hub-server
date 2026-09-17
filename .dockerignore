@@ -2,9 +2,9 @@
 .DS_Store
 .env
 .env.local
+.env.test.local
 .local/*
 data/*
-!data/.gitkeep
 configs/*.pem
 configs/*.key
 *.db

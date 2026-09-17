@@ -4,7 +4,7 @@
 
 ## 1. 项目概览
 
-`tunnel-hub-server` 是 Tunnel Hub 的 Go 后端，核心边界是 Relay、Agent/Desktop 出站连接、管理 API、Desktop 注册 API、SQLite 持久化和公网 HTTP/WebSocket 转发。
+`tunnel-hub-server` 是 Tunnel Hub 的 Go 后端，核心边界是 Relay、Agent/Desktop 出站连接、管理 API、Desktop 注册 API、MySQL/SQLite 持久化和公网 HTTP/WebSocket 转发。
 
 管理前端在 sibling 项目 `tunnel-hub-website`，Desktop 协议调试台在 sibling 项目 `tunnel-hub-tester`。Desktop public mini site 是本仓库内的独立子项目 `tunnel-hub-public/`，作为单独静态容器部署；不要把管理后台 React/Vite 前端重新放回本项目。
 
@@ -14,7 +14,7 @@
 - HTTP: 标准库 `net/http`。
 - WebSocket: `github.com/gorilla/websocket`。
 - 复用连接: `github.com/hashicorp/yamux`，通过 `replace` 指向本地 `third_party/yamux`。
-- 存储: SQLite，驱动为 `modernc.org/sqlite`，不依赖 CGO。
+- 存储: 默认 MySQL 8.0.16+，单实例可选 SQLite；驱动分别为 `github.com/go-sql-driver/mysql` 和 `modernc.org/sqlite`，均不依赖 CGO。
 - 鉴权: 本地 admin session cookie + 官网 SSO JWT bearer token。
 - 配置: 运行时身份、域名和公开端点全部来自环境变量；真实 `.env` 不提交。
 - 部署: Docker multi-stage build，distroless runtime，Nginx/Caddy 负责公网 TLS 和路由。
@@ -24,7 +24,7 @@
 Relay 入口在 `cmd/relay/main.go`，启动顺序是：
 
 1. `internal/config` 加载 `.env`，严格校验运行时身份、域名、公开端点及其他环境变量。
-2. `internal/store` 打开 SQLite 并执行 schema/migration。
+2. `internal/store` 按 `DATABASE_TYPE` 连接 MySQL 专用库或 SQLite 文件，并初始化对应的当前 schema。
 3. 可选根据 `ADMIN_USERNAME`/`ADMIN_PASSWORD` bootstrap 本地管理员。
 4. 创建 `proxy.Manager` 管理在线 Agent/ Desktop tunnel session。
 5. 挂载 Admin API、Desktop API、public component API、`/tunnel` 和公网 Host 转发。
@@ -39,7 +39,7 @@ Relay 入口在 `cmd/relay/main.go`，启动顺序是：
 - `*.m.example.test/api/upload`: Mobile 上传入口，只从请求 Host 确定 Desktop，内部发送 `ns=ap`, `type=/api/upload`；multipart 不允许携带 `publicHost`。
 - `*.m.example.test/api/resource`: Mobile 资源入口，内部发送 `ns=ap`, `type=/api/resource` 和 `{file,pushURL}`；Desktop 通过 ticket 保护的 `/api/push/{id}` 回推文件。
 - `*-wa.example.test`: Desktop WebApp public HTTP/WebSocket。Relay 通过 WebApp route 与所属 deviceKey 打开 Desktop stream，向 Desktop 发送 `ns=wa` 的 `http.request` 或 `websocket.connect` 元数据。
-- `share.example.test`: 对话分享只读站点。公开边缘网关将 `/share/{id}` 和 `/assets/conversation-export/*` 转发到 Relay；Tunnel API origin 也暴露分享模板。Relay 从 SQLite 读取 `ConversationSnapshotV1`，注入当前唯一模板后返回 HTML；一次性分享仍以 `DELETE ... RETURNING` 原子消费。模板、manifest 和内容寻址资产由 WebClient 的独立发布命令整体替换，并从编译期 `embed.FS` 返回。
+- `share.example.test`: 对话分享只读站点。公开边缘网关将 `/share/{id}` 和 `/assets/conversation-export/*` 转发到 Relay；Tunnel API origin 也暴露分享模板。Relay 从当前数据库读取 `ConversationSnapshotV1`，注入当前唯一模板后返回 HTML；一次性分享通过数据库对应的写事务、删除和提交实现原子消费。模板、manifest 和内容寻址资产由 WebClient 的独立发布命令整体替换，并从编译期 `embed.FS` 返回。
 
 ## 4. 目录结构
 
@@ -54,14 +54,14 @@ Relay 入口在 `cmd/relay/main.go`，启动顺序是：
 - `internal/desktop`: Desktop device 和 Desktop WebApp 注册 API。
 - `internal/proxy`: Relay/Agent 转发实现、yamux session、active agent manager、traffic event 记录。
 - `internal/shareassets`: 公开对话显示模板、manifest、当前唯一 asset-set 与服务端渲染器；不保留旧 Hash 集合或兼容分支。
-- `internal/store`: SQLite schema、migration、DAO 和领域模型。
+- `internal/store`: MySQL/SQLite schema、连接、少量方言适配、共享 DAO 和领域模型。
 - `internal/tunnel`: 隧道协议结构、JSON frame、WebSocket frame、Host/path/upstream 工具。
 - `deploy`: Nginx/Caddy 示例配置。
 - `third_party/yamux`: 本地替换的 yamux 依赖，除非明确修复复用协议问题，不要随意改。
 
 ## 5. 数据结构
 
-核心表由 `internal/store/store.go` 的 `schema` 定义：
+核心表由 `internal/store/schema.sql` 和 `internal/store/schema_sqlite.sql` 定义：
 
 - `admin_users`: 本地管理用户。
 - `admin_sessions`: 本地管理登录 session，cookie 名为 `tunnel_hub_session`。
@@ -76,7 +76,7 @@ Relay 入口在 `cmd/relay/main.go`，启动顺序是：
 - `conversation_shares`: 用户创建的 `ConversationSnapshotV1` JSON、会话关联、绝对到期时间、撤销状态和一次性标记；公开 ID 必须不可预测。所有者身份来自官网 SSO JWT，Desktop main 直接上传 Snapshot。Relay 严格校验 JSON 和版本，公开读取时用当前模板渲染；一次性记录在首次合法 GET 时原子删除。不保留 HTML 上传或旧 Header 兼容路径。
 - `conversation_share_access`: 每条分享最近一次成功公开访问时间；热更新与 Snapshot BLOB 分表，不保存访问日志或次数。
 
-注意：`admin_api_keys` 仍在 schema 中，但当前主 API 路径没有完整使用它，不要把它当成已上线能力写入 README。
+数据库只包含当前有效模型，不保留未使用的 API key 表或历史字段迁移；MySQL/SQLite 差异仅限当前 schema 所需的显式适配。
 
 ## 6. API 与协议定义
 
@@ -136,11 +136,12 @@ Relay 入口在 `cmd/relay/main.go`，启动顺序是：
 
 ## 8. 开发流程
 
-后端本地验证：
+后端本地验证（MySQL 回归先按 README 配置独立服务；SQLite 回归使用临时文件）：
 
 ```bash
 cd tunnel-hub-server
 make test
+make test-sqlite
 make verify-neutral
 make run-relay
 ```
@@ -171,10 +172,20 @@ npm run build
 npm run dev
 ```
 
+## 存储约定
+
+- `DATABASE_TYPE` 缺省为 `mysql`；MySQL 连接只来自 `MYSQL_*`，SQLite 路径只来自 `RELAY_DB_PATH`。`MYSQL_PASSWORD` 不裁剪，不输出 DSN 或完整配置。
+- 使用 `database/sql` 和具体 `store.DB`，数据库差异只允许出现在连接、schema 和必要 SQL/事务分支；不引入 ORM、通用方言框架或 Repository。
+- 全新 MySQL 库由应用逐表建表；全新 SQLite 库在事务中建表并写入版本。两者都不导入历史数据或自动修补已有表。
+- 使用 InnoDB、utf8mb4、区分大小写的标识符、UTC DATETIME(6)；`max_allowed_packet` 至少 64 MiB。
+- 一次性分享提交成功后才返回正文；设备/WebApp 注册和最后管理员保护必须通过数据库约束和事务保证并发语义。
+- MySQL 测试使用 `internal/testutil/mysqltest` 创建独立随机库，不得读取生产账号或静默跳过；SQLite 测试只使用 `t.TempDir()` 下的文件。清理失败必须明确报告。
+- 保留本地历史数据库和旧 Docker 卷，不把它们当作代码清理对象。
+
 ## 9. 已知约束与注意事项
 
 - 根目录当前是三个 sibling 项目，不是一个统一 git 根目录；不要假设可以在上级目录使用 git 历史或提交。
-- `.env`、SQLite 数据库、JWT key、真实 token、`configs/*.pem` 都不能提交。
+- `.env`、`.env.test.local`、历史数据库文件、JWT key、真实 token、`configs/*.pem` 都不能提交。
 - 生产部署依赖反向代理正确转发 WebSocket upgrade；修改部署文档时要同时检查 wildcard Host 路由。
 - `*.m.example.test` 的 WebSocket upgrade 必须继续直达 Relay；普通 HTTP 在生产反向代理层应转到 `tunnel-hub-public`。如果普通 HTTP 到达 Relay，Relay 仍会返回 upgrade required。
 - `*-wa.example.test` 是 browser-facing WebApp 代理，不等同于 tester 中的 Desktop business namespace `ns=wa`。

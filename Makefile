@@ -1,7 +1,7 @@
 GO ?= go
 MODULE_PREP = GOTOOLCHAIN=local $(GO) run ./tools/moduleprep
 
-.PHONY: run-relay run-agent test build docker-build verify-neutral migrate-conversation-shares
+.PHONY: run-relay run-agent test test-sqlite test-all build docker-build verify-neutral
 
 run-relay:
 	$(MODULE_PREP) run -package ./cmd/relay -- $(ARGS)
@@ -10,8 +10,14 @@ run-agent:
 	$(MODULE_PREP) run -package ./cmd/agent -- $(ARGS)
 
 test:
-	$(MODULE_PREP) exec -- $(GO) test ./...
+	$(MODULE_PREP) exec -- env TEST_DATABASE_TYPE=mysql $(GO) test ./...
 	cd third_party/yamux && GOTOOLCHAIN=local $(GO) test ./...
+
+test-sqlite:
+	$(MODULE_PREP) exec -- env TEST_DATABASE_TYPE=sqlite $(GO) test ./...
+	cd third_party/yamux && GOTOOLCHAIN=local $(GO) test ./...
+
+test-all: test test-sqlite
 
 build:
 	mkdir -p bin
@@ -23,8 +29,3 @@ docker-build:
 
 verify-neutral:
 	GOTOOLCHAIN=local $(GO) run ./tools/neutralcheck
-
-migrate-conversation-shares:
-	@test -n "$(DB)" || (echo "DB is required" && exit 1)
-	@test -n "$(BACKUP)" || (echo "BACKUP is required" && exit 1)
-	$(MODULE_PREP) run -package ./tools/migrate-conversation-shares -- -db "$(DB)" -backup "$(BACKUP)"
