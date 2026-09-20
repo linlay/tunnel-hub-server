@@ -117,6 +117,25 @@ CREATE TABLE IF NOT EXISTS conversation_share_access (
 	FOREIGN KEY (share_id) REFERENCES conversation_shares(id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
 
+CREATE TABLE IF NOT EXISTS conversation_share_attachments (
+	share_id VARCHAR(128) NOT NULL,
+	attachment_id VARCHAR(80) NOT NULL,
+	name VARCHAR(255) NOT NULL,
+	mime_type VARCHAR(100) NOT NULL,
+	size_bytes BIGINT NOT NULL,
+	sha256 VARCHAR(64) NOT NULL,
+	body LONGBLOB NOT NULL,
+	PRIMARY KEY (share_id, attachment_id),
+	FOREIGN KEY (share_id) REFERENCES conversation_shares(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+
+CREATE TABLE IF NOT EXISTS conversation_share_claims (
+	share_id VARCHAR(128) PRIMARY KEY,
+	token_hash VARBINARY(32) NOT NULL,
+	expires_at DATETIME(6) NOT NULL,
+	FOREIGN KEY (share_id) REFERENCES conversation_shares(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+
 CREATE TABLE IF NOT EXISTS traffic_events (
 	id BIGINT PRIMARY KEY AUTO_INCREMENT,
 	object_type VARCHAR(255) NOT NULL,

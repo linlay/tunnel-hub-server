@@ -17,12 +17,13 @@ import (
 const PublicPathPrefix = "/assets/conversation-export/"
 const TemplatePublicPath = PublicPathPrefix + "conversation.template.html"
 
-const snapshotMarker = "__CONVERSATION_EXPORT_SNAPSHOT_JSON_V1__"
+const snapshotMarker = "__CONVERSATION_EXPORT_SNAPSHOT_JSON_V2__"
+const oldSnapshotMarker = "__CONVERSATION_EXPORT_SNAPSHOT_JSON_V1__"
 const assetOriginMarker = "__CONVERSATION_EXPORT_ASSET_ORIGIN__"
 
 var relativeAssetPath = regexp.MustCompile(`^(?:[A-Za-z0-9._-]+/)*[A-Za-z0-9._-]+$`)
 
-//go:embed files conversation.template.html conversation-assets.json
+//go:embed files conversation.template.html conversation.v1.template.html conversation-assets.json
 var embeddedFiles embed.FS
 
 type assetManifest struct {
@@ -34,10 +35,11 @@ type assetManifest struct {
 }
 
 type Bundle struct {
-	assetSet   string
-	template   []byte
-	files      fs.FS
-	fileServer http.Handler
+	assetSet    string
+	template    []byte
+	oldTemplate []byte
+	files       fs.FS
+	fileServer  http.Handler
 }
 
 func NewBundle() *Bundle {
@@ -57,6 +59,10 @@ func NewBundle() *Bundle {
 		bytes.Count(template, []byte(assetOriginMarker)) == 0 {
 		panic("conversation export template is invalid")
 	}
+	oldTemplate, err := embeddedFiles.ReadFile("conversation.v1.template.html")
+	if err != nil || bytes.Count(oldTemplate, []byte(oldSnapshotMarker)) != 1 {
+		panic("historical conversation export template is invalid")
+	}
 	files, err := fs.Sub(embeddedFiles, "files")
 	if err != nil {
 		panic("conversation export assets are unavailable: " + err.Error())
@@ -71,10 +77,11 @@ func NewBundle() *Bundle {
 		}
 	}
 	return &Bundle{
-		assetSet:   manifest.AssetSet,
-		template:   template,
-		files:      files,
-		fileServer: http.StripPrefix(PublicPathPrefix, http.FileServer(http.FS(files))),
+		assetSet:    manifest.AssetSet,
+		template:    template,
+		oldTemplate: oldTemplate,
+		files:       files,
+		fileServer:  http.StripPrefix(PublicPathPrefix, http.FileServer(http.FS(files))),
 	}
 }
 
@@ -86,13 +93,26 @@ func (b *Bundle) Render(snapshot []byte, assetOrigin string) ([]byte, error) {
 	if !json.Valid(snapshot) {
 		return nil, errors.New("conversation snapshot is invalid")
 	}
+	var envelope struct {
+		Version int `json:"version"`
+	}
+	if err := json.Unmarshal(snapshot, &envelope); err != nil {
+		return nil, err
+	}
+	template := b.template
+	marker := snapshotMarker
+	if envelope.Version == 1 {
+		template, marker = b.oldTemplate, oldSnapshotMarker
+	} else if envelope.Version != 2 {
+		return nil, errors.New("unsupported conversation snapshot version")
+	}
 	origin, err := normalizedOrigin(assetOrigin)
 	if err != nil {
 		return nil, err
 	}
 	var escaped bytes.Buffer
 	json.HTMLEscape(&escaped, snapshot)
-	html := bytes.Replace(b.template, []byte(snapshotMarker), escaped.Bytes(), 1)
+	html := bytes.Replace(template, []byte(marker), escaped.Bytes(), 1)
 	html = bytes.ReplaceAll(html, []byte(assetOriginMarker), []byte(origin))
 	return html, nil
 }
@@ -108,9 +128,9 @@ func (b *Bundle) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	relativePath := strings.TrimPrefix(r.URL.Path, PublicPathPrefix)
-	wantPrefix := b.assetSet + "/"
-	assetPath := strings.TrimPrefix(relativePath, wantPrefix)
-	if relativePath == r.URL.Path || !strings.HasPrefix(relativePath, wantPrefix) ||
+	assetSet, assetPath, found := strings.Cut(relativePath, "/")
+	if relativePath == r.URL.Path || !found ||
+		!regexp.MustCompile(`^[a-f0-9]{64}$`).MatchString(assetSet) ||
 		assetPath != path.Clean(assetPath) || !relativeAssetPath.MatchString(assetPath) {
 		http.NotFound(w, r)
 		return

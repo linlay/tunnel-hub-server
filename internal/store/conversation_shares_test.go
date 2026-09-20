@@ -15,7 +15,7 @@ func TestConversationShareCreateReadExpireAndRevoke(t *testing.T) {
 	now := time.Date(2026, time.August, 17, 1, 2, 3, 0, time.UTC)
 	expiresAt := now.Add(720 * time.Hour)
 	snapshot := []byte(`{"version":1,"title":"Release plan"}`)
-	share, err := db.CreateConversationShare(ctx, "owner-a", "chat-a", ConversationSnapshotVersion, snapshot, now, &expiresAt, false)
+	share, err := db.CreateConversationShare(ctx, "owner-a", "chat-a", 1, snapshot, now, &expiresAt, false)
 	if err != nil {
 		t.Fatalf("create share: %v", err)
 	}
@@ -39,7 +39,7 @@ func TestConversationShareCreateReadExpireAndRevoke(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get share: %v", err)
 	}
-	if string(found.SnapshotJSON) != string(snapshot) || found.SnapshotVersion != ConversationSnapshotVersion {
+	if string(found.SnapshotJSON) != string(snapshot) || found.SnapshotVersion != 1 {
 		t.Fatalf("unexpected public share: %#v", found)
 	}
 	accessedAt := now.Add(time.Minute)
@@ -81,7 +81,7 @@ func TestConversationSharePermanentRemainsReadableUntilRevoked(t *testing.T) {
 		ctx,
 		"owner-a",
 		"chat-permanent",
-		ConversationSnapshotVersion,
+		1,
 		[]byte(`{"version":1,"title":"permanent"}`),
 		now,
 		nil,
@@ -110,21 +110,21 @@ func TestConversationShareListReturnsAllOwnerConversationsNewestFirst(t *testing
 	now := time.Date(2026, time.August, 17, 1, 2, 3, 0, time.UTC)
 	expiresAt := now.Add(time.Hour)
 	first, err := db.CreateConversationShare(
-		ctx, "owner-a", "chat-a", ConversationSnapshotVersion,
+		ctx, "owner-a", "chat-a", 1,
 		[]byte(`{"version":1,"title":"first"}`), now, &expiresAt, false,
 	)
 	if err != nil {
 		t.Fatalf("create first share: %v", err)
 	}
 	second, err := db.CreateConversationShare(
-		ctx, "owner-a", "chat-b", ConversationSnapshotVersion,
+		ctx, "owner-a", "chat-b", 1,
 		[]byte(`{"version":1,"title":"second"}`), now.Add(time.Minute), &expiresAt, false,
 	)
 	if err != nil {
 		t.Fatalf("create second share: %v", err)
 	}
 	if _, err := db.CreateConversationShare(
-		ctx, "owner-b", "chat-c", ConversationSnapshotVersion,
+		ctx, "owner-b", "chat-c", 1,
 		[]byte(`{"version":1,"title":"other owner"}`), now.Add(2*time.Minute), &expiresAt, false,
 	); err != nil {
 		t.Fatalf("create other owner share: %v", err)
@@ -157,7 +157,7 @@ func TestConversationShareCreateValidatesSnapshot(t *testing.T) {
 		{name: "owner", conversationID: "chat-a", version: 1, snapshot: []byte("x"), expiresAt: timePointer(now.Add(time.Hour))},
 		{name: "conversation empty", owner: "owner", version: 1, snapshot: []byte("x"), expiresAt: timePointer(now.Add(time.Hour))},
 		{name: "conversation", owner: "owner", conversationID: strings.Repeat("x", MaxConversationShareConversationIDBytes+1), version: 1, snapshot: []byte("x"), expiresAt: timePointer(now.Add(time.Hour))},
-		{name: "version", owner: "owner", conversationID: "chat-a", version: 2, snapshot: []byte("x"), expiresAt: timePointer(now.Add(time.Hour))},
+		{name: "version", owner: "owner", conversationID: "chat-a", version: 3, snapshot: []byte("x"), expiresAt: timePointer(now.Add(time.Hour))},
 		{name: "empty", owner: "owner", conversationID: "chat-a", version: 1, expiresAt: timePointer(now.Add(time.Hour))},
 		{name: "expiration", owner: "owner", conversationID: "chat-a", version: 1, snapshot: []byte("x"), expiresAt: timePointer(now)},
 		{name: "single use expiration", owner: "owner", conversationID: "chat-a", version: 1, snapshot: []byte("x"), expiresAt: timePointer(now.Add(time.Hour)), singleUse: true},
@@ -183,7 +183,7 @@ func TestConversationShareLookupDoesNotRequireGeneratedPrefix(t *testing.T) {
 		INSERT INTO conversation_shares (
 			id, owner_user_id, conversation_id, snapshot_version, snapshot_json, created_at, expires_at
 		) VALUES (?, ?, ?, ?, ?, ?, ?)
-	`, "opaque-abc_123", "owner-a", "chat-a", ConversationSnapshotVersion, snapshot, now, now.Add(time.Hour))
+	`, "opaque-abc_123", "owner-a", "chat-a", 1, snapshot, now, now.Add(time.Hour))
 	if err != nil {
 		t.Fatalf("insert prefixless share: %v", err)
 	}
@@ -202,7 +202,7 @@ func TestConversationShareSingleUseIsAtomicallyDeletedOnFirstAcquire(t *testing.
 		ctx,
 		"owner-a",
 		"chat-once",
-		ConversationSnapshotVersion,
+		1,
 		snapshot,
 		now,
 		nil,
