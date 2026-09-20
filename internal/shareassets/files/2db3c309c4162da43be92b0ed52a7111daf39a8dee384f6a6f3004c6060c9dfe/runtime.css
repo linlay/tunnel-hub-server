@@ -624,8 +624,8 @@ body {
 }
 
 .db0XFz6l {
-  width: min(1040px, calc(100% - 48px));
-  min-height: 100vh;
+  width: min(866px, calc(100% - 48px));
+  min-height: calc(100vh - 56px);
   margin: 0 auto;
   padding-bottom: calc(112px + env(safe-area-inset-bottom));
 }
@@ -634,14 +634,20 @@ body {
   position: sticky;
   z-index: 10;
   top: 0;
-  display: flex;
-  min-height: 72px;
-  align-items: center;
-  justify-content: space-between;
-  gap: 20px;
+  min-height: 56px;
   border-bottom: 1px solid var(--export-border);
   background: color-mix(in srgb, var(--export-bg) 92%, transparent);
   backdrop-filter: blur(14px);
+}
+
+.of5DDJt8 {
+  display: flex;
+  width: min(866px, calc(100% - 48px));
+  min-height: 55px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+  margin: 0 auto;
 }
 
 .SqIVRHO1,
@@ -656,24 +662,51 @@ body {
   margin: 0;
   overflow: hidden;
   color: var(--export-text-strong);
-  font-size: 18px;
-  line-height: 1.35;
+  font-size: 16px;
+  font-weight: 600;
+  line-height: 24px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .SQ7t1dF4 {
-  min-height: 36px;
+  display: inline-flex;
+  min-height: 32px;
   flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
   border: 1px solid var(--export-border);
   border-radius: 9px;
   background: var(--export-surface);
   color: var(--export-text);
-  padding: 0 14px;
+  padding: 0 10px;
   font: inherit;
   font-size: 13px;
   font-weight: 650;
   cursor: pointer;
+}
+
+.AtNZPkm7 {
+  display: inline-flex;
+  width: 16px;
+  height: 16px;
+  align-items: center;
+  justify-content: center;
+  font-size: 16px;
+}
+
+.AtNZPkm7 svg {
+  width: 16px;
+  height: 16px;
+}
+
+.SQ7t1dF4[data-state="copied"] .AtNZPkm7 {
+  color: var(--export-accent);
+}
+
+.SQ7t1dF4[data-state="failed"] .AtNZPkm7 {
+  color: #cf222e;
 }
 
 .SQ7t1dF4:hover,
@@ -684,18 +717,18 @@ body {
 }
 
 .n27nZK8T {
-  padding: 34px 0 46px;
+  padding: 24px 0 12px;
   color: var(--export-muted);
   text-align: center;
 }
 
 .n27nZK8T p {
   margin: 0;
-  font-size: 15px;
+  font-size: 12px;
 }
 
 .VavwadV2 {
-  width: min(900px, 100%);
+  width: 100%;
   margin: 0 auto;
 }
 
@@ -769,7 +802,7 @@ body {
   display: flex;
   flex-direction: column;
   gap: 42px;
-  padding: 12px 0 48px;
+  padding: 0 0 48px;
 }
 
 .R4mkBAD8 {
@@ -803,9 +836,25 @@ body {
 }
 
 .ygXwtjYm {
-  margin-bottom: 14px;
+  margin-bottom: 12px;
   color: var(--export-text-strong);
-  font-size: 16px;
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1.4;
+}
+
+.ygXwtjYm strong {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.uykoUp8V {
+  display: block;
+  width: 24px;
+  height: 24px;
+  flex: 0 0 24px;
+  border-radius: 50%;
+  object-fit: cover;
 }
 
 .Rm8K7MJ_ {
@@ -817,35 +866,98 @@ body {
 
 .LItEdKp1 {
   color: var(--export-muted);
-  font-size: 14px;
+  font-size: 15px;
 }
 
 .LItEdKp1 > summary,
 .Hi084P1y > summary {
+  display: flex;
+  width: fit-content;
+  max-width: 100%;
+  align-items: center;
+  gap: 8px;
   color: var(--export-muted);
   cursor: pointer;
-  font-size: 13px;
-  font-weight: 600;
+  font-size: 15px;
+  font-weight: 400;
+  line-height: 1.75;
+  list-style: none;
+}
+
+.LItEdKp1 > summary::-webkit-details-marker,
+.Hi084P1y > summary::-webkit-details-marker {
+  display: none;
+}
+
+.LItEdKp1 > summary:hover,
+.Hi084P1y > summary:hover {
+  color: var(--export-text);
+}
+
+.LItEdKp1 > summary:focus-visible,
+.Hi084P1y > summary:focus-visible {
+  border-radius: 4px;
+  outline: 2px solid var(--export-accent);
+  outline-offset: 3px;
+}
+
+.SWBDIC3u {
+  display: inline-flex;
+  width: 14px;
+  flex: 0 0 14px;
+  justify-content: center;
+  font-size: 14px;
+  line-height: 1;
+}
+
+.fru7D8_U {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.Jv48UBMT {
+  width: 8px;
+  height: 8px;
+  flex: 0 0 8px;
+  border-right: 1.5px solid currentColor;
+  border-bottom: 1.5px solid currentColor;
+  transform: rotate(-45deg);
+  transition: transform 180ms ease;
+}
+
+.LItEdKp1[open] > summary .Jv48UBMT,
+.Hi084P1y[open] > summary .Jv48UBMT {
+  transform: rotate(45deg);
 }
 
 .VupblU07 {
   display: flex;
   flex-direction: column;
   gap: 12px;
-  padding: 12px 0 0 20px;
+  margin: 8px 0 4px 6px;
+  border-left: 2px solid var(--export-border);
+  padding: 2px 0 2px 12px;
 }
 
 .Hi084P1y {
   min-width: 0;
   margin: 0;
   color: var(--export-muted);
-  font-size: 13px;
+  font-size: 14px;
+}
+
+.Hi084P1y > summary {
+  font-size: 14px;
+}
+
+.sLSV5TUN {
+  margin: 8px 0 0 6px;
+  border-left: 2px solid var(--export-border);
+  padding-left: 12px;
 }
 
 .Amc_Vvrz {
-  border-left: 2px solid var(--export-border);
   color: var(--export-muted);
-  padding-left: 14px;
   font-size: 14px;
   line-height: 1.7;
   overflow-wrap: anywhere;
@@ -866,16 +978,6 @@ body {
   color: var(--export-text);
   font-size: 16px;
   line-height: 1.78;
-}
-
-.RoUb0Vic {
-  margin-top: 4px;
-}
-
-.RoUb0Vic > p:first-child:not(:last-child) {
-  margin-bottom: 28px;
-  border-bottom: 1px solid var(--export-border);
-  padding-bottom: 28px;
 }
 
 .p3b0FIKq p,
@@ -1058,49 +1160,22 @@ body {
 }
 
 @media (max-width: 640px) {
-  .db0XFz6l {
-    width: calc(100% - 28px);
+  .db0XFz6l,
+  .of5DDJt8 {
+    width: calc(100% - 32px);
   }
 
-  .zFQKLH1R {
-    min-height: 62px;
+  .of5DDJt8 {
     gap: 10px;
   }
 
-  .SqIVRHO1 h1 {
-    font-size: 16px;
-  }
-
   .SQ7t1dF4 {
-    width: 38px;
-    overflow: hidden;
+    width: 32px;
     padding: 0;
-    color: transparent;
-    font-size: 0;
   }
 
-  .SQ7t1dF4::before {
-    content: "⧉";
-    color: var(--export-text);
-    font-size: 18px;
-  }
-
-  .SQ7t1dF4[data-state="copied"]::before {
-    content: "✓";
-    color: var(--export-accent);
-  }
-
-  .SQ7t1dF4[data-state="failed"]::before {
-    content: "!";
-    color: #cf222e;
-  }
-
-  .n27nZK8T {
-    padding: 26px 0 36px;
-  }
-
-  .n27nZK8T p {
-    font-size: 13px;
+  .okcOMGRO {
+    display: none;
   }
 
   .hIuxBUw6,
@@ -1124,6 +1199,10 @@ body {
 }
 
 @media (prefers-reduced-motion: reduce) {
+  .Jv48UBMT {
+    transition: none;
+  }
+
   .QHM4d5wd,
   .export-loading,
   .export-loading-spinner {
