@@ -296,7 +296,7 @@ func TestConversationShareSingleUseHEADDoesNotConsume(t *testing.T) {
 		t.Fatalf("decode response: %v", err)
 	}
 	head := performConversationShareRequest(server, http.MethodHead, publicConversationSharePagePath+result.ID, nil, "")
-	if head.Code != http.StatusMethodNotAllowed || head.Header().Get("Allow") != http.MethodGet {
+	if head.Code != http.StatusOK || head.Body.Len() != 0 {
 		t.Fatalf("HEAD status=%d allow=%q", head.Code, head.Header().Get("Allow"))
 	}
 	get := performConversationShareRequest(server, http.MethodGet, publicConversationSharePagePath+result.ID, nil, "")
@@ -549,7 +549,7 @@ func TestConversationSharePageErrorsUseStandaloneResponsiveHTML(t *testing.T) {
 	}
 
 	method := performConversationShareRequest(server, http.MethodPost, publicConversationSharePagePath+"share_missing", nil, "")
-	if method.Code != http.StatusMethodNotAllowed || method.Header().Get("Allow") != http.MethodGet {
+	if method.Code != http.StatusMethodNotAllowed || method.Header().Get("Allow") != "GET, HEAD" {
 		t.Fatalf("method response status=%d allow=%q", method.Code, method.Header().Get("Allow"))
 	}
 	if !strings.Contains(method.Body.String(), "无法打开此页面") {

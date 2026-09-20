@@ -19,8 +19,8 @@ func TestEmbeddedAssetSetDirectoryMatchesContentHash(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(sets) != 1 {
-		t.Fatalf("embedded conversation export asset sets=%d want=1", len(sets))
+	if len(sets) < 2 {
+		t.Fatalf("embedded conversation export asset sets=%d want historical and current", len(sets))
 	}
 	for _, set := range sets {
 		if !set.IsDir() || len(set.Name()) != 64 {
@@ -121,7 +121,7 @@ func TestHandlerServesEveryCurrentManifestAsset(t *testing.T) {
 
 func TestBundleRendersHTMLSafeSnapshotWithCurrentAssets(t *testing.T) {
 	bundle := NewBundle()
-	snapshot := []byte(`{"version":1,"title":"</script>&  "}`)
+	snapshot := []byte(`{"version":2,"title":"</script>&  "}`)
 	html, err := bundle.Render(snapshot, "https://share.example.test")
 	if err != nil {
 		t.Fatal(err)

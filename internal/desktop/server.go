@@ -62,12 +62,16 @@ func NewServer(db *store.DB, cfg config.RelayConfig, logger *slog.Logger, ssoJWT
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if strings.HasPrefix(r.URL.Path, publicConversationSharePagePath) {
-		if r.Method != http.MethodGet {
-			w.Header().Set("Allow", http.MethodGet)
+		if r.Method != http.MethodGet && r.Method != http.MethodHead {
+			w.Header().Set("Allow", "GET, HEAD")
 			writePublicConversationShareError(w, http.StatusMethodNotAllowed)
 			return
 		}
-		s.handleGetPublicConversationSharePage(w, r)
+		if strings.Contains(r.URL.Path, "/attachments/") {
+			s.handleGetPublicConversationShareAttachment(w, r)
+		} else {
+			s.handleGetPublicConversationSharePage(w, r)
+		}
 		return
 	}
 	if r.Method == http.MethodOptions {

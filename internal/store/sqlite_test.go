@@ -24,7 +24,7 @@ func TestSQLiteSchemaLifecycleAndConnectionSettings(t *testing.T) {
 		`PRAGMA foreign_keys`: "1",
 		`PRAGMA journal_mode`: "wal",
 		`PRAGMA busy_timeout`: "5000",
-		`PRAGMA user_version`: "1",
+		`PRAGMA user_version`: "2",
 	} {
 		var got string
 		if err := db.sql.QueryRow(query).Scan(&got); err != nil || !strings.EqualFold(got, want) {
@@ -76,10 +76,10 @@ func TestSQLiteRejectsUnsupportedSchemas(t *testing.T) {
 			t.Fatal(err)
 		}
 		t.Cleanup(func() { _ = db.Close() })
-		if _, err := db.sql.Exec(`PRAGMA user_version = 2`); err != nil {
+		if _, err := db.sql.Exec(`PRAGMA user_version = 3`); err != nil {
 			t.Fatal(err)
 		}
-		if err := db.Migrate(context.Background()); err == nil || !strings.Contains(err.Error(), "version 2") {
+		if err := db.Migrate(context.Background()); err == nil || !strings.Contains(err.Error(), "version 3") {
 			t.Fatalf("error = %v", err)
 		}
 	})
@@ -168,7 +168,7 @@ func TestSQLiteConcurrentWritesPreserveInvariants(t *testing.T) {
 	if created != 1 {
 		t.Fatalf("created = %d", created)
 	}
-	share, err := db.CreateConversationShare(ctx, "owner", "chat", ConversationSnapshotVersion, []byte(`{"version":1}`), time.Now(), nil, true)
+	share, err := db.CreateConversationShare(ctx, "owner", "chat", 1, []byte(`{"version":1}`), time.Now(), nil, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -299,7 +299,7 @@ func TestSQLiteConversationAccessTimeDoesNotRegress(t *testing.T) {
 	db := openSQLiteTestDB(t)
 	ctx := context.Background()
 	now := time.Date(2026, 9, 17, 1, 2, 3, 123456000, time.UTC)
-	share, err := db.CreateConversationShare(ctx, "owner", "chat", ConversationSnapshotVersion, []byte(`{"version":1}`), now, nil, false)
+	share, err := db.CreateConversationShare(ctx, "owner", "chat", 1, []byte(`{"version":1}`), now, nil, false)
 	if err != nil {
 		t.Fatal(err)
 	}

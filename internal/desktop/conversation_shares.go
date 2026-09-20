@@ -1,6 +1,9 @@
 package desktop
 
 import (
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -73,7 +76,14 @@ func (s *Server) handleCreateConversationShare(w http.ResponseWriter, r *http.Re
 		writeError(w, http.StatusBadRequest, "invalid conversation id")
 		return
 	}
-	snapshot, err := decodeConversationSnapshot(r)
+	version := r.Header.Get(conversationSnapshotVersionHeader)
+	var snapshot []byte
+	var attachments []store.ConversationShareAttachment
+	if version == "2" {
+		snapshot, attachments, err = decodeConversationShareV2(w, r)
+	} else {
+		snapshot, err = decodeConversationSnapshot(r)
+	}
 	if err != nil {
 		status := http.StatusBadRequest
 		if errors.Is(err, errConversationShareTooLarge) {
@@ -93,12 +103,17 @@ func (s *Server) handleCreateConversationShare(w http.ResponseWriter, r *http.Re
 		value := now.Add(policy.duration)
 		expiresAt = &value
 	}
-	share, err := s.DB.CreateConversationShare(
+	snapshotVersion := 1
+	if version == "2" {
+		snapshotVersion = 2
+	}
+	share, err := s.DB.CreateConversationShareWithAttachments(
 		r.Context(),
 		principal.UserID,
 		conversationID,
-		store.ConversationSnapshotVersion,
+		snapshotVersion,
 		snapshot,
+		attachments,
 		now,
 		expiresAt,
 		policy.singleUse,
@@ -215,7 +230,42 @@ func (s *Server) handleGetPublicConversationSharePage(w http.ResponseWriter, r *
 		return
 	}
 	now := s.now().UTC()
-	share, err := s.DB.AcquirePublicConversationShare(r.Context(), id, now)
+	peek, err := s.DB.PeekPublicConversationShare(r.Context(), id, now)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			writePublicConversationShareError(w, http.StatusNotFound)
+		} else {
+			s.Logger.Error("peek conversation share", "error", err)
+			writePublicConversationShareError(w, http.StatusInternalServerError)
+		}
+		return
+	}
+	if r.Method == http.MethodHead {
+		setPublicConversationShareHeaders(w.Header())
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	var share store.ConversationShare
+	if peek.SnapshotVersion == 1 {
+		share, err = s.DB.AcquirePublicConversationShare(r.Context(), id, now)
+	} else {
+		var raw [32]byte
+		if _, err = rand.Read(raw[:]); err != nil {
+			writePublicConversationShareError(w, http.StatusInternalServerError)
+			return
+		}
+		newHash := sha256.Sum256(raw[:])
+		presentedHash := conversationShareSessionHash(r, id)
+		var claimed bool
+		share, claimed, err = s.DB.AccessPublicConversationShareV2(r.Context(), id, now, presentedHash, newHash[:])
+		if err == nil && claimed {
+			http.SetCookie(w, &http.Cookie{
+				Name: conversationShareSessionCookieName, Value: base64.RawURLEncoding.EncodeToString(raw[:]),
+				Path: "/share/" + id, HttpOnly: true, SameSite: http.SameSiteLaxMode,
+				Secure: r.TLS != nil, MaxAge: int(store.ConversationShareSessionDuration.Seconds()),
+			})
+		}
+	}
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			writePublicConversationShareError(w, http.StatusNotFound)
@@ -250,6 +300,21 @@ func (s *Server) handleGetPublicConversationSharePage(w http.ResponseWriter, r *
 	w.Header().Set("Content-Length", strconv.Itoa(len(html)))
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(html)
+}
+
+const conversationShareSessionCookieName = "conversation_share_session"
+
+func conversationShareSessionHash(r *http.Request, id string) []byte {
+	cookie, err := r.Cookie(conversationShareSessionCookieName)
+	if err != nil {
+		return nil
+	}
+	raw, err := base64.RawURLEncoding.DecodeString(cookie.Value)
+	if err != nil || len(raw) != 32 {
+		return nil
+	}
+	hash := sha256.Sum256(raw)
+	return hash[:]
 }
 
 func writePublicConversationShareError(w http.ResponseWriter, status int) {
@@ -303,7 +368,7 @@ func decodeConversationSnapshot(r *http.Request) ([]byte, error) {
 	var envelope struct {
 		Version int `json:"version"`
 	}
-	if err := json.Unmarshal(snapshot, &envelope); err != nil || envelope.Version != store.ConversationSnapshotVersion {
+	if err := json.Unmarshal(snapshot, &envelope); err != nil || envelope.Version != 1 {
 		return nil, errors.New("unsupported conversation snapshot version")
 	}
 	return snapshot, nil
