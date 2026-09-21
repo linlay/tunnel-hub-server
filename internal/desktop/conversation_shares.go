@@ -4,17 +4,13 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
-	"mime"
 	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
 	"time"
-	"unicode/utf8"
 
 	"example.invalid/tunnel-hub-server/internal/store"
 )
@@ -76,14 +72,11 @@ func (s *Server) handleCreateConversationShare(w http.ResponseWriter, r *http.Re
 		writeError(w, http.StatusBadRequest, "invalid conversation id")
 		return
 	}
-	version := r.Header.Get(conversationSnapshotVersionHeader)
-	var snapshot []byte
-	var attachments []store.ConversationShareAttachment
-	if version == "2" {
-		snapshot, attachments, err = decodeConversationShareV2(w, r)
-	} else {
-		snapshot, err = decodeConversationSnapshot(r)
+	if r.Header.Get(conversationSnapshotVersionHeader) != conversationSnapshotVersion {
+		writeError(w, http.StatusBadRequest, "unsupported conversation snapshot version")
+		return
 	}
+	snapshot, attachments, err := decodeConversationShare(w, r)
 	if err != nil {
 		status := http.StatusBadRequest
 		if errors.Is(err, errConversationShareTooLarge) {
@@ -103,15 +96,11 @@ func (s *Server) handleCreateConversationShare(w http.ResponseWriter, r *http.Re
 		value := now.Add(policy.duration)
 		expiresAt = &value
 	}
-	snapshotVersion := 1
-	if version == "2" {
-		snapshotVersion = 2
-	}
 	share, err := s.DB.CreateConversationShareWithAttachments(
 		r.Context(),
 		principal.UserID,
 		conversationID,
-		snapshotVersion,
+		store.ConversationSnapshotVersion,
 		snapshot,
 		attachments,
 		now,
@@ -245,26 +234,24 @@ func (s *Server) handleGetPublicConversationSharePage(w http.ResponseWriter, r *
 		w.WriteHeader(http.StatusOK)
 		return
 	}
-	var share store.ConversationShare
-	if peek.SnapshotVersion == 1 {
-		share, err = s.DB.AcquirePublicConversationShare(r.Context(), id, now)
-	} else {
-		var raw [32]byte
-		if _, err = rand.Read(raw[:]); err != nil {
-			writePublicConversationShareError(w, http.StatusInternalServerError)
-			return
-		}
-		newHash := sha256.Sum256(raw[:])
-		presentedHash := conversationShareSessionHash(r, id)
-		var claimed bool
-		share, claimed, err = s.DB.AccessPublicConversationShareV2(r.Context(), id, now, presentedHash, newHash[:])
-		if err == nil && claimed {
-			http.SetCookie(w, &http.Cookie{
-				Name: conversationShareSessionCookieName, Value: base64.RawURLEncoding.EncodeToString(raw[:]),
-				Path: "/share/" + id, HttpOnly: true, SameSite: http.SameSiteLaxMode,
-				Secure: r.TLS != nil, MaxAge: int(store.ConversationShareSessionDuration.Seconds()),
-			})
-		}
+	if peek.SnapshotVersion != store.ConversationSnapshotVersion {
+		writePublicConversationShareError(w, http.StatusNotFound)
+		return
+	}
+	var raw [32]byte
+	if _, err = rand.Read(raw[:]); err != nil {
+		writePublicConversationShareError(w, http.StatusInternalServerError)
+		return
+	}
+	newHash := sha256.Sum256(raw[:])
+	presentedHash := conversationShareSessionHash(r, id)
+	share, claimed, err := s.DB.AccessPublicConversationShare(r.Context(), id, now, presentedHash, newHash[:])
+	if err == nil && claimed {
+		http.SetCookie(w, &http.Cookie{
+			Name: conversationShareSessionCookieName, Value: base64.RawURLEncoding.EncodeToString(raw[:]),
+			Path: "/share/" + id, HttpOnly: true, SameSite: http.SameSiteLaxMode,
+			Secure: r.TLS != nil, MaxAge: int(store.ConversationShareSessionDuration.Seconds()),
+		})
 	}
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
@@ -289,7 +276,7 @@ func (s *Server) handleGetPublicConversationSharePage(w http.ResponseWriter, r *
 		writePublicConversationShareError(w, http.StatusInternalServerError)
 		return
 	}
-	html, err := s.conversationShareRenderer.Render(share.SnapshotJSON, s.Config.SharePublicBaseURL)
+	html, err := s.conversationShareRenderer.Render(share.SnapshotJSON, s.Config.SharePublicBaseURL, s.Config.BrandID, s.Config.ProductName)
 	if err != nil {
 		s.Logger.Error("render conversation share", "shareId", share.ID, "error", err)
 		writePublicConversationShareError(w, http.StatusInternalServerError)
@@ -333,45 +320,6 @@ func setPublicConversationShareHeaders(header http.Header) {
 	header.Set("X-Content-Type-Options", "nosniff")
 	header.Set("X-Robots-Tag", "noindex, nofollow, noarchive")
 	header.Set("Referrer-Policy", "no-referrer")
-}
-
-func decodeConversationSnapshot(r *http.Request) ([]byte, error) {
-	mediaType, params, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
-	if err != nil || mediaType != "application/json" {
-		return nil, errors.New("Content-Type must be application/json")
-	}
-	for name := range params {
-		if name != "charset" {
-			return nil, errors.New("conversation snapshot has unsupported media type parameters")
-		}
-	}
-	if charset, ok := params["charset"]; ok && !strings.EqualFold(charset, "utf-8") {
-		return nil, errors.New("conversation snapshot charset must be utf-8")
-	}
-	if r.Header.Get(conversationSnapshotVersionHeader) != conversationSnapshotVersion {
-		return nil, errors.New("unsupported conversation snapshot version")
-	}
-	if r.ContentLength > maxConversationSnapshotBytes {
-		return nil, newConversationShareSizeError(r.ContentLength)
-	}
-	limited := io.LimitReader(r.Body, maxConversationSnapshotBytes+1)
-	snapshot, err := io.ReadAll(limited)
-	if err != nil {
-		return nil, errors.New("invalid conversation snapshot")
-	}
-	if int64(len(snapshot)) > maxConversationSnapshotBytes {
-		return nil, newConversationShareSizeError(int64(len(snapshot)))
-	}
-	if len(snapshot) == 0 || !utf8.Valid(snapshot) || !json.Valid(snapshot) {
-		return nil, errors.New("conversation snapshot must be valid UTF-8 JSON")
-	}
-	var envelope struct {
-		Version int `json:"version"`
-	}
-	if err := json.Unmarshal(snapshot, &envelope); err != nil || envelope.Version != 1 {
-		return nil, errors.New("unsupported conversation snapshot version")
-	}
-	return snapshot, nil
 }
 
 func conversationShareIDFromPath(path, prefix string) (string, bool) {

@@ -204,7 +204,7 @@ func TestMySQLLargeSnapshotAndMicrosecondTimes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	found, err := db.AcquirePublicConversationShare(ctx, share.ID, now)
+	found, _, err := db.AccessPublicConversationShare(ctx, share.ID, now, nil, nil)
 	if err != nil || !bytes.Equal(snapshot, found.SnapshotJSON) {
 		t.Fatal("large snapshot round-trip failed", err)
 	}

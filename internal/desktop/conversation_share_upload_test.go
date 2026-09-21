@@ -15,11 +15,11 @@ import (
 	"example.invalid/tunnel-hub-server/internal/store"
 )
 
-func TestConversationShareV2UploadRequiresEveryFrozenAttachment(t *testing.T) {
+func TestConversationShareUploadRequiresEveryFrozenAttachment(t *testing.T) {
 	body := []byte("<html><script>alert(1)</script><p>报告</p></html>")
 	hash := sha256.Sum256(body)
 	const id = "0123456789abcdef01234567"
-	snapshot, _ := json.Marshal(map[string]any{"version": 2, "attachments": []any{
+	snapshot, _ := json.Marshal(map[string]any{"version": 1, "attachments": []any{
 		map[string]any{"id": id, "name": "报告.html", "mimeType": "text/html", "sourceRef": "artifacts/run-1/report.html", "size": len(body), "sha256": hex.EncodeToString(hash[:])},
 	}})
 	makeRequest := func(include, changed bool) *http.Request {
@@ -40,12 +40,12 @@ func TestConversationShareV2UploadRequiresEveryFrozenAttachment(t *testing.T) {
 		request.Header.Set("Content-Type", writer.FormDataContentType())
 		return request
 	}
-	uploaded, attachments, err := decodeConversationShareV2(httptest.NewRecorder(), makeRequest(true, false))
+	uploaded, attachments, err := decodeConversationShare(httptest.NewRecorder(), makeRequest(true, false))
 	if err != nil || len(uploaded) == 0 || len(attachments) != 1 || attachments[0].Name != "报告.html" {
 		t.Fatalf("upload = %d %+v %v", len(uploaded), attachments, err)
 	}
 	for _, request := range []*http.Request{makeRequest(false, false), makeRequest(true, true)} {
-		if _, _, err := decodeConversationShareV2(httptest.NewRecorder(), request); err == nil {
+		if _, _, err := decodeConversationShare(httptest.NewRecorder(), request); err == nil {
 			t.Fatal("incomplete or changed attachment was accepted")
 		}
 	}
@@ -64,7 +64,7 @@ func TestSanitizeSharedHTMLRemovesActiveContent(t *testing.T) {
 	}
 }
 
-func TestConversationShareV2OnceSessionReadsFrozenAttachment(t *testing.T) {
+func TestConversationShareOnceSessionReadsFrozenAttachment(t *testing.T) {
 	cfg := desktopTestConfig(t)
 	cfg.SharePublicBaseURL = "https://share.example.test"
 	server, db := newDesktopTestServerWithConfig(t, cfg)
@@ -73,7 +73,7 @@ func TestConversationShareV2OnceSessionReadsFrozenAttachment(t *testing.T) {
 	const id = "0123456789abcdef01234567"
 	body := []byte("<h1>报告</h1><script>alert(1)</script>")
 	hash := sha256.Sum256(body)
-	snapshot, _ := json.Marshal(map[string]any{"version": 2, "attachments": []any{
+	snapshot, _ := json.Marshal(map[string]any{"version": 1, "attachments": []any{
 		map[string]any{"id": id, "name": "报告.html", "mimeType": "text/html",
 			"sourceRef": "artifacts/report.html", "size": len(body), "sha256": hex.EncodeToString(hash[:])},
 	}})
@@ -86,7 +86,7 @@ func TestConversationShareV2OnceSessionReadsFrozenAttachment(t *testing.T) {
 	_ = writer.Close()
 	request := httptest.NewRequest(http.MethodPost, conversationSharesPath, &payload)
 	request.Header.Set("Content-Type", writer.FormDataContentType())
-	request.Header.Set(conversationSnapshotVersionHeader, "2")
+	request.Header.Set(conversationSnapshotVersionHeader, conversationSnapshotVersion)
 	request.Header.Set(conversationShareExpirationHeader, "once")
 	request.Header.Set(conversationShareConversationIDHeader, "chat-test")
 	request.Header.Set("Authorization", "Bearer "+defaultDesktopJWT)
@@ -123,8 +123,8 @@ func TestConversationShareV2OnceSessionReadsFrozenAttachment(t *testing.T) {
 		t.Fatalf("preview status=%d body=%s", preview.Code, preview.Body.String())
 	}
 	const otherAttachmentID = "ffffffffffffffffffffffff"
-	_, err := db.CreateConversationShareWithAttachments(request.Context(), "owner", "other-chat", 2,
-		[]byte(`{"version":2}`), []store.ConversationShareAttachment{{ID: otherAttachmentID,
+	_, err := db.CreateConversationShareWithAttachments(request.Context(), "owner", "other-chat", store.ConversationSnapshotVersion,
+		[]byte(`{"version":1}`), []store.ConversationShareAttachment{{ID: otherAttachmentID,
 			Name: "other.html", MIMEType: "text/html", Size: int64(len(body)), SHA256: hex.EncodeToString(hash[:]), Body: body}},
 		now, nil, false)
 	if err != nil {

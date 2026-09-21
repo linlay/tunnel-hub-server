@@ -18,9 +18,9 @@ import (
 
 var attachmentIDPattern = regexp.MustCompile(`^[a-f0-9]{24}$`)
 
-// decodeConversationShareV2 reads a single bounded multipart request in memory.
+// decodeConversationShare reads a single bounded multipart request in memory.
 // No upload can be committed until its snapshot and every declared file match.
-func decodeConversationShareV2(w http.ResponseWriter, r *http.Request) ([]byte, []store.ConversationShareAttachment, error) {
+func decodeConversationShare(w http.ResponseWriter, r *http.Request) ([]byte, []store.ConversationShareAttachment, error) {
 	mediaType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
 	if err != nil || mediaType != "multipart/form-data" {
 		return nil, nil, errors.New("Content-Type must be multipart/form-data")
@@ -48,6 +48,9 @@ func decodeConversationShareV2(w http.ResponseWriter, r *http.Request) ([]byte, 
 		}
 		body, err := io.ReadAll(io.LimitReader(part, limit+1))
 		part.Close()
+		if int64(len(body)) > limit && name == "snapshot" {
+			return nil, nil, newConversationShareSizeError(int64(len(body)))
+		}
 		if err != nil || int64(len(body)) > limit {
 			return nil, nil, errors.New("conversation share payload is too large")
 		}
@@ -84,7 +87,7 @@ func decodeConversationShareV2(w http.ResponseWriter, r *http.Request) ([]byte, 
 			SourceRef string `json:"sourceRef"`
 		} `json:"attachments"`
 	}
-	if json.Unmarshal(snapshot, &envelope) != nil || envelope.Version != 2 {
+	if json.Unmarshal(snapshot, &envelope) != nil || envelope.Version != store.ConversationSnapshotVersion {
 		return nil, nil, errors.New("unsupported conversation snapshot version")
 	}
 	if len(files) != len(envelope.Attachments) {

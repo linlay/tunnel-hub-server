@@ -300,16 +300,16 @@ curl -X POST https://hub.example.test/api/desktop/devices/register \
 
 创建、读取和撤销对话分享：
 
-Relay 保存 Desktop 上传的 `ConversationSnapshotV1` JSON，匿名访问时安全注入当前唯一分享模板。正文最大 20 MiB。创建请求必须提供 `Content-Type: application/json`、`X-Conversation-Snapshot-Version: 1`、非空 `X-Conversation-ID` 和 `X-Conversation-Share-Expiration`；时效只接受 `once`、`3h`、`1d`、`7d`、`30d`、`permanent`。Desktop 不再下载模板或生成分享 HTML；本地 HTML 导出仍是独立功能。下面命令只用于服务端联调。
+Relay 保存 Desktop 上传的 `ConversationSnapshotV1` JSON 和冻结的 HTML 附件，匿名访问时安全注入当前唯一分享模板。Snapshot 与附件分别最多 20 MiB。创建请求必须提供 `multipart/form-data`、`X-Conversation-Snapshot-Version: 1`、非空 `X-Conversation-ID` 和 `X-Conversation-Share-Expiration`；时效只接受 `once`、`3h`、`1d`、`7d`、`30d`、`permanent`。multipart 中 `snapshot` part 必填，每个附件使用 `attachment:<id>` part 并与 Snapshot 声明严格匹配。Desktop 不下载模板或生成分享 HTML；本地 HTML 导出仍是独立功能。下面命令只用于服务端联调。
 
 ```bash
 curl -X POST https://hub.example.test/api/desktop/shares \
   -H "Authorization: Bearer $OFFICIAL_SSO_JWT" \
-  -H "Content-Type: application/json" \
-  -H "X-Conversation-Snapshot-Version: 1" \
-  -H "X-Conversation-ID: chat_xxx" \
-  -H "X-Conversation-Share-Expiration: 30d" \
-  --data-binary @conversation-snapshot.json
+	-H "X-Conversation-Snapshot-Version: 1" \
+	-H "X-Conversation-ID: chat_xxx" \
+	-H "X-Conversation-Share-Expiration: 30d" \
+	-F "snapshot=@conversation-snapshot.json;type=application/json" \
+	-F "attachment:0123456789abcdef01234567=@report.html;type=text/html"
 
 curl https://hub.example.test/api/desktop/shares \
   -H "Authorization: Bearer $OFFICIAL_SSO_JWT"
@@ -322,7 +322,7 @@ curl -X DELETE https://hub.example.test/api/desktop/shares/share_xxx \
   -H "Authorization: Bearer $OFFICIAL_SSO_JWT"
 ```
 
-创建和列表响应固定包含 `conversationId` 和 `singleUse`。列表按创建时间倒序返回当前所有者在所有会话下仍有效的元数据，不读取 Snapshot，也不接受查询参数。匿名 `GET /share/{id}` 使用当前模板渲染仍有效且未撤销的 Snapshot，媒体类型为 `text/html; charset=utf-8`。普通链接成功 GET 会 best-effort 更新独立访问元数据；一次性链接在写事务内读取、删除并提交，提交成功才返回 Snapshot，并发访问严格只有一个请求成功。MySQL 使用行锁，SQLite 使用立即写事务。HEAD 与其他方法不会消费；已消费、撤销、到期和未知 ID 统一返回最小 404 HTML。
+创建和列表响应固定包含 `conversationId` 和 `singleUse`。列表按创建时间倒序返回当前所有者在所有会话下仍有效的元数据，不读取 Snapshot，也不接受查询参数。匿名 `GET /share/{id}` 使用当前模板渲染仍有效且未撤销的 Snapshot，媒体类型为 `text/html; charset=utf-8`。普通链接成功 GET 会 best-effort 更新独立访问元数据；一次性链接在写事务内原子认领浏览器会话，认领后的 30 分钟内同一会话可继续读取页面和附件，其他浏览器得到 404。MySQL 使用行锁，SQLite 使用立即写事务。HEAD 与其他方法不会认领；已撤销、到期和未知 ID 统一返回最小 404 HTML。
 
 `GET/HEAD /assets/conversation-export/{sha256}/{file}` 只提供随 Relay 编译的当前 manifest 白名单资产；旧 Hash 固定返回 404。分享渲染包由 WebClient 显式同步后随 Relay 原子发布，普通 WebClient 发布不修改它。
 

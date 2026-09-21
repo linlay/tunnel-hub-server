@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -228,7 +229,7 @@ func TestConversationShareAPIRejectsRemovedExpirationOptions(t *testing.T) {
 	}
 }
 
-func TestConversationShareSingleUseGETConsumesAtomically(t *testing.T) {
+func TestConversationShareSingleUseGETClaimsOneBrowserSession(t *testing.T) {
 	cfg := desktopTestConfig(t)
 	cfg.SharePublicBaseURL = "https://share.example.test"
 	server, _ := newDesktopTestServerWithConfig(t, cfg)
@@ -283,7 +284,7 @@ func TestConversationShareSingleUseGETConsumesAtomically(t *testing.T) {
 		t.Fatalf("single-use share wrote access metadata %d times", accessWrites.Load())
 	}
 	listed = performConversationShareRequest(server, http.MethodGet, conversationSharesPath, nil, defaultDesktopJWT)
-	assertConversationShareList(t, listed, "", nil)
+	assertConversationShareList(t, listed, result.ID, nil)
 }
 
 func TestConversationShareSingleUseHEADDoesNotConsume(t *testing.T) {
@@ -305,7 +306,7 @@ func TestConversationShareSingleUseHEADDoesNotConsume(t *testing.T) {
 	}
 }
 
-func TestConversationShareSingleUseReadAndRevokeRaceHasOneWinner(t *testing.T) {
+func TestConversationShareSingleUseReadAndRevokeRaceEndsRevoked(t *testing.T) {
 	cfg := desktopTestConfig(t)
 	cfg.SharePublicBaseURL = "https://share.example.test"
 	server, _ := newDesktopTestServerWithConfig(t, cfg)
@@ -315,33 +316,27 @@ func TestConversationShareSingleUseReadAndRevokeRaceHasOneWinner(t *testing.T) {
 		t.Fatalf("decode response: %v", err)
 	}
 
-	codes := make(chan int, 2)
+	getCode := make(chan int, 1)
+	deleteCode := make(chan int, 1)
 	var wait sync.WaitGroup
 	wait.Add(2)
 	go func() {
 		defer wait.Done()
-		codes <- performConversationShareRequest(server, http.MethodGet, publicConversationSharePagePath+result.ID, nil, "").Code
+		getCode <- performConversationShareRequest(server, http.MethodGet, publicConversationSharePagePath+result.ID, nil, "").Code
 	}()
 	go func() {
 		defer wait.Done()
-		codes <- performConversationShareRequest(server, http.MethodDelete, conversationSharesPath+"/"+result.ID, nil, defaultDesktopJWT).Code
+		deleteCode <- performConversationShareRequest(server, http.MethodDelete, conversationSharesPath+"/"+result.ID, nil, defaultDesktopJWT).Code
 	}()
 	wait.Wait()
-	close(codes)
-	winners := 0
-	notFound := 0
-	for code := range codes {
-		switch code {
-		case http.StatusOK, http.StatusNoContent:
-			winners++
-		case http.StatusNotFound:
-			notFound++
-		default:
-			t.Fatalf("unexpected race status=%d", code)
-		}
+	if code := <-deleteCode; code != http.StatusNoContent {
+		t.Fatalf("revoke status=%d", code)
 	}
-	if winners != 1 || notFound != 1 {
-		t.Fatalf("winners=%d notFound=%d", winners, notFound)
+	if code := <-getCode; code != http.StatusOK && code != http.StatusNotFound {
+		t.Fatalf("read status=%d", code)
+	}
+	if response := performConversationShareRequest(server, http.MethodGet, publicConversationSharePagePath+result.ID, nil, ""); response.Code != http.StatusNotFound {
+		t.Fatalf("revoked share status=%d", response.Code)
 	}
 }
 
@@ -412,37 +407,6 @@ func TestConversationShareAPIRequiresHeadersBeforeReadingSnapshot(t *testing.T) 
 	}
 }
 
-func TestDecodeConversationSnapshotAcceptsExactSizeLimit(t *testing.T) {
-	body := conversationSnapshotOfSize(t, int(maxConversationSnapshotBytes))
-	req := httptest.NewRequest(
-		http.MethodPost,
-		conversationSharesPath,
-		bytes.NewReader(body),
-	)
-	req.Header.Set("Content-Type", "application/json; charset=utf-8")
-	req.Header.Set(conversationSnapshotVersionHeader, conversationSnapshotVersion)
-	snapshot, err := decodeConversationSnapshot(req)
-	if err != nil || int64(len(snapshot)) != maxConversationSnapshotBytes {
-		t.Fatalf("bytes=%d err=%v", len(snapshot), err)
-	}
-}
-
-func TestDecodeConversationSnapshotReportsObservedSizeWithoutContentLength(t *testing.T) {
-	req := httptest.NewRequest(
-		http.MethodPost,
-		conversationSharesPath,
-		bytes.NewReader(bytes.Repeat([]byte("x"), int(maxConversationSnapshotBytes)+1)),
-	)
-	req.ContentLength = -1
-	req.Header.Set("Content-Type", "application/json; charset=utf-8")
-	req.Header.Set(conversationSnapshotVersionHeader, conversationSnapshotVersion)
-	_, err := decodeConversationSnapshot(req)
-	var sizeErr *conversationShareSizeError
-	if !errors.As(err, &sizeErr) || sizeErr.actual != maxConversationSnapshotBytes+1 {
-		t.Fatalf("size error=%v", err)
-	}
-}
-
 func TestConversationShareAccessWriteFailureDoesNotBreakPublicPage(t *testing.T) {
 	cfg := desktopTestConfig(t)
 	cfg.SharePublicBaseURL = "https://share.example.test"
@@ -476,32 +440,35 @@ func TestConversationShareAPIValidatesTheSnapshotTransportContract(t *testing.T)
 		version     string
 		wantStatus  int
 	}{
-		{name: "empty", contentType: "application/json", version: "1", wantStatus: http.StatusBadRequest},
-		{name: "invalid utf8", body: []byte{0xff}, contentType: "application/json", version: "1", wantStatus: http.StatusBadRequest},
-		{name: "invalid json", body: []byte("x"), contentType: "application/json", version: "1", wantStatus: http.StatusBadRequest},
+		{name: "empty", contentType: "multipart", version: "1", wantStatus: http.StatusBadRequest},
+		{name: "invalid utf8", body: []byte{0xff}, contentType: "multipart", version: "1", wantStatus: http.StatusBadRequest},
+		{name: "invalid json", body: []byte("x"), contentType: "multipart", version: "1", wantStatus: http.StatusBadRequest},
 		{name: "wrong media type", body: []byte(validConversationSnapshot), contentType: "text/html", version: "1", wantStatus: http.StatusBadRequest},
-		{name: "wrong charset", body: []byte(validConversationSnapshot), contentType: "application/json; charset=gbk", version: "1", wantStatus: http.StatusBadRequest},
-		{name: "extra parameter", body: []byte(validConversationSnapshot), contentType: "application/json; profile=live", version: "1", wantStatus: http.StatusBadRequest},
-		{name: "wrong header version", body: []byte(validConversationSnapshot), contentType: "application/json", version: "2", wantStatus: http.StatusBadRequest},
-		{name: "wrong payload version", body: []byte(`{"version":2}`), contentType: "application/json", version: "1", wantStatus: http.StatusBadRequest},
-		{name: "oversized", body: bytes.Repeat([]byte("x"), int(maxConversationSnapshotBytes)+1), contentType: "application/json", version: "1", wantStatus: http.StatusRequestEntityTooLarge},
+		{name: "wrong header version", body: []byte(validConversationSnapshot), contentType: "multipart", version: "9", wantStatus: http.StatusBadRequest},
+		{name: "wrong payload version", body: []byte(`{"version":9}`), contentType: "multipart", version: "1", wantStatus: http.StatusBadRequest},
+		{name: "oversized", body: bytes.Repeat([]byte("x"), int(maxConversationSnapshotBytes)+1), contentType: "multipart", version: "1", wantStatus: http.StatusRequestEntityTooLarge},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			rec := performConversationShareRequestWithHeaders(server, http.MethodPost, conversationSharesPath, tc.body, defaultDesktopJWT, tc.contentType, tc.version)
+			body, contentType := tc.body, tc.contentType
+			if contentType == "multipart" {
+				body, contentType = conversationShareMultipart(tc.body)
+			}
+			rec := performConversationShareRequestWithHeaders(server, http.MethodPost, conversationSharesPath, body, defaultDesktopJWT, contentType, tc.version)
 			if rec.Code != tc.wantStatus {
 				t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
 			}
 		})
 	}
 
+	chunkedBody, chunkedContentType := conversationShareMultipart(bytes.Repeat([]byte("x"), int(maxConversationSnapshotBytes)+1))
 	chunked := httptest.NewRequest(
 		http.MethodPost,
 		conversationSharesPath,
-		bytes.NewReader(bytes.Repeat([]byte("x"), int(maxConversationSnapshotBytes)+1)),
+		bytes.NewReader(chunkedBody),
 	)
 	chunked.ContentLength = -1
 	chunked.TransferEncoding = []string{"chunked"}
-	chunked.Header.Set("Content-Type", "application/json")
+	chunked.Header.Set("Content-Type", chunkedContentType)
 	chunked.Header.Set(conversationSnapshotVersionHeader, "1")
 	chunked.Header.Set(conversationShareConversationIDHeader, "chat-test")
 	chunked.Header.Set(conversationShareExpirationHeader, "30d")
@@ -601,7 +568,11 @@ func TestConversationShareURLUsesNormalizedPublicEnvironment(t *testing.T) {
 }
 
 func performConversationShareRequest(server *Server, method, path string, body []byte, token string) *httptest.ResponseRecorder {
-	return performConversationShareRequestWithHeaders(server, method, path, body, token, "application/json; charset=utf-8", "1")
+	if method == http.MethodPost && path == conversationSharesPath && body != nil {
+		body, contentType := conversationShareMultipart(body)
+		return performConversationShareRequestWithHeaders(server, method, path, body, token, contentType, conversationSnapshotVersion)
+	}
+	return performConversationShareRequestWithHeaders(server, method, path, body, token, "", "")
 }
 
 func performConversationShareRequestWithExpiration(server *Server, expiration string, body []byte) *httptest.ResponseRecorder {
@@ -609,8 +580,9 @@ func performConversationShareRequestWithExpiration(server *Server, expiration st
 }
 
 func performConversationShareRequestWithExpirationAndConversationID(server *Server, expiration, conversationID string, body []byte) *httptest.ResponseRecorder {
+	body, contentType := conversationShareMultipart(body)
 	req := httptest.NewRequest(http.MethodPost, conversationSharesPath, bytes.NewReader(body))
-	req.Header.Set("Content-Type", "application/json; charset=utf-8")
+	req.Header.Set("Content-Type", contentType)
 	req.Header.Set(conversationSnapshotVersionHeader, "1")
 	req.Header.Set(conversationShareExpirationHeader, expiration)
 	req.Header.Set(conversationShareConversationIDHeader, conversationID)
@@ -618,6 +590,15 @@ func performConversationShareRequestWithExpirationAndConversationID(server *Serv
 	rec := httptest.NewRecorder()
 	server.ServeHTTP(rec, req)
 	return rec
+}
+
+func conversationShareMultipart(snapshot []byte) ([]byte, string) {
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	part, _ := writer.CreateFormField("snapshot")
+	_, _ = part.Write(snapshot)
+	_ = writer.Close()
+	return body.Bytes(), writer.FormDataContentType()
 }
 
 func performConversationShareRequestWithHeaders(server *Server, method, path string, body []byte, token, contentType, version string) *httptest.ResponseRecorder {
