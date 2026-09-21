@@ -5,6 +5,7 @@ import (
 	"embed"
 	"encoding/json"
 	"errors"
+	"html"
 	"io/fs"
 	"net/http"
 	"net/url"
@@ -17,13 +18,16 @@ import (
 const PublicPathPrefix = "/assets/conversation-export/"
 const TemplatePublicPath = PublicPathPrefix + "conversation.template.html"
 
-const snapshotMarker = "__CONVERSATION_EXPORT_SNAPSHOT_JSON_V2__"
-const oldSnapshotMarker = "__CONVERSATION_EXPORT_SNAPSHOT_JSON_V1__"
+const snapshotMarker = "__CONVERSATION_EXPORT_SNAPSHOT_JSON_V1__"
 const assetOriginMarker = "__CONVERSATION_EXPORT_ASSET_ORIGIN__"
+const localBrandIDMarker = "__CONVERSATION_EXPORT_LOCAL_BRAND_ID__"
+const publicBrandMeta = `<meta name="conversation-export-public-brand" content="" />`
 
 var relativeAssetPath = regexp.MustCompile(`^(?:[A-Za-z0-9._-]+/)*[A-Za-z0-9._-]+$`)
+var brandScheme = regexp.MustCompile(`^[a-z][a-z0-9-]*$`)
+var reservedSchemes = map[string]bool{"http": true, "https": true, "javascript": true, "data": true, "vbscript": true, "file": true, "blob": true}
 
-//go:embed files conversation.template.html conversation.v1.template.html conversation-assets.json
+//go:embed files conversation.template.html conversation-assets.json
 var embeddedFiles embed.FS
 
 type assetManifest struct {
@@ -35,11 +39,10 @@ type assetManifest struct {
 }
 
 type Bundle struct {
-	assetSet    string
-	template    []byte
-	oldTemplate []byte
-	files       fs.FS
-	fileServer  http.Handler
+	assetSet   string
+	template   []byte
+	files      fs.FS
+	fileServer http.Handler
 }
 
 func NewBundle() *Bundle {
@@ -56,12 +59,9 @@ func NewBundle() *Bundle {
 	}
 	template, err := embeddedFiles.ReadFile("conversation.template.html")
 	if err != nil || bytes.Count(template, []byte(snapshotMarker)) != 1 ||
-		bytes.Count(template, []byte(assetOriginMarker)) == 0 {
+		bytes.Count(template, []byte(assetOriginMarker)) == 0 ||
+		bytes.Count(template, []byte(localBrandIDMarker)) != 1 {
 		panic("conversation export template is invalid")
-	}
-	oldTemplate, err := embeddedFiles.ReadFile("conversation.v1.template.html")
-	if err != nil || bytes.Count(oldTemplate, []byte(oldSnapshotMarker)) != 1 {
-		panic("historical conversation export template is invalid")
 	}
 	files, err := fs.Sub(embeddedFiles, "files")
 	if err != nil {
@@ -77,11 +77,10 @@ func NewBundle() *Bundle {
 		}
 	}
 	return &Bundle{
-		assetSet:    manifest.AssetSet,
-		template:    template,
-		oldTemplate: oldTemplate,
-		files:       files,
-		fileServer:  http.StripPrefix(PublicPathPrefix, http.FileServer(http.FS(files))),
+		assetSet:   manifest.AssetSet,
+		template:   template,
+		files:      files,
+		fileServer: http.StripPrefix(PublicPathPrefix, http.FileServer(http.FS(files))),
 	}
 }
 
@@ -89,7 +88,7 @@ func NewHandler() http.Handler {
 	return NewBundle()
 }
 
-func (b *Bundle) Render(snapshot []byte, assetOrigin string) ([]byte, error) {
+func (b *Bundle) Render(snapshot []byte, assetOrigin, brandID, productName string) ([]byte, error) {
 	if !json.Valid(snapshot) {
 		return nil, errors.New("conversation snapshot is invalid")
 	}
@@ -99,11 +98,7 @@ func (b *Bundle) Render(snapshot []byte, assetOrigin string) ([]byte, error) {
 	if err := json.Unmarshal(snapshot, &envelope); err != nil {
 		return nil, err
 	}
-	template := b.template
-	marker := snapshotMarker
-	if envelope.Version == 1 {
-		template, marker = b.oldTemplate, oldSnapshotMarker
-	} else if envelope.Version != 2 {
+	if envelope.Version != 1 {
 		return nil, errors.New("unsupported conversation snapshot version")
 	}
 	origin, err := normalizedOrigin(assetOrigin)
@@ -112,9 +107,26 @@ func (b *Bundle) Render(snapshot []byte, assetOrigin string) ([]byte, error) {
 	}
 	var escaped bytes.Buffer
 	json.HTMLEscape(&escaped, snapshot)
-	html := bytes.Replace(template, []byte(marker), escaped.Bytes(), 1)
-	html = bytes.ReplaceAll(html, []byte(assetOriginMarker), []byte(origin))
-	return html, nil
+	htmlBytes := bytes.Replace(b.template, []byte(snapshotMarker), escaped.Bytes(), 1)
+	htmlBytes = bytes.ReplaceAll(htmlBytes, []byte(assetOriginMarker), []byte(origin))
+	if !brandScheme.MatchString(brandID) || reservedSchemes[brandID] || strings.TrimSpace(productName) == "" {
+		return nil, errors.New("public share brand is invalid")
+	}
+	if bytes.Count(htmlBytes, []byte(publicBrandMeta)) != 1 {
+		return nil, errors.New("public share brand placeholder is unavailable")
+	}
+	brandJSON, err := json.Marshal(struct {
+		ID          string `json:"id"`
+		ProductName string `json:"productName"`
+		OpenScheme  string `json:"openScheme"`
+	}{brandID, productName, brandID})
+	if err != nil {
+		return nil, err
+	}
+	brandMeta := `<meta name="conversation-export-public-brand" content="` + html.EscapeString(string(brandJSON)) + `" />`
+	htmlBytes = bytes.Replace(htmlBytes, []byte(publicBrandMeta), []byte(brandMeta), 1)
+	htmlBytes = bytes.Replace(htmlBytes, []byte(localBrandIDMarker), nil, 1)
+	return htmlBytes, nil
 }
 
 func (b *Bundle) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -188,6 +200,8 @@ func assetContentType(filename string) string {
 		return "font/ttf"
 	case ".txt":
 		return "text/plain; charset=utf-8"
+	case ".svg":
+		return "image/svg+xml"
 	default:
 		return "application/octet-stream"
 	}

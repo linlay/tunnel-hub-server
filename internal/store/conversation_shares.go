@@ -14,7 +14,7 @@ import (
 
 const ConversationShareSessionDuration = 30 * time.Minute
 
-const ConversationSnapshotVersion = 2
+const ConversationSnapshotVersion = 1
 const MaxConversationSnapshotBytes = 20 << 20
 const MaxConversationAttachmentBytes = 20 << 20
 const MaxConversationShareConversationIDBytes = 255
@@ -76,7 +76,7 @@ func (db *DB) CreateConversationShareWithAttachments(
 	if !ValidConversationShareConversationID(conversationID) {
 		return ConversationShare{}, errors.New("invalid conversation id")
 	}
-	if snapshotVersion != 1 && snapshotVersion != ConversationSnapshotVersion {
+	if snapshotVersion != ConversationSnapshotVersion {
 		return ConversationShare{}, errors.New("unsupported conversation snapshot version")
 	}
 	if len(snapshotJSON) > MaxConversationSnapshotBytes {
@@ -193,55 +193,9 @@ func (db *DB) ListConversationShares(
 	return shares, nil
 }
 
-func (db *DB) AcquirePublicConversationShare(ctx context.Context, id string, now time.Time) (ConversationShare, error) {
-	id = strings.TrimSpace(id)
-	now = databaseTime(now)
-	row := db.sql.QueryRowContext(ctx, `
-		SELECT id, snapshot_version, snapshot_json, single_use
-		FROM conversation_shares
-		WHERE id = ?
-		  AND snapshot_version = 1
-		  AND revoked_at IS NULL
-		  AND single_use = 0
-		  AND (expires_at IS NULL OR expires_at > ?)
-	`, id, now)
-	var share ConversationShare
-	if err := row.Scan(&share.ID, &share.SnapshotVersion, &share.SnapshotJSON, &share.SingleUse); err == nil {
-		return share, nil
-	} else if !errors.Is(err, sql.ErrNoRows) {
-		return ConversationShare{}, err
-	}
-
-	tx, err := db.beginWriteTx(ctx)
-	if err != nil {
-		return ConversationShare{}, err
-	}
-	defer tx.Rollback()
-	row = tx.QueryRowContext(ctx, `
-        SELECT id, snapshot_version, snapshot_json, single_use
-        FROM conversation_shares
-        WHERE id = ? AND snapshot_version = 1 AND revoked_at IS NULL
-          AND single_use = 1 AND (expires_at IS NULL OR expires_at > ?)
-	`+db.forUpdateClause(), id, now)
-	if err := row.Scan(&share.ID, &share.SnapshotVersion, &share.SnapshotJSON, &share.SingleUse); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return ConversationShare{}, ErrNotFound
-		}
-		return ConversationShare{}, err
-	}
-	if _, err := tx.ExecContext(ctx, `DELETE FROM conversation_shares WHERE id = ?`, id); err != nil {
-		return ConversationShare{}, err
-	}
-	if err := tx.Commit(); err != nil {
-		return ConversationShare{}, err
-	}
-
-	return share, nil
-}
-
-// AccessPublicConversationShareV2 atomically claims a single-use V2 share.
+// AccessPublicConversationShare atomically claims a single-use share.
 // A matching session hash can continue reading the page during its 30-minute window.
-func (db *DB) AccessPublicConversationShareV2(ctx context.Context, id string, now time.Time, presentedHash, newHash []byte) (ConversationShare, bool, error) {
+func (db *DB) AccessPublicConversationShare(ctx context.Context, id string, now time.Time, presentedHash, newHash []byte) (ConversationShare, bool, error) {
 	tx, err := db.beginWriteTx(ctx)
 	if err != nil {
 		return ConversationShare{}, false, err
@@ -249,7 +203,7 @@ func (db *DB) AccessPublicConversationShareV2(ctx context.Context, id string, no
 	defer tx.Rollback()
 	var share ConversationShare
 	err = tx.QueryRowContext(ctx, `SELECT id, snapshot_version, snapshot_json, single_use
-		FROM conversation_shares WHERE id = ? AND snapshot_version = 2
+		FROM conversation_shares WHERE id = ? AND snapshot_version = 1
 		AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at > ?)`+db.forUpdateClause(),
 		id, databaseTime(now)).Scan(&share.ID, &share.SnapshotVersion, &share.SnapshotJSON, &share.SingleUse)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -300,7 +254,7 @@ func (db *DB) PeekPublicConversationShare(ctx context.Context, id string, now ti
 	var share ConversationShare
 	err := db.sql.QueryRowContext(ctx, `SELECT id, snapshot_version, single_use
 		FROM conversation_shares WHERE id = ? AND revoked_at IS NULL
-		AND snapshot_version IN (1, 2) AND (expires_at IS NULL OR expires_at > ?)`,
+		AND snapshot_version = 1 AND (expires_at IS NULL OR expires_at > ?)`,
 		id, databaseTime(now)).Scan(&share.ID, &share.SnapshotVersion, &share.SingleUse)
 	if errors.Is(err, sql.ErrNoRows) {
 		return ConversationShare{}, ErrNotFound
@@ -319,7 +273,7 @@ func (db *DB) ReadPublicConversationShareAttachment(ctx context.Context, shareID
 		FROM conversation_share_attachments AS a
 		JOIN conversation_shares AS s ON s.id = a.share_id
 		LEFT JOIN conversation_share_claims AS c ON c.share_id = s.id
-		WHERE a.share_id = ? AND a.attachment_id = ? AND s.snapshot_version = 2
+		WHERE a.share_id = ? AND a.attachment_id = ? AND s.snapshot_version = 1
 		AND s.revoked_at IS NULL AND (s.expires_at IS NULL OR s.expires_at > ?)`,
 		shareID, attachmentID, databaseTime(now)).
 		Scan(&attachment.ShareID, &attachment.ID, &attachment.Name, &attachment.MIMEType,

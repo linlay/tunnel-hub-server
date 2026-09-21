@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 )
@@ -35,7 +34,7 @@ func TestConversationShareCreateReadExpireAndRevoke(t *testing.T) {
 	if otherOwner, err := db.ListConversationShares(ctx, "owner-b", now); err != nil || len(otherOwner) != 0 {
 		t.Fatalf("other owner list=%#v err=%v", otherOwner, err)
 	}
-	found, err := db.AcquirePublicConversationShare(ctx, share.ID, expiresAt.Add(-time.Nanosecond))
+	found, _, err := db.AccessPublicConversationShare(ctx, share.ID, expiresAt.Add(-time.Nanosecond), nil, nil)
 	if err != nil {
 		t.Fatalf("get share: %v", err)
 	}
@@ -50,7 +49,7 @@ func TestConversationShareCreateReadExpireAndRevoke(t *testing.T) {
 	if err != nil || len(listed) != 1 || listed[0].LastAccessedAt == nil || !listed[0].LastAccessedAt.Equal(accessedAt) {
 		t.Fatalf("accessed list=%#v err=%v", listed, err)
 	}
-	if _, err := db.AcquirePublicConversationShare(ctx, share.ID, expiresAt); !errors.Is(err, ErrNotFound) {
+	if _, _, err := db.AccessPublicConversationShare(ctx, share.ID, expiresAt, nil, nil); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("share must expire at the boundary, got %v", err)
 	}
 	if expired, err := db.ListConversationShares(ctx, "owner-a", expiresAt); err != nil || len(expired) != 0 {
@@ -65,7 +64,7 @@ func TestConversationShareCreateReadExpireAndRevoke(t *testing.T) {
 	if revoked, err := db.ListConversationShares(ctx, "owner-a", now); err != nil || len(revoked) != 0 {
 		t.Fatalf("revoked list=%#v err=%v", revoked, err)
 	}
-	if _, err := db.AcquirePublicConversationShare(ctx, share.ID, now); !errors.Is(err, ErrNotFound) {
+	if _, _, err := db.AccessPublicConversationShare(ctx, share.ID, now, nil, nil); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("revoked share should be hidden, got %v", err)
 	}
 	if err := db.RevokeConversationShare(ctx, share.ID, "owner-a", now); !errors.Is(err, ErrNotFound) {
@@ -93,13 +92,13 @@ func TestConversationSharePermanentRemainsReadableUntilRevoked(t *testing.T) {
 	if share.ExpiresAt != nil {
 		t.Fatalf("permanent share expiration=%v", share.ExpiresAt)
 	}
-	if _, err := db.AcquirePublicConversationShare(ctx, share.ID, now.Add(100*365*24*time.Hour)); err != nil {
+	if _, _, err := db.AccessPublicConversationShare(ctx, share.ID, now.Add(100*365*24*time.Hour), nil, nil); err != nil {
 		t.Fatalf("permanent share should remain readable: %v", err)
 	}
 	if err := db.RevokeConversationShare(ctx, share.ID, "owner-a", now); err != nil {
 		t.Fatalf("revoke permanent share: %v", err)
 	}
-	if _, err := db.AcquirePublicConversationShare(ctx, share.ID, now); !errors.Is(err, ErrNotFound) {
+	if _, _, err := db.AccessPublicConversationShare(ctx, share.ID, now, nil, nil); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("revoked permanent share should be hidden, got %v", err)
 	}
 }
@@ -187,72 +186,8 @@ func TestConversationShareLookupDoesNotRequireGeneratedPrefix(t *testing.T) {
 	if err != nil {
 		t.Fatalf("insert prefixless share: %v", err)
 	}
-	found, err := db.AcquirePublicConversationShare(ctx, "opaque-abc_123", now)
+	found, _, err := db.AccessPublicConversationShare(ctx, "opaque-abc_123", now, nil, nil)
 	if err != nil || string(found.SnapshotJSON) != string(snapshot) {
 		t.Fatalf("prefixless lookup=%#v err=%v", found, err)
-	}
-}
-
-func TestConversationShareSingleUseIsAtomicallyDeletedOnFirstAcquire(t *testing.T) {
-	db := openTestDB(t)
-	ctx := context.Background()
-	now := time.Date(2026, time.August, 17, 1, 2, 3, 0, time.UTC)
-	snapshot := []byte(`{"version":1,"title":"Read once"}`)
-	share, err := db.CreateConversationShare(
-		ctx,
-		"owner-a",
-		"chat-once",
-		1,
-		snapshot,
-		now,
-		nil,
-		true,
-	)
-	if err != nil {
-		t.Fatalf("create single-use share: %v", err)
-	}
-	if !share.SingleUse || share.ExpiresAt != nil {
-		t.Fatalf("unexpected single-use share: %#v", share)
-	}
-
-	const readers = 16
-	results := make(chan error, readers)
-	var wait sync.WaitGroup
-	wait.Add(readers)
-	for range readers {
-		go func() {
-			defer wait.Done()
-			acquired, acquireErr := db.AcquirePublicConversationShare(ctx, share.ID, now)
-			if acquireErr == nil && (string(acquired.SnapshotJSON) != string(snapshot) || !acquired.SingleUse) {
-				acquireErr = errors.New("acquired single-use document does not match")
-			}
-			results <- acquireErr
-		}()
-	}
-	wait.Wait()
-	close(results)
-
-	successes := 0
-	notFound := 0
-	for result := range results {
-		switch {
-		case result == nil:
-			successes++
-		case errors.Is(result, ErrNotFound):
-			notFound++
-		default:
-			t.Fatalf("acquire error: %v", result)
-		}
-	}
-	if successes != 1 || notFound != readers-1 {
-		t.Fatalf("successes=%d notFound=%d", successes, notFound)
-	}
-	listed, err := db.ListConversationShares(ctx, "owner-a", now)
-	if err != nil || len(listed) != 0 {
-		t.Fatalf("single-use share remains after acquire: shares=%#v err=%v", listed, err)
-	}
-	var remaining int
-	if err := db.sql.QueryRowContext(ctx, `SELECT COUNT(*) FROM conversation_shares WHERE id = ?`, share.ID).Scan(&remaining); err != nil || remaining != 0 {
-		t.Fatalf("single-use row was not deleted: count=%d err=%v", remaining, err)
 	}
 }

@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"path/filepath"
@@ -176,11 +177,12 @@ func TestSQLiteConcurrentWritesPreserveInvariants(t *testing.T) {
 	var acquireWait sync.WaitGroup
 	for i := 0; i < workers; i++ {
 		acquireWait.Add(1)
-		go func(database *DB) {
+		go func(database *DB, index int) {
 			defer acquireWait.Done()
-			_, err := database.AcquirePublicConversationShare(ctx, share.ID, time.Now())
+			digest := sha256.Sum256([]byte(fmt.Sprintf("browser-%d", index)))
+			_, _, err := database.AccessPublicConversationShare(ctx, share.ID, time.Now(), nil, digest[:])
 			acquireResults <- err
-		}(databases[i%len(databases)])
+		}(databases[i%len(databases)], i)
 	}
 	acquireWait.Wait()
 	close(acquireResults)

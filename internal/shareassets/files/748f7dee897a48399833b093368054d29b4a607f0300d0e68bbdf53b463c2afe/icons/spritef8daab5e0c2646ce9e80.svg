@@ -1,35 +1,4 @@
-<!doctype html>
-<html lang="zh-CN">
-  <head>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <meta name="robots" content="noindex,nofollow,noarchive" />
-    <meta name="referrer" content="no-referrer" />
-    <meta name="conversation-export-profile" content="conversation-snapshot-json-v2" />
-    <meta name="conversation-export-public-brand" content="" />
-    <meta
-      name="conversation-export-local-brand"
-      content="__CONVERSATION_EXPORT_LOCAL_BRAND_ID__"
-    />
-    <meta
-      name="conversation-export-asset-set"
-      content="748f7dee897a48399833b093368054d29b4a607f0300d0e68bbdf53b463c2afe"
-    />
-    <meta
-      http-equiv="Content-Security-Policy"
-      content="default-src 'none'; connect-src 'self'; img-src data: __CONVERSATION_EXPORT_ASSET_ORIGIN__; font-src __CONVERSATION_EXPORT_ASSET_ORIGIN__; style-src 'none'; style-src-elem __CONVERSATION_EXPORT_ASSET_ORIGIN__; style-src-attr 'unsafe-inline'; script-src __CONVERSATION_EXPORT_ASSET_ORIGIN__; object-src 'none'; frame-src 'self'; base-uri 'none'; form-action 'none'"
-    />
-    <title>Conversation Snapshot</title>
-    <link
-      rel="stylesheet"
-      href="__CONVERSATION_EXPORT_ASSET_ORIGIN__/assets/conversation-export/748f7dee897a48399833b093368054d29b4a607f0300d0e68bbdf53b463c2afe/runtime.css"
-      integrity="sha384-iXsxRZdE5MZUuTqgTQRPDRJqIk4OSSKuj0e1CbuRkgic3WtjLkzLCfTBKLNYg7Cx"
-      crossorigin="anonymous"
-      referrerpolicy="no-referrer"
-    />
-  </head>
-  <body>
-    <svg id="material-icon-sprite" style="display:none" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 770 960">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 770 960">
   <symbol id="material-symbol-add" viewBox="0 0 960 960"><path d="M440 520H240Q223 520 211.5 508.5Q200 497 200 480Q200 463 211.5 451.5Q223 440 240 440H440V240Q440 223 451.5 211.5Q463 200 480 200Q497 200 508.5 211.5Q520 223 520 240V440H720Q737 440 748.5 451.5Q760 463 760 480Q760 497 748.5 508.5Q737 520 720 520H520V720Q520 737 508.5 748.5Q497 760 480 760Q463 760 451.5 748.5Q440 737 440 720Z"/></symbol>
   <symbol id="material-symbol-archive" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="5" rx="1"/><path d="M5 9v10a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V9M10 13h4"/></g></symbol>
   <symbol id="material-symbol-arrow-downward" viewBox="0 -960 960 960"><path d="M440-800v487L216-537l-56 57 320 320 320-320-56-57-224 224v-487h-80Z"/></symbol>
@@ -150,28 +119,3 @@
   <symbol id="material-symbol-push-pin" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="m16 3 5 5-4 2-2 5-2 2-6-6 2-2 5-2 2-4ZM10 14l-7 7"/></g></symbol>
   <symbol id="material-symbol-agent-type" viewBox="0 0 1024 1024" fill="currentColor"><path d="M483.207529 0a137.517176 137.517176 0 0 1 42.88753 268.167529l-0.120471 47.405177h115.049412c123.663059 0 234.315294 77.101176 277.082353 193.174588a42.767059 42.767059 0 1 1-80.293647 29.635765 209.799529 209.799529 0 0 0-196.848941-137.155765H325.391059a209.739294 209.739294 0 0 0-209.739294 209.618824v63.186823a209.739294 209.739294 0 0 0 209.739294 209.739294h315.632941a42.767059 42.767059 0 1 1 0 85.534118h-315.632941A295.273412 295.273412 0 0 1 30.117647 674.032941V610.785882a295.273412 295.273412 0 0 1 295.273412-295.152941h115.049412v-47.465412A137.517176 137.517176 0 0 1 483.147294 0z m349.906824 642.349176c7.469176 1.204706 13.251765 7.047529 14.456471 14.456471a151.672471 151.672471 0 0 0 113.121882 123.602824l13.191529 2.650353a17.408 17.408 0 0 1 0 34.394352c-60.235294 9.456941-108.905412 54.031059-123.663059 113.121883l-2.650352 13.191529a17.408 17.408 0 0 1-34.394353 0 151.672471 151.672471 0 0 0-113.121883-123.663059l-13.071059-2.650353a17.408 17.408 0 0 1 0-34.394352 151.672471 151.672471 0 0 0 123.542589-113.121883l2.650353-13.071059a17.408 17.408 0 0 1 19.937882-14.45647z m-507.723294-94.569411a63.126588 63.126588 0 1 1 4.21647 126.253176 63.126588 63.126588 0 0 1-4.21647-126.253176z m315.632941 0a63.126588 63.126588 0 1 1 4.156235 126.253176 63.126588 63.126588 0 0 1-4.21647-126.253176z m-157.816471-462.185412a51.922824 51.922824 0 1 0 0 103.845647 51.922824 51.922824 0 0 0 0-103.845647z"/></symbol>
 </svg>
-
-    <div id="root">
-      <div
-        class="export-loading"
-        role="status"
-        aria-busy="true"
-        aria-live="polite"
-      >
-        <span class="export-loading-spinner" aria-hidden="true"></span>
-        <p>正在准备对话内容…</p>
-      </div>
-    </div>
-    <script id="conversation-snapshot" type="application/json">
-      __CONVERSATION_EXPORT_SNAPSHOT_JSON_V1__
-    </script>
-    <script
-      id="conversation-export-runtime"
-      src="__CONVERSATION_EXPORT_ASSET_ORIGIN__/assets/conversation-export/748f7dee897a48399833b093368054d29b4a607f0300d0e68bbdf53b463c2afe/runtime.js"
-      integrity="sha384-AMythLk304Hiv127DCJhS8qpDcgnP4cCggfihDQw68qH+y/99ZCP1bsUWrF236g1"
-      crossorigin="anonymous"
-      referrerpolicy="no-referrer"
-      defer
-    ></script>
-  </body>
-</html>

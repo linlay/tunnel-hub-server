@@ -19,8 +19,8 @@ func TestEmbeddedAssetSetDirectoryMatchesContentHash(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(sets) < 2 {
-		t.Fatalf("embedded conversation export asset sets=%d want historical and current", len(sets))
+	if len(sets) != 1 {
+		t.Fatalf("embedded conversation export asset sets=%d want exactly one current set", len(sets))
 	}
 	for _, set := range sets {
 		if !set.IsDir() || len(set.Name()) != 64 {
@@ -84,11 +84,24 @@ func TestHandlerServesImmutableCrossOriginAssets(t *testing.T) {
 	}
 }
 
+func TestHandlerServesSVGAsAnImage(t *testing.T) {
+	brandIconPath := findEmbeddedAsset(t, ".svg")
+	response := httptest.NewRecorder()
+	NewHandler().ServeHTTP(
+		response,
+		httptest.NewRequest(http.MethodGet, PublicPathPrefix+brandIconPath, nil),
+	)
+	if response.Code != http.StatusOK || response.Header().Get("Content-Type") != "image/svg+xml" {
+		t.Fatalf("status=%d content-type=%q", response.Code, response.Header().Get("Content-Type"))
+	}
+}
+
 func TestHandlerServesCurrentTemplateWithoutCaching(t *testing.T) {
 	handler := NewHandler()
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, TemplatePublicPath, nil))
-	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), snapshotMarker) {
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), snapshotMarker) ||
+		!strings.Contains(response.Body.String(), localBrandIDMarker) {
 		t.Fatalf("GET status=%d body=%q", response.Code, response.Body.String())
 	}
 	if got := response.Header().Get("Cache-Control"); got != "no-store" {
@@ -121,8 +134,8 @@ func TestHandlerServesEveryCurrentManifestAsset(t *testing.T) {
 
 func TestBundleRendersHTMLSafeSnapshotWithCurrentAssets(t *testing.T) {
 	bundle := NewBundle()
-	snapshot := []byte(`{"version":2,"title":"</script>&  "}`)
-	html, err := bundle.Render(snapshot, "https://share.example.test")
+	snapshot := []byte(`{"version":1,"title":"</script>&  "}`)
+	html, err := bundle.Render(snapshot, "https://share.example.test", "zenmind", "ZenMind")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -131,11 +144,47 @@ func TestBundleRendersHTMLSafeSnapshotWithCurrentAssets(t *testing.T) {
 		!strings.Contains(body, `\u003c/script\u003e\u0026\u2028\u2029`) {
 		t.Fatalf("snapshot was not HTML escaped: %q", body)
 	}
-	if strings.Contains(body, assetOriginMarker) || strings.Contains(body, snapshotMarker) {
+	if strings.Contains(body, assetOriginMarker) || strings.Contains(body, snapshotMarker) ||
+		strings.Contains(body, localBrandIDMarker) {
 		t.Fatal("rendered page still contains template markers")
 	}
 	if !strings.Contains(body, "https://share.example.test/assets/conversation-export/"+bundle.assetSet+"/runtime.js") {
 		t.Fatal("rendered page does not reference the current asset set")
+	}
+}
+
+func TestBundleInjectsOnlyValidatedPublicBrand(t *testing.T) {
+	bundle := NewBundle()
+	snapshot := []byte(`{"version":1,"title":"shared"}`)
+	for _, brand := range []struct{ id, name string }{
+		{"zenmind", `ZenMind "<&>`},
+		{"cutej", "CuteJ"},
+	} {
+		page, err := bundle.Render(snapshot, "https://share.example.test", brand.id, brand.name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		body := string(page)
+		if strings.Contains(body, publicBrandMeta) || !strings.Contains(body, `&#34;openScheme&#34;`) {
+			t.Fatalf("brand metadata absent for %s", brand.id)
+		}
+		if strings.Contains(body, `"<&>`) || !strings.Contains(body, brand.id) {
+			t.Fatalf("brand metadata not escaped for %s", brand.id)
+		}
+	}
+	for _, id := range []string{"", "bad:scheme", "UPPER", "a/b", "javascript", "https"} {
+		if _, err := bundle.Render(snapshot, "https://share.example.test", id, "Valid"); err == nil {
+			t.Fatalf("accepted unsafe brand scheme %q", id)
+		}
+	}
+	if _, err := bundle.Render(snapshot, "https://share.example.test", "valid", " "); err == nil {
+		t.Fatal("accepted empty product name")
+	}
+	if !strings.Contains(string(bundle.template), publicBrandMeta) {
+		t.Fatal("downloadable template must keep brand metadata empty")
+	}
+	if !strings.Contains(string(bundle.template), localBrandIDMarker) {
+		t.Fatal("downloadable template must keep the local brand marker")
 	}
 }
 

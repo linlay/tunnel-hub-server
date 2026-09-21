@@ -36,7 +36,7 @@ type Server struct {
 }
 
 type conversationShareRenderer interface {
-	Render(snapshot []byte, assetOrigin string) ([]byte, error)
+	Render(snapshot []byte, assetOrigin, brandID, productName string) ([]byte, error)
 }
 
 func (s *Server) SetConversationShareRenderer(renderer conversationShareRenderer) {
