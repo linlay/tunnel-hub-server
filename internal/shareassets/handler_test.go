@@ -19,12 +19,21 @@ func TestEmbeddedAssetSetDirectoryMatchesContentHash(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(sets) != 1 {
-		t.Fatalf("embedded conversation export asset sets=%d want exactly one current set", len(sets))
+	var manifest assetManifest
+	manifestBytes, err := embeddedFiles.ReadFile("conversation-assets.json")
+	if err != nil {
+		t.Fatal(err)
 	}
+	if err := json.Unmarshal(manifestBytes, &manifest); err != nil {
+		t.Fatal(err)
+	}
+	currentSetFound := false
 	for _, set := range sets {
 		if !set.IsDir() || len(set.Name()) != 64 {
 			t.Fatalf("invalid asset-set entry %q", set.Name())
+		}
+		if set.Name() == manifest.AssetSet {
+			currentSetFound = true
 		}
 		root := path.Join("files", set.Name())
 		var filenames []string
@@ -54,6 +63,9 @@ func TestEmbeddedAssetSetDirectoryMatchesContentHash(t *testing.T) {
 			t.Fatalf("asset set directory=%s content hash=%s", set.Name(), got)
 		}
 	}
+	if !currentSetFound {
+		t.Fatalf("current asset set %s is missing", manifest.AssetSet)
+	}
 }
 
 func TestHandlerServesImmutableCrossOriginAssets(t *testing.T) {
@@ -81,6 +93,31 @@ func TestHandlerServesImmutableCrossOriginAssets(t *testing.T) {
 	handler.ServeHTTP(head, httptest.NewRequest(http.MethodHead, PublicPathPrefix+runtimePath, nil))
 	if head.Code != http.StatusOK || head.Body.Len() != 0 || head.Header().Get("Content-Length") == "" {
 		t.Fatalf("HEAD status=%d bytes=%d headers=%v", head.Code, head.Body.Len(), head.Header())
+	}
+}
+
+func TestHandlerStillServesHistoricalAssetSets(t *testing.T) {
+	currentSet := NewBundle().assetSet
+	sets, err := fs.ReadDir(embeddedFiles, "files")
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := NewHandler()
+	historicalSets := 0
+	for _, set := range sets {
+		if set.Name() == currentSet {
+			continue
+		}
+		historicalSets++
+		assetPath := PublicPathPrefix + set.Name() + "/runtime.js"
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, assetPath, nil))
+		if response.Code != http.StatusOK || response.Body.Len() == 0 {
+			t.Fatalf("historical asset %s: status=%d bytes=%d", assetPath, response.Code, response.Body.Len())
+		}
+	}
+	if historicalSets == 0 {
+		t.Fatal("expected at least one historical asset set")
 	}
 }
 

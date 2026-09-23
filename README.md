@@ -326,7 +326,7 @@ curl -X DELETE https://hub.example.test/api/desktop/shares/share_xxx \
 
 创建和列表响应固定包含 `conversationId` 和 `singleUse`。列表按创建时间倒序返回当前所有者在所有会话下仍有效的元数据，不读取 Snapshot，也不接受查询参数。匿名 `GET /share/{id}` 使用当前模板渲染仍有效且未撤销的 Snapshot，媒体类型为 `text/html; charset=utf-8`。普通链接成功 GET 会 best-effort 更新独立访问元数据；一次性链接在写事务内原子认领浏览器会话，认领后的 30 分钟内同一会话可继续读取页面和附件，其他浏览器得到 404。MySQL 使用行锁，SQLite 使用立即写事务。HEAD 与其他方法不会认领；已撤销、到期和未知 ID 统一返回最小 404 HTML。
 
-`GET/HEAD /assets/conversation-export/{sha256}/{file}` 只提供随 Relay 编译的当前 manifest 白名单资产；旧 Hash 固定返回 404。分享渲染包由 WebClient 显式同步后随 Relay 原子发布，普通 WebClient 发布不修改它。
+`GET/HEAD /assets/conversation-export/{sha256}/{file}` 提供随 Relay 编译且通过内容 Hash 校验的资源集；当前 manifest 决定新分享页使用的资源集，历史资源集继续服务已有 HTML。分享渲染包由 WebClient 显式同步后随 Relay 原子发布，普通 WebClient 发布不修改它。
 
 本版本使用全新 MySQL 数据库或全新、带版本标记的 SQLite 库，不导入旧数据，不包含历史数据库迁移工具或双库回退逻辑。原账号、Token、设备映射和分享链接不会自动恢复，需重新初始化或注册。
 
