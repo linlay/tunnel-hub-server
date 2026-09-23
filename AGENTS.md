@@ -39,7 +39,7 @@ Relay 入口在 `cmd/relay/main.go`，启动顺序是：
 - `*.m.example.test/api/upload`: Mobile 上传入口，只从请求 Host 确定 Desktop，内部发送 `ns=ap`, `type=/api/upload`；multipart 不允许携带 `publicHost`。
 - `*.m.example.test/api/resource`: Mobile 资源入口，内部发送 `ns=ap`, `type=/api/resource` 和 `{file,pushURL}`；Desktop 通过 ticket 保护的 `/api/push/{id}` 回推文件。
 - `*-wa.example.test`: Desktop WebApp public HTTP/WebSocket。Relay 通过 WebApp route 与所属 deviceKey 打开 Desktop stream，向 Desktop 发送 `ns=wa` 的 `http.request` 或 `websocket.connect` 元数据。
-- `share.example.test`: 对话分享只读站点。公开边缘网关将 `/share/{id}` 和 `/assets/conversation-export/*` 转发到 Relay；Tunnel API origin 也暴露分享模板。Relay 从当前数据库读取 `ConversationSnapshotV1`，注入当前唯一模板后返回 HTML；一次性分享通过数据库对应的写事务、删除和提交实现原子消费。模板、manifest 和内容寻址资产由 WebClient 的独立发布命令整体替换，并从编译期 `embed.FS` 返回。
+- `share.example.test`: 对话分享只读站点。公开边缘网关将 `/share/{id}` 和 `/assets/conversation-export/*` 转发到 Relay；Tunnel API origin 也暴露分享模板。Relay 从当前数据库读取 `ConversationSnapshotV1`，注入当前唯一模板后返回 HTML；一次性分享通过数据库对应的写事务、删除和提交实现原子消费。当前模板和 manifest 由 WebClient 的独立发布命令替换，历史内容寻址资产保留，并从编译期 `embed.FS` 返回。
 
 ## 4. 目录结构
 
@@ -53,7 +53,7 @@ Relay 入口在 `cmd/relay/main.go`，启动顺序是：
 - `tools/neutralcheck`: 使用外部禁用词扫描 Git 跟踪文件和待提交的新文件。
 - `internal/desktop`: Desktop device 和 Desktop WebApp 注册 API。
 - `internal/proxy`: Relay/Agent 转发实现、yamux session、active agent manager、traffic event 记录。
-- `internal/shareassets`: 公开对话显示模板、manifest、当前唯一 asset-set 与服务端渲染器；不保留旧 Hash 集合或兼容分支。
+- `internal/shareassets`: 公开对话显示模板、manifest、当前 asset-set、历史内容寻址资源集与服务端渲染器；新分享页只使用当前 manifest 指向的资源集。
 - `internal/store`: MySQL/SQLite schema、连接、少量方言适配、共享 DAO 和领域模型。
 - `internal/tunnel`: 隧道协议结构、JSON frame、WebSocket frame、Host/path/upstream 工具。
 - `deploy`: Nginx/Caddy 示例配置。
