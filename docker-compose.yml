@@ -14,10 +14,12 @@ services:
     environment:
       RELAY_ADDR: ":8080"
       SSO_JWT_PUBLIC_KEY_FILE: "/configs/jwt-public.pem"
+      CONVERSATION_SHARE_RESOURCE_DIR: "/data/conversation-shares"
     ports:
       - "127.0.0.1:${TUNNEL_HUB_RELAY_PORT:-11961}:8080"
     volumes:
       - ./configs/jwt-public.pem:/configs/jwt-public.pem:ro
+      - conversation-share-data:/data/conversation-shares
 
   public:
     image: tunnel-hub-public
@@ -30,3 +32,6 @@ services:
     ports:
       - "127.0.0.1:${TUNNEL_HUB_PUBLIC_PORT:-11965}:80"
     restart: unless-stopped
+
+volumes:
+  conversation-share-data:

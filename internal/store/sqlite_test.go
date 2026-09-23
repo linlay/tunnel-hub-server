@@ -1,16 +1,78 @@
 package store
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 )
+
+func TestSQLiteMigratesLegacyConversationShareBlobsToFiles(t *testing.T) {
+	ctx := context.Background()
+	db, err := OpenSQLite(ctx, filepath.Join(t.TempDir(), "relay.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	body := []byte("<h1>legacy</h1>")
+	digest := sha256.Sum256(body)
+	for _, statement := range []string{
+		`CREATE TABLE conversation_shares (id TEXT PRIMARY KEY)`,
+		`CREATE TABLE conversation_share_attachments (share_id TEXT NOT NULL, attachment_id TEXT NOT NULL, name TEXT NOT NULL, mime_type TEXT NOT NULL, size_bytes INTEGER NOT NULL, sha256 TEXT NOT NULL, body BLOB NOT NULL, PRIMARY KEY (share_id, attachment_id), FOREIGN KEY (share_id) REFERENCES conversation_shares(id) ON DELETE CASCADE)`,
+		`INSERT INTO conversation_shares (id) VALUES ('share_legacy')`,
+	} {
+		if _, err := db.sql.ExecContext(ctx, statement); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := db.sql.ExecContext(ctx, `INSERT INTO conversation_share_attachments
+		(share_id, attachment_id, name, mime_type, size_bytes, sha256, body) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		"share_legacy", "0123456789abcdef01234567", "legacy.html", "text/html", len(body), hex.EncodeToString(digest[:]), body); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.sql.ExecContext(ctx, `PRAGMA user_version = 2`); err != nil {
+		t.Fatal(err)
+	}
+	resourceDir := filepath.Join(t.TempDir(), "conversation-shares")
+	// Simulate an interrupted first attempt that committed files before the
+	// metadata transaction and legacy-table removal.
+	preexisting := filepath.Join(resourceDir, "shares", "share_legacy", "resources", "0123456789abcdef01234567")
+	if err := os.MkdirAll(filepath.Dir(preexisting), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(preexisting, body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Migrate(ctx, resourceDir); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.migrateLegacyConversationShareAttachments(ctx, resourceDir); err != nil {
+		t.Fatalf("rerun completed migration: %v", err)
+	}
+	file, err := os.ReadFile(filepath.Join(resourceDir, "shares", "share_legacy", "resources", "0123456789abcdef01234567"))
+	if err != nil || !bytes.Equal(file, body) {
+		t.Fatalf("migrated file=%q err=%v", file, err)
+	}
+	var count, version int
+	if err := db.sql.QueryRowContext(ctx, `SELECT COUNT(*) FROM conversation_share_resources`).Scan(&count); err != nil || count != 1 {
+		t.Fatalf("resource count=%d err=%v", count, err)
+	}
+	if err := db.sql.QueryRowContext(ctx, `PRAGMA user_version`).Scan(&version); err != nil || version != 3 {
+		t.Fatalf("version=%d err=%v", version, err)
+	}
+	var legacy int
+	if err := db.sql.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='conversation_share_attachments'`).Scan(&legacy); err != nil || legacy != 0 {
+		t.Fatalf("legacy table count=%d err=%v", legacy, err)
+	}
+}
 
 func TestSQLiteSchemaLifecycleAndConnectionSettings(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "relay.sqlite")
@@ -25,7 +87,7 @@ func TestSQLiteSchemaLifecycleAndConnectionSettings(t *testing.T) {
 		`PRAGMA foreign_keys`: "1",
 		`PRAGMA journal_mode`: "wal",
 		`PRAGMA busy_timeout`: "5000",
-		`PRAGMA user_version`: "2",
+		`PRAGMA user_version`: "3",
 	} {
 		var got string
 		if err := db.sql.QueryRow(query).Scan(&got); err != nil || !strings.EqualFold(got, want) {
@@ -77,10 +139,10 @@ func TestSQLiteRejectsUnsupportedSchemas(t *testing.T) {
 			t.Fatal(err)
 		}
 		t.Cleanup(func() { _ = db.Close() })
-		if _, err := db.sql.Exec(`PRAGMA user_version = 3`); err != nil {
+		if _, err := db.sql.Exec(`PRAGMA user_version = 4`); err != nil {
 			t.Fatal(err)
 		}
-		if err := db.Migrate(context.Background()); err == nil || !strings.Contains(err.Error(), "version 3") {
+		if err := db.Migrate(context.Background()); err == nil || !strings.Contains(err.Error(), "version 4") {
 			t.Fatalf("error = %v", err)
 		}
 	})

@@ -20,6 +20,15 @@ import (
 
 const validConversationSnapshot = `{"version":1,"title":"发布计划","createdAt":1786928523000,"capturedAt":1786928523000,"turns":[]}`
 
+type capturingConversationShareRenderer struct {
+	productDownloadPageURL string
+}
+
+func (renderer *capturingConversationShareRenderer) Render(snapshot []byte, _, _, _, productDownloadPageURL string) ([]byte, error) {
+	renderer.productDownloadPageURL = productDownloadPageURL
+	return append([]byte(nil), snapshot...), nil
+}
+
 func TestConversationShareAPICreateReadExpireAndRevoke(t *testing.T) {
 	cfg := desktopTestConfig(t)
 	cfg.SharePublicBaseURL = "https://share.example.test"
@@ -108,6 +117,30 @@ func TestConversationShareListRejectsLegacyConversationQuery(t *testing.T) {
 	)
 	if response.Code != http.StatusBadRequest {
 		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
+func TestConversationSharePagePassesProductDownloadPageToRenderer(t *testing.T) {
+	cfg := desktopTestConfig(t)
+	cfg.SharePublicBaseURL = "https://share.example.test"
+	cfg.ProductDownloadPageURL = "https://download.example.test/product?source=share"
+	server, _ := newDesktopTestServerWithConfig(t, cfg)
+	created := performConversationShareRequest(server, http.MethodPost, conversationSharesPath, []byte(validConversationSnapshot), defaultDesktopJWT)
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create status=%d body=%s", created.Code, created.Body.String())
+	}
+	var result conversationShareRecordResponse
+	if err := json.Unmarshal(created.Body.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	renderer := &capturingConversationShareRenderer{}
+	server.SetConversationShareRenderer(renderer)
+	response := performConversationShareRequest(server, http.MethodGet, publicConversationSharePagePath+result.ID, nil, "")
+	if response.Code != http.StatusOK {
+		t.Fatalf("public status=%d body=%s", response.Code, response.Body.String())
+	}
+	if renderer.productDownloadPageURL != cfg.ProductDownloadPageURL {
+		t.Fatalf("productDownloadPageURL = %q, want %q", renderer.productDownloadPageURL, cfg.ProductDownloadPageURL)
 	}
 }
 
@@ -284,7 +317,16 @@ func TestConversationShareSingleUseGETClaimsOneBrowserSession(t *testing.T) {
 		t.Fatalf("single-use share wrote access metadata %d times", accessWrites.Load())
 	}
 	listed = performConversationShareRequest(server, http.MethodGet, conversationSharesPath, nil, defaultDesktopJWT)
-	assertConversationShareList(t, listed, result.ID, nil)
+	if listed.Code != http.StatusOK {
+		t.Fatalf("list status=%d body=%s", listed.Code, listed.Body.String())
+	}
+	var afterClaim conversationShareListResponse
+	if err := json.Unmarshal(listed.Body.Bytes(), &afterClaim); err != nil {
+		t.Fatal(err)
+	}
+	if len(afterClaim.Items) != 1 || afterClaim.Items[0].ID != result.ID || !afterClaim.Items[0].SingleUse {
+		t.Fatalf("single-use share metadata=%#v", afterClaim.Items)
+	}
 }
 
 func TestConversationShareSingleUseHEADDoesNotConsume(t *testing.T) {

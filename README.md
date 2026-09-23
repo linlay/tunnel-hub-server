@@ -106,6 +106,8 @@ Relay 和 `tunnel-hub-public` 都在进程或容器启动时读取环境变量�
 | `WEBAPP_PUBLIC_BASE_DOMAIN` | 是 | WebApp 单层 wildcard 根 hostname；随机 Host 生成格式为 `<id>-wa.<该值>`。可与 `PUBLIC_BASE_DOMAIN` 相同，但必须与 `DESKTOP_PUBLIC_BASE_DOMAIN` 不同。 |
 | `RELAY_PUBLIC_URL` | 是 | Relay WebSocket URL；非 Loopback 地址必须使用 `wss` 和 `/tunnel`。 |
 | `SHARE_PUBLIC_BASE_URL` | 是 | 公开分享 origin；非 Loopback 地址必须使用 HTTPS，本地 Loopback 可使用 HTTP。 |
+| `PRODUCT_DOWNLOAD_PAGE_URL` | 否 | 公开分享页的产品介绍及下载地址。非 Loopback 地址必须使用 HTTPS；留空时分享页仅尝试唤起桌面应用。 |
+| `CONVERSATION_SHARE_RESOURCE_DIR` | 是 | 对话分享资源的绝对路径；必须可写并位于持久化卷，文件正文保存在此目录，数据库仅保存元数据。 |
 
 三个 domain 都不接受 scheme、端口、路径、通配符或 IP。`PUBLIC_BASE_DOMAIN` 可与 `WEBAPP_PUBLIC_BASE_DOMAIN` 相同；Desktop public 根域必须与另外两个不同。Relay 会严格校验全部值，缺失或非法时在监听端口前失败。
 
@@ -172,7 +174,7 @@ GRANT CREATE, REFERENCES, SELECT, INSERT, UPDATE, DELETE
   ON tunnel_hub.* TO 'tunnel_hub'@'<relay-host>';
 ```
 
-服务端须配置 `max_allowed_packet=64M` 或更高。应用启动校验版本、连接与传输上限，不满足时在监听前失败。连接超时 5 秒、读写超时各 30 秒，连接最大生命周期 3 分钟。时间统一使用 UTC `DATETIME(6)`，精度为微秒；标识符按大小写区分，文本使用 `utf8mb4`。分享正文为 `LONGBLOB`，API 上限仍为 20 MiB。
+服务端须配置 `max_allowed_packet=64M` 或更高。应用启动校验版本、连接与传输上限，不满足时在监听前失败。连接超时 5 秒、读写超时各 30 秒，连接最大生命周期 3 分钟。时间统一使用 UTC `DATETIME(6)`，精度为微秒；标识符按大小写区分，文本使用 `utf8mb4`。Snapshot JSON 保存在数据库中，单份上限为 20 MiB；资源正文仅保存在 `CONVERSATION_SHARE_RESOURCE_DIR`，每个分享的资源累计上限为 20 MiB，数据库只保存资源元数据。旧版 `conversation_share_attachments` BLOB 表由可重跑的 schema 迁移写入文件目录并删除；升级期间数据库账号还需临时具备 `DROP` 权限。
 
 MySQL 启动逐表执行幂等建表；中途失败可以修复原因后重启，已有成功创建的表保留。MySQL DDL 不保证整套 schema 事务回滚，现有连接池、TLS、字符集和并发事务语义保持不变。
 

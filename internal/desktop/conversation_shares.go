@@ -76,8 +76,32 @@ func (s *Server) handleCreateConversationShare(w http.ResponseWriter, r *http.Re
 		writeError(w, http.StatusBadRequest, "unsupported conversation snapshot version")
 		return
 	}
-	snapshot, attachments, err := decodeConversationShare(w, r)
+	if s.conversationShareResources == nil {
+		writeError(w, http.StatusServiceUnavailable, "conversation share resource storage is unavailable")
+		return
+	}
+	shareURL, err := s.conversationShareBaseURL()
 	if err != nil {
+		writeError(w, http.StatusServiceUnavailable, err.Error())
+		return
+	}
+	shareID, err := store.NewConversationShareID()
+	if err != nil {
+		s.writeInternal(w, "create conversation share id", err)
+		return
+	}
+	stage, err := s.conversationShareResources.Begin()
+	if err != nil {
+		s.writeInternal(w, "stage conversation share resources", err)
+		return
+	}
+	defer stage.Abort()
+	snapshot, resources, err := decodeConversationShare(w, r, stage)
+	if err != nil {
+		if errors.Is(err, errConversationShareResourceStorage) {
+			s.writeInternal(w, "write conversation share resources", err)
+			return
+		}
 		status := http.StatusBadRequest
 		if errors.Is(err, errConversationShareTooLarge) {
 			status = http.StatusRequestEntityTooLarge
@@ -85,9 +109,8 @@ func (s *Server) handleCreateConversationShare(w http.ResponseWriter, r *http.Re
 		writeError(w, status, err.Error())
 		return
 	}
-	shareURL, err := s.conversationShareBaseURL()
-	if err != nil {
-		writeError(w, http.StatusServiceUnavailable, err.Error())
+	if err := stage.Commit(shareID); err != nil {
+		s.writeInternal(w, "commit conversation share resources", err)
 		return
 	}
 	now := s.now().UTC()
@@ -96,18 +119,22 @@ func (s *Server) handleCreateConversationShare(w http.ResponseWriter, r *http.Re
 		value := now.Add(policy.duration)
 		expiresAt = &value
 	}
-	share, err := s.DB.CreateConversationShareWithAttachments(
+	share, err := s.DB.CreateConversationShareWithResources(
 		r.Context(),
+		shareID,
 		principal.UserID,
 		conversationID,
 		store.ConversationSnapshotVersion,
 		snapshot,
-		attachments,
+		resources,
 		now,
 		expiresAt,
 		policy.singleUse,
 	)
 	if err != nil {
+		if cleanupErr := s.conversationShareResources.Delete(shareID); cleanupErr != nil {
+			s.Logger.Error("remove failed conversation share resources", "shareId", shareID, "error", cleanupErr)
+		}
 		s.writeInternal(w, "create conversation share", err)
 		return
 	}
@@ -209,6 +236,13 @@ func (s *Server) handleRevokeConversationShare(w http.ResponseWriter, r *http.Re
 		s.writeInternal(w, "revoke conversation share", err)
 		return
 	}
+	if s.conversationShareResources != nil {
+		if err := s.conversationShareResources.Delete(id); err != nil {
+			s.Logger.Error("delete revoked conversation share resources", "shareId", id, "error", err)
+		} else if err := s.DB.DeleteConversationShareResourceMetadata(r.Context(), id); err != nil {
+			s.Logger.Error("delete revoked conversation share resource metadata", "shareId", id, "error", err)
+		}
+	}
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -276,7 +310,13 @@ func (s *Server) handleGetPublicConversationSharePage(w http.ResponseWriter, r *
 		writePublicConversationShareError(w, http.StatusInternalServerError)
 		return
 	}
-	html, err := s.conversationShareRenderer.Render(share.SnapshotJSON, s.Config.SharePublicBaseURL, s.Config.BrandID, s.Config.ProductName)
+	html, err := s.conversationShareRenderer.Render(
+		share.SnapshotJSON,
+		s.Config.SharePublicBaseURL,
+		s.Config.BrandID,
+		s.Config.ProductName,
+		s.Config.ProductDownloadPageURL,
+	)
 	if err != nil {
 		s.Logger.Error("render conversation share", "shareId", share.ID, "error", err)
 		writePublicConversationShareError(w, http.StatusInternalServerError)

@@ -4,41 +4,44 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
 )
 
 type RelayConfig struct {
-	BrandID                  string
-	ProductName              string
-	PublicSiteTitle          string
-	Addr                     string
-	DatabaseType             DatabaseType
-	SQLitePath               string
-	MySQL                    MySQLConfig
-	RelayPublicURL           string
-	AdminHost                string
-	WebsiteDist              string
-	SharePublicBaseURL       string
-	PublicBaseDomain         string
-	DesktopPublicBaseDomain  string
-	WebAppPublicBaseDomain   string
-	AdminUsername            string
-	AdminPassword            string
-	AdminSessionTTL          time.Duration
-	CookieSecure             bool
-	MobileWebAppCookieSecure bool
-	SSOJWTIssuer             string
-	SSOJWTPublicKeyFile      string
-	SSOJWTPublicKeyPEM       string
-	SSOJWTAudience           string
-	SSOJWTUserIDClaim        string
-	SSOJWTAllowAnyAudience   bool
-	SSOJWTAllowAnyAdminRole  bool
-	SSOJWTAllowMissingScope  bool
-	MaxRequestBodyBytes      int64
-	TrustedProxyCIDRs        string
+	BrandID                      string
+	ProductName                  string
+	PublicSiteTitle              string
+	Addr                         string
+	DatabaseType                 DatabaseType
+	SQLitePath                   string
+	MySQL                        MySQLConfig
+	RelayPublicURL               string
+	AdminHost                    string
+	WebsiteDist                  string
+	SharePublicBaseURL           string
+	ProductDownloadPageURL       string
+	PublicBaseDomain             string
+	DesktopPublicBaseDomain      string
+	WebAppPublicBaseDomain       string
+	AdminUsername                string
+	AdminPassword                string
+	AdminSessionTTL              time.Duration
+	CookieSecure                 bool
+	MobileWebAppCookieSecure     bool
+	SSOJWTIssuer                 string
+	SSOJWTPublicKeyFile          string
+	SSOJWTPublicKeyPEM           string
+	SSOJWTAudience               string
+	SSOJWTUserIDClaim            string
+	SSOJWTAllowAnyAudience       bool
+	SSOJWTAllowAnyAdminRole      bool
+	SSOJWTAllowMissingScope      bool
+	MaxRequestBodyBytes          int64
+	TrustedProxyCIDRs            string
+	ConversationShareResourceDir string
 }
 
 type AgentConfig struct {
@@ -67,6 +70,13 @@ func LoadRelayConfigStrict() (RelayConfig, error) {
 	if err != nil {
 		return RelayConfig{}, err
 	}
+	resourceDir, err := requiredEnv("CONVERSATION_SHARE_RESOURCE_DIR")
+	if err != nil {
+		return RelayConfig{}, err
+	}
+	if !filepath.IsAbs(resourceDir) {
+		return RelayConfig{}, fmt.Errorf("CONVERSATION_SHARE_RESOURCE_DIR must be absolute")
+	}
 	issuer, err := requiredEnv("SSO_JWT_ISSUER")
 	if err != nil {
 		return RelayConfig{}, err
@@ -85,35 +95,37 @@ func LoadRelayConfigStrict() (RelayConfig, error) {
 		return RelayConfig{}, fmt.Errorf("SSO_JWT_PUBLIC_KEY_FILE or SSO_JWT_PUBLIC_KEY_PEM is required")
 	}
 	return RelayConfig{
-		BrandID:                  brand.Brand.ID,
-		ProductName:              brand.Brand.ProductName,
-		PublicSiteTitle:          brand.Brand.PublicSiteTitle,
-		Addr:                     addr,
-		DatabaseType:             databaseType,
-		SQLitePath:               sqlitePath,
-		MySQL:                    mysqlConfig,
-		RelayPublicURL:           brand.Endpoints.RelayPublicURL,
-		AdminHost:                env("ADMIN_HOST", ""),
-		WebsiteDist:              env("WEBSITE_DIST", ""),
-		SharePublicBaseURL:       brand.Endpoints.SharePublicBaseURL,
-		PublicBaseDomain:         brand.Domains.PublicBase,
-		DesktopPublicBaseDomain:  brand.Domains.DesktopPublicBase,
-		WebAppPublicBaseDomain:   brand.Domains.WebAppPublicBase,
-		AdminUsername:            env("ADMIN_USERNAME", env("BOOTSTRAP_ADMIN_USERNAME", "admin")),
-		AdminPassword:            env("ADMIN_PASSWORD", os.Getenv("BOOTSTRAP_ADMIN_PASSWORD")),
-		AdminSessionTTL:          envDuration("ADMIN_SESSION_TTL", 24*time.Hour),
-		CookieSecure:             envBool("COOKIE_SECURE", false),
-		MobileWebAppCookieSecure: envBool("MOBILE_WEBAPP_COOKIE_SECURE", true),
-		SSOJWTIssuer:             issuer,
-		SSOJWTPublicKeyFile:      publicKeyFile,
-		SSOJWTPublicKeyPEM:       publicKeyPEM,
-		SSOJWTAudience:           audience,
-		SSOJWTUserIDClaim:        userIDClaim,
-		SSOJWTAllowAnyAudience:   envBool("SSO_JWT_ALLOW_ANY_AUDIENCE", false),
-		SSOJWTAllowAnyAdminRole:  envBool("SSO_JWT_ALLOW_ANY_ADMIN_ROLE", false),
-		SSOJWTAllowMissingScope:  envBool("SSO_JWT_ALLOW_MISSING_TUNNEL_SCOPE", false),
-		MaxRequestBodyBytes:      envInt64("MAX_REQUEST_BODY_BYTES", 64<<20),
-		TrustedProxyCIDRs:        env("TRUSTED_PROXY_CIDRS", ""),
+		BrandID:                      brand.Brand.ID,
+		ProductName:                  brand.Brand.ProductName,
+		PublicSiteTitle:              brand.Brand.PublicSiteTitle,
+		Addr:                         addr,
+		DatabaseType:                 databaseType,
+		SQLitePath:                   sqlitePath,
+		MySQL:                        mysqlConfig,
+		RelayPublicURL:               brand.Endpoints.RelayPublicURL,
+		AdminHost:                    env("ADMIN_HOST", ""),
+		WebsiteDist:                  env("WEBSITE_DIST", ""),
+		SharePublicBaseURL:           brand.Endpoints.SharePublicBaseURL,
+		ProductDownloadPageURL:       brand.Endpoints.ProductDownloadPageURL,
+		PublicBaseDomain:             brand.Domains.PublicBase,
+		DesktopPublicBaseDomain:      brand.Domains.DesktopPublicBase,
+		WebAppPublicBaseDomain:       brand.Domains.WebAppPublicBase,
+		AdminUsername:                env("ADMIN_USERNAME", env("BOOTSTRAP_ADMIN_USERNAME", "admin")),
+		AdminPassword:                env("ADMIN_PASSWORD", os.Getenv("BOOTSTRAP_ADMIN_PASSWORD")),
+		AdminSessionTTL:              envDuration("ADMIN_SESSION_TTL", 24*time.Hour),
+		CookieSecure:                 envBool("COOKIE_SECURE", false),
+		MobileWebAppCookieSecure:     envBool("MOBILE_WEBAPP_COOKIE_SECURE", true),
+		SSOJWTIssuer:                 issuer,
+		SSOJWTPublicKeyFile:          publicKeyFile,
+		SSOJWTPublicKeyPEM:           publicKeyPEM,
+		SSOJWTAudience:               audience,
+		SSOJWTUserIDClaim:            userIDClaim,
+		SSOJWTAllowAnyAudience:       envBool("SSO_JWT_ALLOW_ANY_AUDIENCE", false),
+		SSOJWTAllowAnyAdminRole:      envBool("SSO_JWT_ALLOW_ANY_ADMIN_ROLE", false),
+		SSOJWTAllowMissingScope:      envBool("SSO_JWT_ALLOW_MISSING_TUNNEL_SCOPE", false),
+		MaxRequestBodyBytes:          envInt64("MAX_REQUEST_BODY_BYTES", 64<<20),
+		TrustedProxyCIDRs:            env("TRUSTED_PROXY_CIDRS", ""),
+		ConversationShareResourceDir: filepath.Clean(resourceDir),
 	}, nil
 }
 

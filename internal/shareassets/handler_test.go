@@ -135,7 +135,7 @@ func TestHandlerServesEveryCurrentManifestAsset(t *testing.T) {
 func TestBundleRendersHTMLSafeSnapshotWithCurrentAssets(t *testing.T) {
 	bundle := NewBundle()
 	snapshot := []byte(`{"version":1,"title":"</script>&  "}`)
-	html, err := bundle.Render(snapshot, "https://share.example.test", "zenmind", "ZenMind")
+	html, err := bundle.Render(snapshot, "https://share.example.test", "zenmind", "ZenMind", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -160,7 +160,7 @@ func TestBundleInjectsOnlyValidatedPublicBrand(t *testing.T) {
 		{"zenmind", `ZenMind "<&>`},
 		{"cutej", "CuteJ"},
 	} {
-		page, err := bundle.Render(snapshot, "https://share.example.test", brand.id, brand.name)
+		page, err := bundle.Render(snapshot, "https://share.example.test", brand.id, brand.name, "")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -173,11 +173,11 @@ func TestBundleInjectsOnlyValidatedPublicBrand(t *testing.T) {
 		}
 	}
 	for _, id := range []string{"", "bad:scheme", "UPPER", "a/b", "javascript", "https"} {
-		if _, err := bundle.Render(snapshot, "https://share.example.test", id, "Valid"); err == nil {
+		if _, err := bundle.Render(snapshot, "https://share.example.test", id, "Valid", ""); err == nil {
 			t.Fatalf("accepted unsafe brand scheme %q", id)
 		}
 	}
-	if _, err := bundle.Render(snapshot, "https://share.example.test", "valid", " "); err == nil {
+	if _, err := bundle.Render(snapshot, "https://share.example.test", "valid", " ", ""); err == nil {
 		t.Fatal("accepted empty product name")
 	}
 	if !strings.Contains(string(bundle.template), publicBrandMeta) {
@@ -185,6 +185,45 @@ func TestBundleInjectsOnlyValidatedPublicBrand(t *testing.T) {
 	}
 	if !strings.Contains(string(bundle.template), localBrandIDMarker) {
 		t.Fatal("downloadable template must keep the local brand marker")
+	}
+}
+
+func TestBundleInjectsOnlyValidatedProductDownloadPage(t *testing.T) {
+	bundle := NewBundle()
+	snapshot := []byte(`{"version":1,"title":"shared"}`)
+	page, err := bundle.Render(
+		snapshot,
+		"https://share.example.test",
+		"zenmind",
+		"ZenMind",
+		"https://download.example.test/product?source=share&campaign=desktop#install",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := string(page)
+	if !strings.Contains(body, `&#34;downloadPageUrl&#34;`) ||
+		!strings.Contains(body, `https://download.example.test/product?source=share\u0026campaign=desktop#install`) {
+		t.Fatal("download page metadata absent or not escaped")
+	}
+
+	for _, value := range []string{
+		"http://download.example.test/product",
+		"javascript:alert(1)",
+		"/relative/download",
+		"https://user:secret@download.example.test/product",
+	} {
+		if _, err := bundle.Render(snapshot, "https://share.example.test", "zenmind", "ZenMind", value); err == nil {
+			t.Fatalf("accepted unsafe product download page %q", value)
+		}
+	}
+
+	page, err = bundle.Render(snapshot, "https://share.example.test", "zenmind", "ZenMind", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(page), "downloadPageUrl") {
+		t.Fatal("empty product download page must be omitted")
 	}
 }
 

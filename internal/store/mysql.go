@@ -105,7 +105,7 @@ func validateMySQLServer(version string, packet int64) error {
 
 func (db *DB) Close() error { return db.sql.Close() }
 
-func (db *DB) migrateMySQL(ctx context.Context) error {
+func (db *DB) migrateMySQL(ctx context.Context, resourceDir string) error {
 	for _, statement := range strings.Split(schema, ";") {
 		if strings.TrimSpace(statement) == "" {
 			continue
@@ -114,7 +114,7 @@ func (db *DB) migrateMySQL(ctx context.Context) error {
 			return fmt.Errorf("initialize MySQL schema: %w", err)
 		}
 	}
-	return nil
+	return db.migrateLegacyConversationShareAttachments(ctx, resourceDir)
 }
 
 func isMySQLDuplicateKey(err error) bool {

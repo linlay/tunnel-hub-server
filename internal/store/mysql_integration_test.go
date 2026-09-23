@@ -3,9 +3,12 @@ package store
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -227,6 +230,101 @@ func TestMySQLLargeSnapshotAndMicrosecondTimes(t *testing.T) {
 	listed, err = db.ListConversationShares(ctx, "owner", now)
 	if err != nil || listed[0].LastAccessedAt == nil || !listed[0].LastAccessedAt.Equal(databaseTime(now.Add(time.Minute))) {
 		t.Fatal("access timestamp regressed", err)
+	}
+}
+
+func TestMySQLConversationShareResourceMetadataTransaction(t *testing.T) {
+	db := openMySQLTestDB(t)
+	ctx := context.Background()
+	now := time.Date(2026, 9, 22, 0, 0, 0, 0, time.UTC)
+	body := []byte("resource")
+	digest := sha256.Sum256(body)
+	resource := ConversationShareResource{
+		ID: "0123456789abcdef01234567", Name: "report.pdf", MIMEType: "application/pdf",
+		Size: int64(len(body)), SHA256: hex.EncodeToString(digest[:]),
+	}
+	shareID, err := NewConversationShareID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	share, err := db.CreateConversationShareWithResources(ctx, shareID, "owner", "chat", ConversationSnapshotVersion,
+		[]byte(`{"version":1}`), []ConversationShareResource{resource}, now, nil, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stored, err := db.ReadPublicConversationShareResource(ctx, share.ID, resource.ID, now, nil)
+	expected := resource
+	expected.ShareID = share.ID
+	if err != nil || stored != expected {
+		t.Fatalf("stored resource=%+v error=%v", stored, err)
+	}
+
+	if _, err := db.sql.Exec(`ALTER TABLE conversation_share_resources ADD CONSTRAINT test_reject_resource CHECK (resource_id <> 'ffffffffffffffffffffffff')`); err != nil {
+		t.Fatal(err)
+	}
+	failedID, err := NewConversationShareID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	resource.ID = "ffffffffffffffffffffffff"
+	if _, err := db.CreateConversationShareWithResources(ctx, failedID, "owner", "chat", ConversationSnapshotVersion,
+		[]byte(`{"version":1}`), []ConversationShareResource{resource}, now, nil, false); err == nil {
+		t.Fatal("resource metadata failure unexpectedly committed")
+	}
+	var count int
+	if err := db.sql.QueryRowContext(ctx, `SELECT COUNT(*) FROM conversation_shares WHERE id = ?`, failedID).Scan(&count); err != nil || count != 0 {
+		t.Fatalf("rolled-back share count=%d error=%v", count, err)
+	}
+}
+
+func TestMySQLLegacyConversationShareMigrationCanResumeAfterFileCommit(t *testing.T) {
+	db := openMySQLTestDB(t)
+	ctx := context.Background()
+	now := time.Date(2026, 9, 22, 0, 0, 0, 0, time.UTC)
+	share, err := db.CreateConversationShare(ctx, "owner", "chat", ConversationSnapshotVersion,
+		[]byte(`{"version":1}`), now, nil, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.sql.ExecContext(ctx, `CREATE TABLE conversation_share_attachments (
+		share_id VARCHAR(80) NOT NULL, attachment_id VARCHAR(24) NOT NULL,
+		name VARCHAR(255) NOT NULL, mime_type VARCHAR(100) NOT NULL,
+		size_bytes BIGINT NOT NULL, sha256 CHAR(64) NOT NULL, body LONGBLOB NOT NULL,
+		PRIMARY KEY (share_id, attachment_id)
+	)`); err != nil {
+		t.Fatal(err)
+	}
+	body := []byte("legacy resource")
+	digest := sha256.Sum256(body)
+	const resourceID = "0123456789abcdef01234567"
+	if _, err := db.sql.ExecContext(ctx, `INSERT INTO conversation_share_attachments
+		(share_id, attachment_id, name, mime_type, size_bytes, sha256, body)
+		VALUES (?, ?, ?, ?, ?, ?, ?)`, share.ID, resourceID, "legacy.pdf", "application/pdf",
+		len(body), hex.EncodeToString(digest[:]), body); err != nil {
+		t.Fatal(err)
+	}
+	resourceDir := t.TempDir()
+	preexisting := filepath.Join(resourceDir, "shares", share.ID, "resources", resourceID)
+	if err := os.MkdirAll(filepath.Dir(preexisting), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(preexisting, body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.migrateLegacyConversationShareAttachments(ctx, resourceDir); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.migrateLegacyConversationShareAttachments(ctx, resourceDir); err != nil {
+		t.Fatalf("rerun completed migration: %v", err)
+	}
+	resource, err := db.ReadPublicConversationShareResource(ctx, share.ID, resourceID, now, nil)
+	if err != nil || resource.Size != int64(len(body)) || resource.SHA256 != hex.EncodeToString(digest[:]) {
+		t.Fatalf("migrated resource=%+v error=%v", resource, err)
+	}
+	var legacyTables int
+	if err := db.sql.QueryRowContext(ctx, `SELECT COUNT(*) FROM information_schema.tables
+		WHERE table_schema = DATABASE() AND table_name = 'conversation_share_attachments'`).Scan(&legacyTables); err != nil || legacyTables != 0 {
+		t.Fatalf("legacy table count=%d error=%v", legacyTables, err)
 	}
 }
 

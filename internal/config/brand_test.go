@@ -63,6 +63,60 @@ func TestLoadBrandConfigFromEnvAllowsPublicAndWebAppBaseToMatch(t *testing.T) {
 	}
 }
 
+func TestLoadBrandConfigFromEnvAcceptsProductDownloadPage(t *testing.T) {
+	setValidBrandEnv(t)
+	t.Setenv("PRODUCT_DOWNLOAD_PAGE_URL", "https://download.example.test/product?source=share#desktop")
+	cfg, err := LoadBrandConfigFromEnv()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := cfg.Endpoints.ProductDownloadPageURL; got != "https://download.example.test/product?source=share#desktop" {
+		t.Fatalf("ProductDownloadPageURL = %q", got)
+	}
+}
+
+func TestLoadBrandConfigFromEnvRejectsUnsafeProductDownloadPage(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		value   string
+		wantErr string
+	}{
+		{name: "remote http", value: "http://download.example.test/product", wantErr: "must use https"},
+		{name: "relative", value: "/download", wantErr: "absolute HTTP(S) URL"},
+		{name: "custom scheme", value: "javascript:alert(1)", wantErr: "absolute HTTP(S) URL"},
+		{name: "credentials", value: "https://user:secret@download.example.test/product", wantErr: "must not contain credentials"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			setValidBrandEnv(t)
+			t.Setenv("PRODUCT_DOWNLOAD_PAGE_URL", test.value)
+			_, err := LoadBrandConfigFromEnv()
+			if err == nil || !strings.Contains(err.Error(), test.wantErr) {
+				t.Fatalf("error = %v, want substring %q", err, test.wantErr)
+			}
+		})
+	}
+}
+
+func TestLoadBrandConfigFromEnvAllowsLoopbackProductDownloadPage(t *testing.T) {
+	for _, value := range []string{
+		"http://localhost:18080/download",
+		"http://127.0.0.1:18080/download",
+		"http://[::1]:18080/download",
+	} {
+		t.Run(value, func(t *testing.T) {
+			setValidBrandEnv(t)
+			t.Setenv("PRODUCT_DOWNLOAD_PAGE_URL", value)
+			cfg, err := LoadBrandConfigFromEnv()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if cfg.Endpoints.ProductDownloadPageURL != value {
+				t.Fatalf("ProductDownloadPageURL = %q, want %q", cfg.Endpoints.ProductDownloadPageURL, value)
+			}
+		})
+	}
+}
+
 func TestLoadBrandConfigFromEnvAcceptsExplicitLoopbackEndpoints(t *testing.T) {
 	for _, test := range []struct {
 		name      string

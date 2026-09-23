@@ -15,6 +15,7 @@ import (
 
 	"example.invalid/tunnel-hub-server/internal/auth"
 	"example.invalid/tunnel-hub-server/internal/config"
+	"example.invalid/tunnel-hub-server/internal/sharefiles"
 	"example.invalid/tunnel-hub-server/internal/store"
 	"example.invalid/tunnel-hub-server/internal/tunnel"
 )
@@ -33,10 +34,11 @@ type Server struct {
 	now                           func() time.Time
 	recordConversationShareAccess func(context.Context, string, time.Time) error
 	conversationShareRenderer     conversationShareRenderer
+	conversationShareResources    *sharefiles.Store
 }
 
 type conversationShareRenderer interface {
-	Render(snapshot []byte, assetOrigin, brandID, productName string) ([]byte, error)
+	Render(snapshot []byte, assetOrigin, brandID, productName, productDownloadPageURL string) ([]byte, error)
 }
 
 func (s *Server) SetConversationShareRenderer(renderer conversationShareRenderer) {
@@ -50,6 +52,14 @@ func NewServer(db *store.DB, cfg config.RelayConfig, logger *slog.Logger, ssoJWT
 	if ssoJWT == nil {
 		return nil, errors.New("SSO JWT verifier is required")
 	}
+	var resources *sharefiles.Store
+	if strings.TrimSpace(cfg.ConversationShareResourceDir) != "" {
+		var err error
+		resources, err = sharefiles.New(cfg.ConversationShareResourceDir)
+		if err != nil {
+			return nil, err
+		}
+	}
 	return &Server{
 		DB:                            db,
 		Config:                        cfg,
@@ -57,6 +67,7 @@ func NewServer(db *store.DB, cfg config.RelayConfig, logger *slog.Logger, ssoJWT
 		ssoJWT:                        ssoJWT,
 		now:                           time.Now,
 		recordConversationShareAccess: db.RecordConversationShareAccess,
+		conversationShareResources:    resources,
 	}, nil
 }
 

@@ -1259,7 +1259,7 @@ func newDesktopTestServerWithConfig(t *testing.T, cfg config.RelayConfig) (*Serv
 
 type testConversationShareRenderer struct{}
 
-func (testConversationShareRenderer) Render(snapshot []byte, _, _, _ string) ([]byte, error) {
+func (testConversationShareRenderer) Render(snapshot []byte, _, _, _, _ string) ([]byte, error) {
 	return append([]byte(nil), snapshot...), nil
 }
 
@@ -1304,12 +1304,13 @@ func desktopTestConfig(t *testing.T) config.RelayConfig {
 		Expires:  time.Now().Add(time.Hour),
 	})
 	return config.RelayConfig{
-		PublicBaseDomain:        "hub.example.test",
-		DesktopPublicBaseDomain: "m.example.test",
-		WebAppPublicBaseDomain:  "example.test",
-		SSOJWTIssuer:            "https://official.example.test",
-		SSOJWTPublicKeyPEM:      publicKeyPEM,
-		SSOJWTAudience:          "tunnel-hub-server",
+		PublicBaseDomain:             "hub.example.test",
+		DesktopPublicBaseDomain:      "m.example.test",
+		WebAppPublicBaseDomain:       "example.test",
+		SSOJWTIssuer:                 "https://official.example.test",
+		SSOJWTPublicKeyPEM:           publicKeyPEM,
+		SSOJWTAudience:               "tunnel-hub-server",
+		ConversationShareResourceDir: t.TempDir(),
 	}
 }
 
