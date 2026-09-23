@@ -5,12 +5,16 @@ import (
 	"database/sql"
 )
 
-// Migrate creates only the current schema. Existing tables are never rewritten.
-func (db *DB) Migrate(ctx context.Context) error {
-	if db.database == databaseSQLite {
-		return db.migrateSQLite(ctx)
+// Migrate creates the current schema and performs the one-way legacy share-resource migration.
+func (db *DB) Migrate(ctx context.Context, conversationShareResourceDir ...string) error {
+	resourceDir := ""
+	if len(conversationShareResourceDir) > 0 {
+		resourceDir = conversationShareResourceDir[0]
 	}
-	return db.migrateMySQL(ctx)
+	if db.database == databaseSQLite {
+		return db.migrateSQLite(ctx, resourceDir)
+	}
+	return db.migrateMySQL(ctx, resourceDir)
 }
 
 func (db *DB) beginWriteTx(ctx context.Context) (*sql.Tx, error) {

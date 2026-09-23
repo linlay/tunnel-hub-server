@@ -121,15 +121,14 @@ CREATE TABLE IF NOT EXISTS conversation_share_access (
 	FOREIGN KEY (share_id) REFERENCES conversation_shares(id) ON DELETE CASCADE
 );
 
-CREATE TABLE IF NOT EXISTS conversation_share_attachments (
+CREATE TABLE IF NOT EXISTS conversation_share_resources (
 	share_id TEXT NOT NULL,
-	attachment_id TEXT NOT NULL,
+	resource_id TEXT NOT NULL,
 	name TEXT NOT NULL,
 	mime_type TEXT NOT NULL,
 	size_bytes INTEGER NOT NULL,
 	sha256 TEXT NOT NULL,
-	body BLOB NOT NULL,
-	PRIMARY KEY (share_id, attachment_id),
+	PRIMARY KEY (share_id, resource_id),
 	FOREIGN KEY (share_id) REFERENCES conversation_shares(id) ON DELETE CASCADE
 );
 

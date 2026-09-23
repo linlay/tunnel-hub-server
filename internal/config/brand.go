@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net"
 	"net/url"
+	"os"
 	"regexp"
 	"strings"
 )
@@ -32,8 +33,9 @@ type BrandDomains struct {
 }
 
 type BrandEndpoints struct {
-	RelayPublicURL     string
-	SharePublicBaseURL string
+	RelayPublicURL         string
+	SharePublicBaseURL     string
+	ProductDownloadPageURL string
 }
 
 func LoadBrandConfigFromEnv() (BrandConfig, error) {
@@ -69,6 +71,7 @@ func LoadBrandConfigFromEnv() (BrandConfig, error) {
 	if err != nil {
 		return BrandConfig{}, err
 	}
+	productDownloadPageURL := strings.TrimSpace(os.Getenv("PRODUCT_DOWNLOAD_PAGE_URL"))
 
 	cfg := BrandConfig{
 		Brand: BrandIdentity{
@@ -82,8 +85,9 @@ func LoadBrandConfigFromEnv() (BrandConfig, error) {
 			WebAppPublicBase:  webAppPublicBase,
 		},
 		Endpoints: BrandEndpoints{
-			RelayPublicURL:     relayPublicURL,
-			SharePublicBaseURL: sharePublicBaseURL,
+			RelayPublicURL:         relayPublicURL,
+			SharePublicBaseURL:     sharePublicBaseURL,
+			ProductDownloadPageURL: productDownloadPageURL,
 		},
 	}
 	if err := cfg.validate(); err != nil {
@@ -137,7 +141,37 @@ func (cfg *BrandConfig) validate() error {
 		return err
 	}
 	cfg.Endpoints.SharePublicBaseURL = normalized
+	productDownloadPageURL, err := validateProductDownloadPageURL(cfg.Endpoints.ProductDownloadPageURL)
+	if err != nil {
+		return err
+	}
+	cfg.Endpoints.ProductDownloadPageURL = productDownloadPageURL
 	return nil
+}
+
+func validateProductDownloadPageURL(value string) (string, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "", nil
+	}
+	u, err := url.Parse(value)
+	if err != nil || u.Hostname() == "" {
+		return "", fmt.Errorf("PRODUCT_DOWNLOAD_PAGE_URL must be an absolute HTTP(S) URL")
+	}
+	if err := validateEndpointHostname("PRODUCT_DOWNLOAD_PAGE_URL", u.Hostname()); err != nil {
+		return "", err
+	}
+	if u.User != nil {
+		return "", fmt.Errorf("PRODUCT_DOWNLOAD_PAGE_URL must not contain credentials")
+	}
+	if isLoopbackHost(u.Hostname()) {
+		if u.Scheme != "http" && u.Scheme != "https" {
+			return "", fmt.Errorf("loopback PRODUCT_DOWNLOAD_PAGE_URL must use http or https")
+		}
+	} else if u.Scheme != "https" {
+		return "", fmt.Errorf("non-loopback PRODUCT_DOWNLOAD_PAGE_URL must use https")
+	}
+	return u.String(), nil
 }
 
 func validateHostname(field, value string) (string, error) {

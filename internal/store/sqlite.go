@@ -19,7 +19,7 @@ import (
 //go:embed schema_sqlite.sql
 var sqliteSchema string
 
-const sqliteSchemaVersion = 2
+const sqliteSchemaVersion = 3
 
 func OpenSQLite(ctx context.Context, path string) (*DB, error) {
 	path = strings.TrimSpace(path)
@@ -63,7 +63,7 @@ func OpenSQLite(ctx context.Context, path string) (*DB, error) {
 	return &DB{sql: pool, database: databaseSQLite}, nil
 }
 
-func (db *DB) migrateSQLite(ctx context.Context) error {
+func (db *DB) migrateSQLite(ctx context.Context, resourceDir string) error {
 	tx, err := db.beginWriteTx(ctx)
 	if err != nil {
 		return fmt.Errorf("initialize SQLite schema: %w", err)
@@ -91,17 +91,17 @@ func (db *DB) migrateSQLite(ctx context.Context) error {
 				return fmt.Errorf("initialize SQLite schema: %w", err)
 			}
 		}
-		if _, err := tx.ExecContext(ctx, `PRAGMA user_version = 2`); err != nil {
+		if _, err := tx.ExecContext(ctx, `PRAGMA user_version = 3`); err != nil {
 			return fmt.Errorf("write SQLite schema version: %w", err)
 		}
 	case 1:
-		if _, err := tx.ExecContext(ctx, `CREATE TABLE conversation_share_attachments (
-			share_id TEXT NOT NULL, attachment_id TEXT NOT NULL, name TEXT NOT NULL,
+		if _, err := tx.ExecContext(ctx, `CREATE TABLE conversation_share_resources (
+			share_id TEXT NOT NULL, resource_id TEXT NOT NULL, name TEXT NOT NULL,
 			mime_type TEXT NOT NULL, size_bytes INTEGER NOT NULL, sha256 TEXT NOT NULL,
-			body BLOB NOT NULL, PRIMARY KEY (share_id, attachment_id),
+			PRIMARY KEY (share_id, resource_id),
 			FOREIGN KEY (share_id) REFERENCES conversation_shares(id) ON DELETE CASCADE
 		)`); err != nil {
-			return fmt.Errorf("migrate SQLite conversation share attachments: %w", err)
+			return fmt.Errorf("migrate SQLite conversation share resources: %w", err)
 		}
 		if _, err := tx.ExecContext(ctx, `CREATE TABLE conversation_share_claims (
 			share_id TEXT PRIMARY KEY, token_hash BLOB NOT NULL, expires_at TIMESTAMP NOT NULL,
@@ -109,12 +109,28 @@ func (db *DB) migrateSQLite(ctx context.Context) error {
 		)`); err != nil {
 			return fmt.Errorf("migrate SQLite conversation share claims: %w", err)
 		}
-		if _, err := tx.ExecContext(ctx, `PRAGMA user_version = 2`); err != nil {
+		if _, err := tx.ExecContext(ctx, `PRAGMA user_version = 3`); err != nil {
 			return fmt.Errorf("write SQLite schema version: %w", err)
 		}
 		if err := verifySQLiteSchema(ctx, tx); err != nil {
 			return err
 		}
+	case 2:
+		if _, err := tx.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS conversation_share_resources (
+			share_id TEXT NOT NULL, resource_id TEXT NOT NULL, name TEXT NOT NULL,
+			mime_type TEXT NOT NULL, size_bytes INTEGER NOT NULL, sha256 TEXT NOT NULL,
+			PRIMARY KEY (share_id, resource_id),
+			FOREIGN KEY (share_id) REFERENCES conversation_shares(id) ON DELETE CASCADE
+		)`); err != nil {
+			return fmt.Errorf("create SQLite conversation share resources: %w", err)
+		}
+		if err := tx.Commit(); err != nil {
+			return fmt.Errorf("commit SQLite schema before resource migration: %w", err)
+		}
+		if err := db.migrateLegacyConversationShareAttachments(ctx, resourceDir); err != nil {
+			return fmt.Errorf("migrate SQLite conversation share resources: %w", err)
+		}
+		return nil
 	case sqliteSchemaVersion:
 		if err := verifySQLiteSchema(ctx, tx); err != nil {
 			return err
@@ -137,7 +153,7 @@ func verifySQLiteSchema(ctx context.Context, tx *sql.Tx) error {
 			'admin_users', 'admin_sessions', 'tunnel_tokens', 'routes',
 			'desktop_devices', 'desktop_webapps', 'agent_sessions', 'desktop_sessions',
 			'events', 'conversation_shares', 'conversation_share_access', 'traffic_events',
-			'conversation_share_attachments', 'conversation_share_claims'
+			'conversation_share_resources', 'conversation_share_claims'
 		)
 	`).Scan(&tables)
 	if err != nil {

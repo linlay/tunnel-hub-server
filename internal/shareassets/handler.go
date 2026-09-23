@@ -88,7 +88,7 @@ func NewHandler() http.Handler {
 	return NewBundle()
 }
 
-func (b *Bundle) Render(snapshot []byte, assetOrigin, brandID, productName string) ([]byte, error) {
+func (b *Bundle) Render(snapshot []byte, assetOrigin, brandID, productName, productDownloadPageURL string) ([]byte, error) {
 	if !json.Valid(snapshot) {
 		return nil, errors.New("conversation snapshot is invalid")
 	}
@@ -115,11 +115,16 @@ func (b *Bundle) Render(snapshot []byte, assetOrigin, brandID, productName strin
 	if bytes.Count(htmlBytes, []byte(publicBrandMeta)) != 1 {
 		return nil, errors.New("public share brand placeholder is unavailable")
 	}
+	downloadPageURL, err := normalizedProductDownloadPageURL(productDownloadPageURL)
+	if err != nil {
+		return nil, err
+	}
 	brandJSON, err := json.Marshal(struct {
-		ID          string `json:"id"`
-		ProductName string `json:"productName"`
-		OpenScheme  string `json:"openScheme"`
-	}{brandID, productName, brandID})
+		ID              string `json:"id"`
+		ProductName     string `json:"productName"`
+		OpenScheme      string `json:"openScheme"`
+		DownloadPageURL string `json:"downloadPageUrl,omitempty"`
+	}{brandID, productName, brandID, downloadPageURL})
 	if err != nil {
 		return nil, err
 	}
@@ -127,6 +132,23 @@ func (b *Bundle) Render(snapshot []byte, assetOrigin, brandID, productName strin
 	htmlBytes = bytes.Replace(htmlBytes, []byte(publicBrandMeta), []byte(brandMeta), 1)
 	htmlBytes = bytes.Replace(htmlBytes, []byte(localBrandIDMarker), nil, 1)
 	return htmlBytes, nil
+}
+
+func normalizedProductDownloadPageURL(value string) (string, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "", nil
+	}
+	parsed, err := url.Parse(value)
+	if err != nil || parsed.Hostname() == "" || parsed.User != nil {
+		return "", errors.New("product download page URL is invalid")
+	}
+	hostname := strings.Trim(strings.ToLower(parsed.Hostname()), "[]")
+	loopback := hostname == "localhost" || hostname == "127.0.0.1" || hostname == "::1"
+	if parsed.Scheme != "https" && !(loopback && parsed.Scheme == "http") {
+		return "", errors.New("product download page URL is invalid")
+	}
+	return parsed.String(), nil
 }
 
 func (b *Bundle) ServeHTTP(w http.ResponseWriter, r *http.Request) {

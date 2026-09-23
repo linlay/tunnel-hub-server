@@ -1,6 +1,9 @@
 package config
 
-import "testing"
+import (
+	"path/filepath"
+	"testing"
+)
 
 func setValidBrandEnv(t *testing.T) {
 	t.Helper()
@@ -12,12 +15,14 @@ func setValidBrandEnv(t *testing.T) {
 	t.Setenv("WEBAPP_PUBLIC_BASE_DOMAIN", "example.test")
 	t.Setenv("RELAY_PUBLIC_URL", "wss://hub.example.test/tunnel")
 	t.Setenv("SHARE_PUBLIC_BASE_URL", "https://share.example.test")
+	t.Setenv("PRODUCT_DOWNLOAD_PAGE_URL", "")
 }
 
 func useTestRelayConfig(t *testing.T) {
 	t.Helper()
 	setValidBrandEnv(t)
 	t.Setenv("RELAY_ADDR", ":18081")
+	t.Setenv("CONVERSATION_SHARE_RESOURCE_DIR", filepath.Join(t.TempDir(), "conversation-shares"))
 	t.Setenv("DATABASE_TYPE", "")
 	t.Setenv("RELAY_DB_PATH", "")
 	t.Setenv("MYSQL_HOST", "127.0.0.1")
@@ -156,6 +161,7 @@ func TestLoadRelayConfigRequiresEnvironmentSpecificValues(t *testing.T) {
 		"RELAY_PUBLIC_URL",
 		"SHARE_PUBLIC_BASE_URL",
 		"RELAY_ADDR",
+		"CONVERSATION_SHARE_RESOURCE_DIR",
 		"MYSQL_HOST", "MYSQL_DATABASE", "MYSQL_USER", "MYSQL_PASSWORD",
 		"SSO_JWT_ISSUER",
 		"SSO_JWT_AUDIENCE",
@@ -184,6 +190,14 @@ func TestLoadRelayConfigRejectsInvalidRelayAddress(t *testing.T) {
 	useTestRelayConfig(t)
 	t.Setenv("RELAY_ADDR", "localhost:not-a-port")
 	if _, err := LoadRelayConfigStrict(); err == nil || err.Error() != "RELAY_ADDR is invalid" {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestLoadRelayConfigRequiresAbsoluteConversationShareResourceDir(t *testing.T) {
+	useTestRelayConfig(t)
+	t.Setenv("CONVERSATION_SHARE_RESOURCE_DIR", "data/conversation-shares")
+	if _, err := LoadRelayConfigStrict(); err == nil || err.Error() != "CONVERSATION_SHARE_RESOURCE_DIR must be absolute" {
 		t.Fatalf("error = %v", err)
 	}
 }

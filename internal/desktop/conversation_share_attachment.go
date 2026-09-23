@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	stdhtml "html"
+	"io"
 	"mime"
 	"net/http"
 	"regexp"
@@ -118,7 +119,7 @@ func (s *Server) handleGetPublicConversationShareAttachment(w http.ResponseWrite
 	path := strings.TrimPrefix(r.URL.Path, publicConversationSharePagePath)
 	segments := strings.Split(path, "/")
 	if len(segments) != 4 || segments[1] != "attachments" ||
-		!attachmentIDPattern.MatchString(segments[2]) ||
+		!resourceIDPattern.MatchString(segments[2]) ||
 		(segments[3] != "preview" && segments[3] != "download") {
 		writePublicConversationShareError(w, http.StatusNotFound)
 		return
@@ -128,7 +129,7 @@ func (s *Server) handleGetPublicConversationShareAttachment(w http.ResponseWrite
 		writePublicConversationShareError(w, http.StatusNotFound)
 		return
 	}
-	attachment, err := s.DB.ReadPublicConversationShareAttachment(r.Context(), shareID, segments[2], s.now().UTC(), conversationShareSessionHash(r, shareID))
+	resource, err := s.DB.ReadPublicConversationShareResource(r.Context(), shareID, segments[2], s.now().UTC(), conversationShareSessionHash(r, shareID))
 	if err != nil {
 		if !errors.Is(err, store.ErrNotFound) {
 			s.Logger.Error("read conversation share attachment", "error", err)
@@ -136,13 +137,33 @@ func (s *Server) handleGetPublicConversationShareAttachment(w http.ResponseWrite
 		writePublicConversationShareError(w, http.StatusNotFound)
 		return
 	}
+	if s.conversationShareResources == nil || (segments[3] == "preview" && resource.MIMEType != "text/html") {
+		writePublicConversationShareError(w, http.StatusNotFound)
+		return
+	}
+	file, err := s.conversationShareResources.Open(shareID, resource.ID)
+	if err != nil {
+		writePublicConversationShareError(w, http.StatusNotFound)
+		return
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil || info.Size() != resource.Size {
+		writePublicConversationShareError(w, http.StatusNotFound)
+		return
+	}
 	header := w.Header()
 	setPublicConversationShareHeaders(header)
-	header.Set("Content-Type", "text/html; charset=utf-8")
 	if segments[3] == "preview" {
+		header.Set("Content-Type", "text/html; charset=utf-8")
 		header.Set("Content-Security-Policy", "default-src 'none'; img-src data:; style-src 'unsafe-inline'; font-src 'none'; script-src 'none'; form-action 'none'; base-uri 'none'; frame-ancestors 'self'; sandbox")
-		header.Set("Content-Disposition", mime.FormatMediaType("inline", map[string]string{"filename": attachment.Name}))
-		body := sanitizeSharedHTML(attachment.Body)
+		header.Set("Content-Disposition", mime.FormatMediaType("inline", map[string]string{"filename": resource.Name}))
+		source, err := io.ReadAll(io.LimitReader(file, resource.Size+1))
+		if err != nil || int64(len(source)) != resource.Size {
+			writePublicConversationShareError(w, http.StatusNotFound)
+			return
+		}
+		body := sanitizeSharedHTML(source)
 		header.Set("Content-Length", strconv.Itoa(len(body)))
 		w.WriteHeader(http.StatusOK)
 		if r.Method == http.MethodGet {
@@ -150,11 +171,12 @@ func (s *Server) handleGetPublicConversationShareAttachment(w http.ResponseWrite
 		}
 		return
 	}
+	header.Set("Content-Type", resource.MIMEType)
 	header.Set("Content-Security-Policy", "default-src 'none'; sandbox")
-	header.Set("Content-Disposition", mime.FormatMediaType("attachment", map[string]string{"filename": attachment.Name}))
-	header.Set("Content-Length", strconv.Itoa(len(attachment.Body)))
+	header.Set("Content-Disposition", mime.FormatMediaType("attachment", map[string]string{"filename": resource.Name}))
+	header.Set("Content-Length", strconv.FormatInt(resource.Size, 10))
 	w.WriteHeader(http.StatusOK)
 	if r.Method == http.MethodGet {
-		_, _ = w.Write(attachment.Body)
+		_, _ = io.CopyN(w, file, resource.Size)
 	}
 }

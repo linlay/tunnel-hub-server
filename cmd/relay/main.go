@@ -49,7 +49,7 @@ func run() error {
 	defer db.Close()
 	startup, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	if err := db.Migrate(startup); err != nil {
+	if err := db.Migrate(startup, cfg.ConversationShareResourceDir); err != nil {
 		return fmt.Errorf("migrate db: %w", err)
 	}
 	if cfg.AdminPassword != "" {
@@ -94,6 +94,9 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("configure desktop server: %w", err)
 	}
+	cleanupContext, stopCleanup := context.WithCancel(context.Background())
+	defer stopCleanup()
+	go desktopServer.RunConversationShareCleanup(cleanupContext)
 	conversationAssets := shareassets.NewBundle()
 	desktopServer.SetConversationShareRenderer(conversationAssets)
 	static := staticHandler(cfg.WebsiteDist)
