@@ -1,4 +1,4 @@
-import { act, render, screen, waitFor, within } from '@testing-library/react';
+import { act, cleanup, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { App } from './App';
@@ -54,10 +54,11 @@ describe('App', () => {
   beforeEach(() => {
     FakeWebSocket.instances = [];
     vi.stubGlobal('WebSocket', FakeWebSocket);
-    window.history.replaceState(null, '', 'https://zm123.m.zenmind.cc/');
+    window.history.replaceState(null, '', 'https://device.m.example.test/');
   });
 
   afterEach(() => {
+	cleanup();
     vi.useRealTimers();
     vi.unstubAllGlobals();
   });
@@ -71,12 +72,12 @@ describe('App', () => {
   });
 
   it('consumes token from the URL without leaving it in history', async () => {
-    window.history.replaceState(null, '', 'https://zm123.m.zenmind.cc/?token=secret&view=board');
+    window.history.replaceState(null, '', 'https://device.m.example.test/?token=secret&view=board');
     render(<App />);
     expect(screen.queryByLabelText('Desktop token')).not.toBeInTheDocument();
-    expect(window.location.href).toBe('https://zm123.m.zenmind.cc/?view=board');
+    expect(window.location.href).toBe('https://device.m.example.test/?view=board');
     await waitFor(() => expect(FakeWebSocket.instances).toHaveLength(1));
-    expect(String(FakeWebSocket.instances[0].url)).toBe('wss://zm123.m.zenmind.cc/ws?token=secret');
+    expect(String(FakeWebSocket.instances[0].url)).toBe('wss://device.m.example.test/ws?token=secret');
   });
 
   it('connects, loads board issues, renders agents, and moves an issue', async () => {
@@ -86,14 +87,14 @@ describe('App', () => {
     await user.click(screen.getByRole('button', { name: '连接' }));
 
     const socket = FakeWebSocket.instances[0];
-    expect(String(socket.url)).toBe('wss://zm123.m.zenmind.cc/ws?token=secret');
+    expect(String(socket.url)).toBe('wss://device.m.example.test/ws?token=secret');
     await act(async () => {
       socket.open();
     });
 
     await replyBootstrap(socket, {
       issues: [{ id: 'ISS-1', title: 'Ship mobile board', status: 'todo', priority: 'high' }],
-      desktopAgents: [{ agentKey: 'zenmi', displayName: '小宅', role: '平台总管' }],
+      desktopAgents: [{ agentKey: 'agent-alpha', displayName: '小宅', role: '平台总管' }],
       platformAgents: [{ key: 'coder', name: 'Coder', role: 'Engineering' }]
     });
 
@@ -152,6 +153,25 @@ describe('App', () => {
     expect(screen.queryByText('agent.list timed out')).not.toBeInTheDocument();
   });
 
+  it('does not invent an agent when both catalogs are empty', async () => {
+    const user = userEvent.setup();
+    render(<App />);
+    await user.type(screen.getByLabelText('Desktop token'), 'secret');
+    await user.click(screen.getByRole('button', { name: '连接' }));
+    const socket = FakeWebSocket.instances[0];
+    await act(async () => {
+      socket.open();
+    });
+
+    await replyBootstrap(socket, { issues: [], desktopAgents: [], platformAgents: [] });
+
+    expect(await screen.findByRole('option', { name: '暂无可用智能体' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '发送' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: '历史对话' })).toBeDisabled();
+    expect(screen.queryByText('agent-alpha')).not.toBeInTheDocument();
+    expect(socket.sent.some((frame) => frame.type === '/api/query')).toBe(false);
+  });
+
   it('appends agent replies and shows agent query failures', async () => {
     const user = userEvent.setup();
     render(<App />);
@@ -164,7 +184,7 @@ describe('App', () => {
 
     await replyBootstrap(socket, {
       issues: [],
-      desktopAgents: [{ agentKey: 'zenmi', displayName: '小宅', role: '平台总管' }],
+      desktopAgents: [{ agentKey: 'agent-alpha', displayName: '小宅', role: '平台总管' }],
       platformAgents: []
     });
 
@@ -173,7 +193,7 @@ describe('App', () => {
     await user.click(screen.getByRole('button', { name: '发送' }));
     await waitFor(() => expect(socket.sent.some((frame) => frame.type === '/api/query')).toBe(true));
     const queryIndex = socket.sent.findIndex((frame) => frame.type === '/api/query');
-    expect(socket.sent[queryIndex].payload).toMatchObject({ agentKey: 'zenmi', message: '你好', stream: true });
+    expect(socket.sent[queryIndex].payload).toMatchObject({ agentKey: 'agent-alpha', message: '你好', stream: true });
     await act(async () => {
       socket.reply(queryIndex, { answer: '你好，我在。' });
     });
@@ -210,13 +230,13 @@ describe('App', () => {
     await replyBootstrap(socket, {
       issues: [],
       desktopAgents: [],
-      platformAgents: [{ key: 'zenmi', name: 'zenmi', role: 'Copilot' }]
+      platformAgents: [{ key: 'agent-alpha', name: 'agent-alpha', role: 'Copilot' }]
     });
 
     await user.type(screen.getByLabelText('Agent message'), '第一条');
     await user.click(screen.getByRole('button', { name: '发送' }));
     const firstQueryIndex = lastFrameIndex(socket.sent, '/api/query');
-    expect(socket.sent[firstQueryIndex].payload).toMatchObject({ agentKey: 'zenmi', message: '第一条' });
+    expect(socket.sent[firstQueryIndex].payload).toMatchObject({ agentKey: 'agent-alpha', message: '第一条' });
     expect(socket.sent[firstQueryIndex].payload).not.toHaveProperty('chatId');
     const firstId = socket.sent[firstQueryIndex].id;
     await act(async () => {
@@ -224,7 +244,7 @@ describe('App', () => {
         ns: 'ap',
         frame: 'push',
         type: 'chat.created',
-        data: { agentKey: 'zenmi', chatId: 'chat_keep', chatName: '第一条' }
+        data: { agentKey: 'agent-alpha', chatId: 'chat_keep', chatName: '第一条' }
       });
       socket.message({
         ns: 'ap',
@@ -248,7 +268,7 @@ describe('App', () => {
     await user.click(screen.getByRole('button', { name: '发送' }));
     const secondQueryIndex = lastFrameIndex(socket.sent, '/api/query');
     expect(socket.sent[secondQueryIndex].payload).toMatchObject({
-      agentKey: 'zenmi',
+      agentKey: 'agent-alpha',
       chatId: 'chat_keep',
       message: '第二条'
     });
@@ -268,14 +288,14 @@ describe('App', () => {
       issues: [],
       desktopAgents: [],
       platformAgents: [{
-        key: 'zenmi',
-        name: 'zenmi',
+        key: 'agent-alpha',
+        name: 'agent-alpha',
         role: 'Copilot',
         wonders: ['介绍你能做什么', '帮我整理今天的计划', '写一段团队进展'],
         recentChats: [{
           chatId: 'chat_1',
           chatName: '昨天的计划',
-          agentKey: 'zenmi',
+          agentKey: 'agent-alpha',
           updatedAt: '2026-06-21T08:00:00.000Z',
           lastRunContent: '昨天已经整理好了。'
         }]
@@ -325,7 +345,7 @@ describe('App', () => {
 
     await replyBootstrap(socket, {
       issues: [],
-      desktopAgents: [{ agentKey: 'zenmi', displayName: '小宅', role: '平台总管' }],
+      desktopAgents: [{ agentKey: 'agent-alpha', displayName: '小宅', role: '平台总管' }],
       platformAgents: []
     });
 

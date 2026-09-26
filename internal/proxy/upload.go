@@ -21,9 +21,9 @@ import (
 	"sync"
 	"time"
 
+	"example.invalid/tunnel-hub-server/internal/store"
+	"example.invalid/tunnel-hub-server/internal/tunnel"
 	"github.com/gorilla/websocket"
-	"github.com/linlay/zenmind-tunnel-server/internal/store"
-	"github.com/linlay/zenmind-tunnel-server/internal/tunnel"
 )
 
 const (
@@ -340,8 +340,8 @@ func (r *Relay) parseUploadMultipart(w http.ResponseWriter, req *http.Request) (
 }
 
 func (r *Relay) forwardUploadToDesktop(ctx context.Context, req *http.Request, device store.DesktopDevice, authToken string, parsed parsedUploadRequest, uploadID, pullURL string) (json.RawMessage, int, string, error) {
-	stream, err := r.Manager.OpenStream(ctx, device.TokenID)
-	if errors.Is(err, ErrNoAgent) {
+	stream, err := r.Manager.OpenStream(ctx, DesktopConnectionKey(device.DeviceKey))
+	if errors.Is(err, ErrNoTunnel) {
 		return nil, http.StatusBadGateway, "desktop is offline", err
 	}
 	if err != nil {

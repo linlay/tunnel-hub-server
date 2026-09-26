@@ -42,6 +42,9 @@ func TestSSOJWTVerifierAllowsAnyAudienceAndCustomUserIDClaim(t *testing.T) {
 	if principal.UserID != "external-user-42" || principal.Email != "user@example.test" {
 		t.Fatalf("unexpected principal: %+v", principal)
 	}
+	if !principal.ExpiresAt.Equal(time.Unix(now.Add(time.Hour).Unix(), 0).UTC()) {
+		t.Fatalf("expiresAt = %s", principal.ExpiresAt)
+	}
 }
 
 func TestSSOJWTVerifierStillRejectsFutureTokenInRelaxedAudienceMode(t *testing.T) {

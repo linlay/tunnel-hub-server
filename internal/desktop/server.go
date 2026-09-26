@@ -6,71 +6,105 @@ import (
 	"encoding/base32"
 	"encoding/json"
 	"errors"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 
-	"github.com/linlay/zenmind-tunnel-server/internal/auth"
-	"github.com/linlay/zenmind-tunnel-server/internal/config"
-	"github.com/linlay/zenmind-tunnel-server/internal/store"
+	"example.invalid/tunnel-hub-server/internal/auth"
+	"example.invalid/tunnel-hub-server/internal/config"
+	"example.invalid/tunnel-hub-server/internal/sharefiles"
+	"example.invalid/tunnel-hub-server/internal/store"
+	"example.invalid/tunnel-hub-server/internal/tunnel"
 )
 
 const registerPath = "/api/desktop/devices/register"
 const conversationSharesPath = "/api/desktop/shares"
-const publicConversationSharesPath = "/api/public/shares/"
+const publicConversationSharePagePath = "/share/"
 const publicHostRetryLimit = 8
 const publicLabelRandomBytes = 8
 
 type Server struct {
-	DB     *store.DB
-	Config config.RelayConfig
-	Logger *slog.Logger
-	ssoJWT *auth.SSOJWTVerifier
+	DB                            *store.DB
+	Config                        config.RelayConfig
+	Logger                        *slog.Logger
+	ssoJWT                        *auth.SSOJWTVerifier
+	now                           func() time.Time
+	recordConversationShareAccess func(context.Context, string, time.Time) error
+	conversationShareRenderer     conversationShareRenderer
+	conversationShareResources    *sharefiles.Store
 }
 
-func NewServer(db *store.DB, cfg config.RelayConfig, logger *slog.Logger) (*Server, error) {
+type conversationShareRenderer interface {
+	Render(snapshot []byte, assetOrigin, brandID, productName, productDownloadPageURL string) ([]byte, error)
+}
+
+func (s *Server) SetConversationShareRenderer(renderer conversationShareRenderer) {
+	s.conversationShareRenderer = renderer
+}
+
+func NewServer(db *store.DB, cfg config.RelayConfig, logger *slog.Logger, ssoJWT *auth.SSOJWTVerifier) (*Server, error) {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	ssoJWT, err := auth.NewSSOJWTVerifier(auth.SSOJWTConfig{
-		Issuer:           cfg.SSOJWTIssuer,
-		Audience:         cfg.SSOJWTAudience,
-		UserIDClaim:      cfg.SSOJWTUserIDClaim,
-		AllowAnyAudience: cfg.SSOJWTAllowAnyAudience,
-		PublicKeyFile:    cfg.SSOJWTPublicKeyFile,
-		PublicKeyPEM:     cfg.SSOJWTPublicKeyPEM,
-	})
-	if err != nil {
-		return nil, err
+	if ssoJWT == nil {
+		return nil, errors.New("SSO JWT verifier is required")
 	}
-	return &Server{DB: db, Config: cfg, Logger: logger, ssoJWT: ssoJWT}, nil
+	var resources *sharefiles.Store
+	if strings.TrimSpace(cfg.ConversationShareResourceDir) != "" {
+		var err error
+		resources, err = sharefiles.New(cfg.ConversationShareResourceDir)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return &Server{
+		DB:                            db,
+		Config:                        cfg,
+		Logger:                        logger,
+		ssoJWT:                        ssoJWT,
+		now:                           time.Now,
+		recordConversationShareAccess: db.RecordConversationShareAccess,
+		conversationShareResources:    resources,
+	}, nil
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if strings.HasPrefix(r.URL.Path, publicConversationSharePagePath) {
+		if r.Method != http.MethodGet && r.Method != http.MethodHead {
+			w.Header().Set("Allow", "GET, HEAD")
+			writePublicConversationShareError(w, http.StatusMethodNotAllowed)
+			return
+		}
+		if strings.Contains(r.URL.Path, "/attachments/") {
+			s.handleGetPublicConversationShareAttachment(w, r)
+		} else {
+			s.handleGetPublicConversationSharePage(w, r)
+		}
+		return
+	}
 	if r.Method == http.MethodOptions {
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
 	switch {
 	case r.URL.Path == conversationSharesPath:
-		if r.Method != http.MethodPost {
+		switch r.Method {
+		case http.MethodPost:
+			s.handleCreateConversationShare(w, r)
+		case http.MethodGet:
+			s.handleListConversationShares(w, r)
+		default:
 			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
-			return
 		}
-		s.handleCreateConversationShare(w, r)
 	case strings.HasPrefix(r.URL.Path, conversationSharesPath+"/"):
 		if r.Method != http.MethodDelete {
 			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 			return
 		}
 		s.handleRevokeConversationShare(w, r)
-	case strings.HasPrefix(r.URL.Path, publicConversationSharesPath):
-		if r.Method != http.MethodGet {
-			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
-			return
-		}
-		s.handleGetPublicConversationShare(w, r)
 	case r.URL.Path == registerPath:
 		if r.Method != http.MethodPost {
 			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -109,17 +143,12 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 	}
 	payload.DeviceID = strings.TrimSpace(payload.DeviceID)
 	payload.DeviceName = strings.TrimSpace(payload.DeviceName)
-	payload.TargetURL = strings.TrimSpace(payload.TargetURL)
 	if err := payload.Validate(); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
 	result, err := s.registerDesktopDevice(r, principal, payload)
-	if errors.Is(err, store.ErrDesktopDeviceOwnerMismatch) {
-		writeError(w, http.StatusForbidden, "desktop device belongs to another user")
-		return
-	}
 	if errors.Is(err, store.ErrDesktopDeviceHostConflict) {
 		writeError(w, http.StatusConflict, "desktop public host already exists")
 		return
@@ -143,7 +172,7 @@ func (s *Server) handleRegisterWebApp(w http.ResponseWriter, r *http.Request, de
 		return
 	}
 	payload.TargetURL = strings.TrimSpace(payload.TargetURL)
-	if err := validateDeviceID(deviceID); err != nil {
+	if err := tunnel.ValidateDesktopDeviceID(deviceID); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -158,10 +187,6 @@ func (s *Server) handleRegisterWebApp(w http.ResponseWriter, r *http.Request, de
 	result, err := s.registerDesktopWebApp(r, principal, deviceID, name, payload)
 	if errors.Is(err, store.ErrNotFound) {
 		writeError(w, http.StatusNotFound, "desktop device not found")
-		return
-	}
-	if errors.Is(err, store.ErrDesktopDeviceOwnerMismatch) {
-		writeError(w, http.StatusForbidden, "desktop device belongs to another user")
 		return
 	}
 	if errors.Is(err, store.ErrDesktopDeviceHostConflict) {
@@ -184,14 +209,12 @@ func (s *Server) registerDesktopDevice(r *http.Request, principal auth.SSOJWTPri
 			return store.RegisterDesktopDeviceResult{}, err
 		}
 		result, err := s.DB.RegisterDesktopDevice(r.Context(), store.RegisterDesktopDeviceInput{
-			DeviceID:         payload.DeviceID,
-			DeviceName:       payload.DeviceName,
-			OwnerUserID:      principal.UserID,
-			OwnerEmail:       principal.Email,
-			OwnerName:        principal.Name,
-			PublicHost:       publicHost,
-			TargetURL:        payload.TargetURL,
-			RotatePublicHost: payload.RotatePublicHost,
+			DeviceID:    payload.DeviceID,
+			DeviceName:  payload.DeviceName,
+			OwnerUserID: principal.UserID,
+			OwnerEmail:  principal.Email,
+			OwnerName:   principal.Name,
+			PublicHost:  publicHost,
 		})
 		if !errors.Is(err, store.ErrDesktopDeviceHostConflict) {
 			return result, err
@@ -253,6 +276,10 @@ func (s *Server) authorizeRegistration(w http.ResponseWriter, r *http.Request) (
 		writeError(w, http.StatusForbidden, "tunnel scope required")
 		return auth.SSOJWTPrincipal{}, false
 	}
+	if err := store.ValidateTextLength("ownerUserId", principal.UserID, 255); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return auth.SSOJWTPrincipal{}, false
+	}
 	return principal, true
 }
 
@@ -276,9 +303,6 @@ func (s *Server) registrationResponse(result store.RegisterDesktopDeviceResult) 
 		PublicURL:    "https://" + publicHost,
 		WebSocketURL: "wss://" + publicHost + "/ws",
 		RelayURL:     s.relayURL(),
-		TargetURL:    result.Device.TargetURL,
-		TokenID:      result.Token.ID,
-		Created:      result.Created,
 	}
 }
 
@@ -315,31 +339,19 @@ func (s *Server) randomWebAppPublicHost() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return label + "." + s.webAppPublicBaseDomain(), nil
+	return tunnel.BuildWebAppPublicHost(label, s.webAppPublicBaseDomain())
 }
 
 func (s *Server) baseDomain() string {
-	baseDomain := strings.TrimPrefix(tunnelHost(s.Config.PublicBaseDomain), ".")
-	if baseDomain == "" {
-		baseDomain = "tunnel-hub.zenmind.cc"
-	}
-	return baseDomain
+	return strings.TrimPrefix(tunnelHost(s.Config.PublicBaseDomain), ".")
 }
 
 func (s *Server) desktopPublicBaseDomain() string {
-	baseDomain := strings.TrimPrefix(tunnelHost(s.Config.DesktopPublicBaseDomain), ".")
-	if baseDomain == "" {
-		baseDomain = "m.zenmind.cc"
-	}
-	return baseDomain
+	return strings.TrimPrefix(tunnelHost(s.Config.DesktopPublicBaseDomain), ".")
 }
 
 func (s *Server) webAppPublicBaseDomain() string {
-	baseDomain := strings.TrimPrefix(tunnelHost(s.Config.WebAppPublicBaseDomain), ".")
-	if baseDomain == "" {
-		baseDomain = "wa.zenmind.cc"
-	}
-	return baseDomain
+	return strings.TrimPrefix(tunnelHost(s.Config.WebAppPublicBaseDomain), ".")
 }
 
 func randomPublicLabel() (string, error) {
@@ -357,20 +369,12 @@ func (s *Server) writeInternal(w http.ResponseWriter, message string, err error)
 }
 
 type registerPayload struct {
-	DeviceID         string `json:"deviceId"`
-	DeviceName       string `json:"deviceName"`
-	TargetURL        string `json:"targetUrl"`
-	RotatePublicHost bool   `json:"rotatePublicHost"`
+	DeviceID   string `json:"deviceId"`
+	DeviceName string `json:"deviceName"`
 }
 
 func (p registerPayload) Validate() error {
-	if err := validateDeviceID(p.DeviceID); err != nil {
-		return err
-	}
-	if strings.TrimSpace(p.TargetURL) != "" {
-		return validateTargetURL(p.TargetURL)
-	}
-	return nil
+	return tunnel.ValidateDesktopDeviceID(p.DeviceID)
 }
 
 type registerResponse struct {
@@ -379,9 +383,6 @@ type registerResponse struct {
 	PublicURL    string `json:"publicUrl"`
 	WebSocketURL string `json:"webSocketUrl"`
 	RelayURL     string `json:"relayUrl"`
-	TargetURL    string `json:"targetUrl"`
-	TokenID      string `json:"tokenId"`
-	Created      bool   `json:"created"`
 }
 
 type webAppPayload struct {
@@ -411,37 +412,6 @@ type webAppResponse struct {
 	TargetURL  string `json:"targetUrl"`
 	RouteID    string `json:"routeId"`
 	Active     bool   `json:"active"`
-}
-
-func validateDeviceID(deviceID string) error {
-	if deviceID == "" {
-		return errors.New("deviceId is required")
-	}
-	if deviceID != strings.ToLower(deviceID) {
-		return errors.New("deviceId must be lowercase")
-	}
-	if len(deviceID) > 63 {
-		return errors.New("deviceId must be 63 characters or fewer")
-	}
-	if strings.HasPrefix(deviceID, "-") || strings.HasSuffix(deviceID, "-") {
-		return errors.New("deviceId cannot start or end with hyphen")
-	}
-	if reservedDeviceIDs[deviceID] {
-		return errors.New("deviceId is reserved")
-	}
-	for _, char := range deviceID {
-		if char >= 97 && char <= 122 {
-			continue
-		}
-		if char >= 48 && char <= 57 {
-			continue
-		}
-		if char == 45 {
-			continue
-		}
-		return errors.New("deviceId must contain only lowercase letters, numbers, and hyphens")
-	}
-	return nil
 }
 
 func validateWebAppName(name string) error {
@@ -496,17 +466,17 @@ func tunnelHost(host string) string {
 	return host
 }
 
-var reservedDeviceIDs = map[string]bool{
-	"admin":  true,
-	"api":    true,
-	"www":    true,
-	"tunnel": true,
-	"relay":  true,
-}
-
 func decodeJSON(r *http.Request, value any) error {
 	defer r.Body.Close()
-	return json.NewDecoder(r.Body).Decode(value)
+	decoder := json.NewDecoder(io.LimitReader(r.Body, (1<<20)+1))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(value); err != nil {
+		return err
+	}
+	if decoder.Decode(&struct{}{}) != io.EOF {
+		return errors.New("request body must contain one JSON object")
+	}
+	return nil
 }
 
 func writeJSON(w http.ResponseWriter, status int, value any) {

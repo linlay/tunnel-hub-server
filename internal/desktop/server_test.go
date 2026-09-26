@@ -21,12 +21,14 @@ import (
 	"testing"
 	"time"
 
+	"example.invalid/tunnel-hub-server/internal/auth"
+	"example.invalid/tunnel-hub-server/internal/config"
+	"example.invalid/tunnel-hub-server/internal/proxy"
+	"example.invalid/tunnel-hub-server/internal/store"
+	"example.invalid/tunnel-hub-server/internal/testutil/dbtest"
+	"example.invalid/tunnel-hub-server/internal/tunnel"
 	"github.com/gorilla/websocket"
 	"github.com/hashicorp/yamux"
-	"github.com/linlay/zenmind-tunnel-server/internal/config"
-	"github.com/linlay/zenmind-tunnel-server/internal/proxy"
-	"github.com/linlay/zenmind-tunnel-server/internal/store"
-	"github.com/linlay/zenmind-tunnel-server/internal/tunnel"
 )
 
 var (
@@ -47,29 +49,22 @@ func TestRegisterRequiresOfficialJWT(t *testing.T) {
 	}
 }
 
-func TestRegisterDesktopDeviceCreatesBrokerIdentityAndPublicHost(t *testing.T) {
+func TestRegisterDesktopDeviceReturnsOnlyDeviceEndpoints(t *testing.T) {
 	server, db := newDesktopTestServer(t)
 	rec := performRegister(t, server, desktopRegisterBody("mac-mini", "", false), defaultDesktopJWT)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
 	}
 	response := decodeRegisterResponse(t, rec.Body)
-	if !response.Created {
-		t.Fatalf("unexpected create flag: %+v", response)
+	if response.DeviceID != "mac-mini" {
+		t.Fatalf("deviceId = %q", response.DeviceID)
 	}
 	assertDesktopPublicHost(t, response.PublicHost, "mac-mini")
 	if response.WebSocketURL != "wss://"+response.PublicHost+"/ws" {
 		t.Fatalf("webSocketUrl = %q", response.WebSocketURL)
 	}
-	if response.RelayURL != "wss://tunnel-hub.zenmind.cc/tunnel" {
+	if response.RelayURL != "wss://hub.example.test/tunnel" {
 		t.Fatalf("relayUrl = %q", response.RelayURL)
-	}
-	if response.TokenID == "" {
-		t.Fatalf("missing internal broker identity: %+v", response)
-	}
-
-	if response.TargetURL != "" {
-		t.Fatalf("desktop targetUrl should be empty: %+v", response)
 	}
 	if _, err := db.GetRouteByHost(context.Background(), response.PublicHost); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("desktop registration should not create route, got %v", err)
@@ -78,8 +73,12 @@ func TestRegisterDesktopDeviceCreatesBrokerIdentityAndPublicHost(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get desktop device: %v", err)
 	}
-	if device.TokenID != response.TokenID || device.TargetURL != "" {
+	if device.DeviceID != response.DeviceID || device.OwnerUserID != "42" {
 		t.Fatalf("unexpected desktop device: %+v", device)
+	}
+	tokens, err := db.ListTokens(context.Background())
+	if err != nil || len(tokens) != 0 {
+		t.Fatalf("desktop registration created tunnel tokens: tokens=%+v err=%v", tokens, err)
 	}
 }
 
@@ -99,15 +98,16 @@ func TestRegisterDesktopDeviceReturnsConfiguredRelayPublicURL(t *testing.T) {
 func TestRegisterDesktopDeviceAcceptsSSOJWT(t *testing.T) {
 	privateKey, publicKeyPEM := testSSOJWTKey(t)
 	server, db := newDesktopTestServerWithConfig(t, config.RelayConfig{
-		PublicBaseDomain:        "tunnel-hub.zenmind.cc",
-		DesktopPublicBaseDomain: "m.zenmind.cc",
+		PublicBaseDomain:        "hub.example.test",
+		DesktopPublicBaseDomain: "m.example.test",
+		WebAppPublicBaseDomain:  "example.test",
 		SSOJWTIssuer:            "https://official.example.test",
 		SSOJWTPublicKeyPEM:      publicKeyPEM,
-		SSOJWTAudience:          "zenmind-tunnel-hub-server",
+		SSOJWTAudience:          "tunnel-hub-server",
 	})
 	token := signTestSSOJWT(t, privateKey, testSSOJWTClaims{
 		Issuer:   "https://official.example.test",
-		Audience: "zenmind-tunnel-hub-server",
+		Audience: "tunnel-hub-server",
 		UserID:   "42",
 		Email:    "desktop@example.test",
 		Role:     "user",
@@ -127,7 +127,7 @@ func TestRegisterDesktopDeviceAcceptsSSOJWT(t *testing.T) {
 
 	wrongAudienceToken := signTestSSOJWT(t, privateKey, testSSOJWTClaims{
 		Issuer:   "https://official.example.test",
-		Audience: "zenmind-market-server",
+		Audience: "market-server",
 		UserID:   "42",
 		Email:    "desktop@example.test",
 		Role:     "user",
@@ -141,7 +141,7 @@ func TestRegisterDesktopDeviceAcceptsSSOJWT(t *testing.T) {
 
 	noScopeToken := signTestSSOJWT(t, privateKey, testSSOJWTClaims{
 		Issuer:   "https://official.example.test",
-		Audience: "zenmind-tunnel-hub-server",
+		Audience: "tunnel-hub-server",
 		UserID:   "42",
 		Email:    "desktop@example.test",
 		Role:     "user",
@@ -157,8 +157,9 @@ func TestRegisterDesktopDeviceAcceptsSSOJWT(t *testing.T) {
 func TestRegisterDesktopDeviceAcceptsRelaxedSSOJWT(t *testing.T) {
 	privateKey, publicKeyPEM := testSSOJWTKey(t)
 	server, _ := newDesktopTestServerWithConfig(t, config.RelayConfig{
-		PublicBaseDomain:        "tunnel-hub.zenmind.cc",
-		DesktopPublicBaseDomain: "m.zenmind.cc",
+		PublicBaseDomain:        "hub.example.test",
+		DesktopPublicBaseDomain: "m.example.test",
+		WebAppPublicBaseDomain:  "example.test",
 		SSOJWTIssuer:            "https://official.example.test",
 		SSOJWTPublicKeyPEM:      publicKeyPEM,
 		SSOJWTAudience:          "tunnel",
@@ -188,33 +189,20 @@ func TestRegisterDesktopDeviceReusesExistingDevice(t *testing.T) {
 		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
 	}
 	second := decodeRegisterResponse(t, rec.Body)
-	if second.Created {
-		t.Fatalf("unexpected reuse response: %+v", second)
-	}
-	if second.TokenID != first.TokenID {
-		t.Fatalf("token changed without rotate: %q -> %q", first.TokenID, second.TokenID)
+	if second.PublicHost != first.PublicHost || second.DeviceID != first.DeviceID {
+		t.Fatalf("registration was not idempotent: first=%+v second=%+v", first, second)
 	}
 	if _, err := db.GetRouteByHost(context.Background(), second.PublicHost); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("desktop registration should not create route, got %v", err)
 	}
 }
 
-func TestRegisterDesktopDeviceIgnoresLegacyDeviceSecret(t *testing.T) {
-	server, db := newDesktopTestServer(t)
+func TestRegisterDesktopDeviceRejectsLegacyFields(t *testing.T) {
+	server, _ := newDesktopTestServer(t)
 	firstBody := `{"deviceId":"mac-mini","deviceSecret":"old-secret","targetUrl":"http://127.0.0.1:7082","rotateToken":false}`
-	first := decodeRegisterResponse(t, performRegister(t, server, firstBody, defaultDesktopJWT).Body)
-
-	secondBody := `{"deviceId":"mac-mini","deviceSecret":"different-old-secret","targetUrl":"http://127.0.0.1:7083","rotateToken":false}`
-	rec := performRegister(t, server, secondBody, defaultDesktopJWT)
-	if rec.Code != http.StatusOK {
+	rec := performRegister(t, server, firstBody, defaultDesktopJWT)
+	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
-	}
-	second := decodeRegisterResponse(t, rec.Body)
-	if second.TokenID != first.TokenID {
-		t.Fatalf("legacy deviceSecret affected registration: %+v", second)
-	}
-	if _, err := db.GetRouteByHost(context.Background(), second.PublicHost); !errors.Is(err, store.ErrNotFound) {
-		t.Fatalf("desktop registration should not create route, got %v", err)
 	}
 }
 
@@ -223,7 +211,7 @@ func TestRegisterDesktopDeviceAllowsSameDeviceIDForDifferentOwners(t *testing.T)
 	first := decodeRegisterResponse(t, performRegister(t, server, desktopRegisterBody("mac-mini", "", false), defaultDesktopJWT).Body)
 	otherOwnerJWT := signTestSSOJWT(t, defaultDesktopPrivateKey, testSSOJWTClaims{
 		Issuer:   "https://official.example.test",
-		Audience: "zenmind-tunnel-hub-server",
+		Audience: "tunnel-hub-server",
 		UserID:   "43",
 		Email:    "other@example.test",
 		Role:     "user",
@@ -236,7 +224,7 @@ func TestRegisterDesktopDeviceAllowsSameDeviceIDForDifferentOwners(t *testing.T)
 		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
 	}
 	second := decodeRegisterResponse(t, rec.Body)
-	if !second.Created || second.PublicHost == first.PublicHost || second.TokenID == first.TokenID {
+	if second.PublicHost == first.PublicHost {
 		t.Fatalf("different owner should get an independent registration: first=%+v second=%+v", first, second)
 	}
 	assertDesktopPublicHost(t, second.PublicHost, "mac-mini")
@@ -248,9 +236,26 @@ func TestRegisterDesktopDeviceAllowsSameDeviceIDForDifferentOwners(t *testing.T)
 	}
 }
 
+func TestRegisterDesktopDeviceRejectsRotateToken(t *testing.T) {
+	server, db := newDesktopTestServer(t)
+	first := decodeRegisterResponse(t, performRegister(t, server, desktopRegisterBody("mac-mini", "", false), defaultDesktopJWT).Body)
+
+	rec := performRegister(t, server, `{"deviceId":"mac-mini","rotateToken":true}`, defaultDesktopJWT)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	device, err := db.GetDesktopDeviceByPublicHost(context.Background(), first.PublicHost)
+	if err != nil {
+		t.Fatalf("get desktop device: %v", err)
+	}
+	if device.DeviceID != first.DeviceID {
+		t.Fatalf("device changed after rejected request: %+v", device)
+	}
+}
+
 func TestRegisterDesktopWebAppCreatesWARoute(t *testing.T) {
 	server, db := newDesktopTestServer(t)
-	desktop := decodeRegisterResponse(t, performRegister(t, server, desktopRegisterBody("mac-mini", "", false), defaultDesktopJWT).Body)
+	_ = decodeRegisterResponse(t, performRegister(t, server, desktopRegisterBody("mac-mini", "", false), defaultDesktopJWT).Body)
 
 	rec := performRegisterWebApp(t, server, "mac-mini", "notes", `{"targetUrl":"http://127.0.0.1:5173"}`, defaultDesktopJWT)
 	if rec.Code != http.StatusOK {
@@ -264,12 +269,12 @@ func TestRegisterDesktopWebAppCreatesWARoute(t *testing.T) {
 	if response.PublicURL != "https://"+response.PublicHost || response.TargetURL != "http://127.0.0.1:5173" || !response.Active {
 		t.Fatalf("unexpected webapp response fields: %+v", response)
 	}
-	route, err := db.GetActiveRouteByHost(context.Background(), response.PublicHost)
+	joined, err := db.GetActiveDesktopWebAppRouteByHost(context.Background(), response.PublicHost)
 	if err != nil {
 		t.Fatalf("get webapp route: %v", err)
 	}
-	if route.TargetURL != "http://127.0.0.1:5173" || route.TokenID != desktop.TokenID {
-		t.Fatalf("unexpected webapp route: %+v", route)
+	if joined.Route.TargetURL != "http://127.0.0.1:5173" || joined.Route.TokenID != "" {
+		t.Fatalf("unexpected webapp route: %+v", joined.Route)
 	}
 }
 
@@ -285,13 +290,13 @@ func TestRegisterDesktopWebAppRequiresTargetURL(t *testing.T) {
 
 func TestDesktopPublicHostIgnoresLegacyMRoute(t *testing.T) {
 	server, db := newDesktopTestServer(t)
-	desktop := decodeRegisterResponse(t, performRegister(t, server, desktopRegisterBody("mac-mini", "", false), defaultDesktopJWT).Body)
-	if _, err := db.CreateRoute(context.Background(), "legacy.m.zenmind.cc", "http://127.0.0.1:7083", true, desktop.TokenID); err != nil {
+	_ = decodeRegisterResponse(t, performRegister(t, server, desktopRegisterBody("mac-mini", "", false), defaultDesktopJWT).Body)
+	_, token := createDesktopTestAgentToken(t, db, "legacy")
+	if _, err := db.CreateRoute(context.Background(), "legacy.m.example.test", "http://127.0.0.1:7083", true, token.ID); err != nil {
 		t.Fatalf("create legacy desktop route: %v", err)
 	}
 
-	relay := proxy.NewRelay(db, proxy.NewManager(), nil, 64<<20)
-	relay.SetPublicBaseDomains("m.zenmind.cc", "wa.zenmind.cc")
+	relay := proxy.NewRelay(db, proxy.NewManager(), nil, "example", "m.example.test", "example.test", 64<<20)
 	publicServer := httptest.NewServer(http.HandlerFunc(relay.HandlePublic))
 	defer publicServer.Close()
 
@@ -299,7 +304,7 @@ func TestDesktopPublicHostIgnoresLegacyMRoute(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new request: %v", err)
 	}
-	req.Host = "legacy.m.zenmind.cc"
+	req.Host = "legacy.m.example.test"
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("do public request: %v", err)
@@ -314,8 +319,7 @@ func TestDesktopPublicWebSocketOfflineReturnsGatewayError(t *testing.T) {
 	server, db := newDesktopTestServer(t)
 	registration := decodeRegisterResponse(t, performRegister(t, server, desktopRegisterBody("mac-mini", "", false), defaultDesktopJWT).Body)
 
-	relay := proxy.NewRelay(db, proxy.NewManager(), nil, 64<<20)
-	relay.SetPublicBaseDomains("m.zenmind.cc", "wa.zenmind.cc")
+	relay := proxy.NewRelay(db, proxy.NewManager(), nil, "example", "m.example.test", "example.test", 64<<20)
 	publicServer := httptest.NewServer(http.HandlerFunc(relay.HandlePublic))
 	defer publicServer.Close()
 
@@ -341,13 +345,13 @@ func TestDesktopRegistrationTunnelWebSocketIntegration(t *testing.T) {
 	db := openDesktopTestDB(t)
 	manager := proxy.NewManager()
 	cfg := desktopTestConfig(t)
-	relay := proxy.NewRelay(db, manager, nil, 64<<20)
-	relay.SetPublicBaseDomains(cfg.DesktopPublicBaseDomain, cfg.WebAppPublicBaseDomain)
-	desktopServer, err := NewServer(db, cfg, nil)
+	relay := proxy.NewRelay(db, manager, nil, "example", cfg.DesktopPublicBaseDomain, cfg.WebAppPublicBaseDomain, 64<<20)
+	verifier := desktopTestVerifier(t, cfg)
+	relay.SetDesktopIdentityVerifier(verifier, cfg.SSOJWTAllowMissingScope)
+	desktopServer, err := NewServer(db, cfg, nil, verifier)
 	if err != nil {
 		t.Fatalf("new desktop server: %v", err)
 	}
-	relay.SetDesktopIdentityVerifier(desktopServer.ssoJWT, cfg.SSOJWTAllowMissingScope)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.URL.Path == "/tunnel":
@@ -364,7 +368,7 @@ func TestDesktopRegistrationTunnelWebSocketIntegration(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go runFakeDesktopBroker(t, ctx, server.URL, defaultDesktopJWT)
-	waitForDesktopBroker(t, manager, registration.TokenID)
+	waitForDesktopDevice(t, manager, registration.DeviceID)
 
 	serverURL, err := url.Parse(server.URL)
 	if err != nil {
@@ -418,7 +422,7 @@ func TestDesktopPublicWebSocketQueryTokenMetadata(t *testing.T) {
 			StatusCode: http.StatusSwitchingProtocols,
 		}))
 	})
-	waitForDesktopBroker(t, manager, registration.TokenID)
+	waitForDesktopDevice(t, manager, registration.DeviceID)
 
 	client, _, err := dialDesktopPublicWebSocket(t, ctx, server.URL, registration.PublicHost, "/ws?room=1&token=query-token", nil)
 	if err != nil {
@@ -446,7 +450,7 @@ func TestDesktopPublicWebSocketBearerSubprotocolMetadata(t *testing.T) {
 			Headers:    http.Header{"Sec-WebSocket-Protocol": []string{"bearer.protocol-token"}},
 		}))
 	})
-	waitForDesktopBroker(t, manager, registration.TokenID)
+	waitForDesktopDevice(t, manager, registration.DeviceID)
 
 	client, resp, err := dialDesktopPublicWebSocket(t, ctx, server.URL, registration.PublicHost, "/ws", http.Header{
 		"Sec-WebSocket-Protocol": []string{"bearer.protocol-token"},
@@ -472,7 +476,7 @@ func TestDesktopPublicWebSocketNoTokenMapsDesktopError(t *testing.T) {
 		}
 		_ = tunnel.WriteJSON(stream, tunnel.NewErrorResponse(tunnel.NamespaceDesktop, tunnel.TypeDesktopWebSocketOpen, request.ID, http.StatusUnauthorized, "auth failed"))
 	})
-	waitForDesktopBroker(t, manager, registration.TokenID)
+	waitForDesktopDevice(t, manager, registration.DeviceID)
 
 	client, resp, err := dialDesktopPublicWebSocket(t, ctx, server.URL, registration.PublicHost, "/ws", nil)
 	if err == nil {
@@ -521,7 +525,7 @@ func TestDesktopMobileWebAppHTTPIntegration(t *testing.T) {
 			t.Errorf("authorization header leaked to webapp: %q", payload.Public.Headers.Get("Authorization"))
 			return
 		}
-		if strings.Contains(payload.Public.Headers.Get("Cookie"), "zenmind_mobile_session") {
+		if strings.Contains(payload.Public.Headers.Get("Cookie"), "example_mobile_session") {
 			t.Errorf("mobile session cookie leaked to webapp: %q", payload.Public.Headers.Get("Cookie"))
 			return
 		}
@@ -547,7 +551,7 @@ func TestDesktopMobileWebAppHTTPIntegration(t *testing.T) {
 			t.Errorf("write mobile webapp body: %v", err)
 		}
 	})
-	waitForDesktopBroker(t, manager, registration.TokenID)
+	waitForDesktopDevice(t, manager, registration.DeviceID)
 
 	req, err := http.NewRequest(http.MethodGet, server.URL+"/hello?source=m&token=paired-token", nil)
 	if err != nil {
@@ -634,7 +638,7 @@ func TestDesktopMobileWebAppUnknownLengthAndResponseHeaders(t *testing.T) {
 			t.Errorf("write mobile webapp body: %v", err)
 		}
 	})
-	waitForDesktopBroker(t, manager, registration.TokenID)
+	waitForDesktopDevice(t, manager, registration.DeviceID)
 
 	req, err := http.NewRequest(http.MethodGet, server.URL+"/start", nil)
 	if err != nil {
@@ -705,7 +709,7 @@ func TestDesktopMobileWebAppWebSocketIntegration(t *testing.T) {
 			t.Errorf("write mobile websocket frame: %v", err)
 		}
 	})
-	waitForDesktopBroker(t, manager, registration.TokenID)
+	waitForDesktopDevice(t, manager, registration.DeviceID)
 
 	client, _, err := dialDesktopPublicWebSocket(t, ctx, server.URL, publicHost, "/socket?room=1&token=paired-token", nil)
 	if err != nil {
@@ -730,7 +734,7 @@ func TestDesktopMobileWebAppUnknownHostDoesNotSetSessionCookie(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new mobile webapp request: %v", err)
 	}
-	req.Host = "missing-43210.m.zenmind.cc"
+	req.Host = "missing-43210.m.example.test"
 	client := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error {
 		return http.ErrUseLastResponse
 	}}
@@ -762,13 +766,13 @@ func TestDesktopRegistrationWebAppHTTPIntegration(t *testing.T) {
 	db := openDesktopTestDB(t)
 	manager := proxy.NewManager()
 	cfg := desktopTestConfig(t)
-	relay := proxy.NewRelay(db, manager, nil, 64<<20)
-	relay.SetPublicBaseDomains(cfg.DesktopPublicBaseDomain, cfg.WebAppPublicBaseDomain)
-	desktopServer, err := NewServer(db, cfg, nil)
+	relay := proxy.NewRelay(db, manager, nil, "example", cfg.DesktopPublicBaseDomain, cfg.WebAppPublicBaseDomain, 64<<20)
+	verifier := desktopTestVerifier(t, cfg)
+	relay.SetDesktopIdentityVerifier(verifier, cfg.SSOJWTAllowMissingScope)
+	desktopServer, err := NewServer(db, cfg, nil, verifier)
 	if err != nil {
 		t.Fatalf("new desktop server: %v", err)
 	}
-	relay.SetDesktopIdentityVerifier(desktopServer.ssoJWT, cfg.SSOJWTAllowMissingScope)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.URL.Path == "/tunnel":
@@ -787,7 +791,7 @@ func TestDesktopRegistrationWebAppHTTPIntegration(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go runFakeWebAppTunnelClient(t, ctx, server.URL, defaultDesktopJWT, handleFakeWebAppHTTPStream)
-	waitForDesktopBroker(t, manager, registration.TokenID)
+	waitForDesktopDevice(t, manager, registration.DeviceID)
 
 	req, err := http.NewRequest(http.MethodGet, server.URL+"/hello?source=wa", nil)
 	if err != nil {
@@ -837,13 +841,13 @@ func TestDesktopRegistrationWebAppWebSocketIntegration(t *testing.T) {
 	db := openDesktopTestDB(t)
 	manager := proxy.NewManager()
 	cfg := desktopTestConfig(t)
-	relay := proxy.NewRelay(db, manager, nil, 64<<20)
-	relay.SetPublicBaseDomains(cfg.DesktopPublicBaseDomain, cfg.WebAppPublicBaseDomain)
-	desktopServer, err := NewServer(db, cfg, nil)
+	relay := proxy.NewRelay(db, manager, nil, "example", cfg.DesktopPublicBaseDomain, cfg.WebAppPublicBaseDomain, 64<<20)
+	verifier := desktopTestVerifier(t, cfg)
+	relay.SetDesktopIdentityVerifier(verifier, cfg.SSOJWTAllowMissingScope)
+	desktopServer, err := NewServer(db, cfg, nil, verifier)
 	if err != nil {
 		t.Fatalf("new desktop server: %v", err)
 	}
-	relay.SetDesktopIdentityVerifier(desktopServer.ssoJWT, cfg.SSOJWTAllowMissingScope)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.URL.Path == "/tunnel":
@@ -862,7 +866,7 @@ func TestDesktopRegistrationWebAppWebSocketIntegration(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go runFakeWebAppTunnelClient(t, ctx, server.URL, defaultDesktopJWT, handleFakeWebAppWebSocketStream)
-	waitForDesktopBroker(t, manager, registration.TokenID)
+	waitForDesktopDevice(t, manager, registration.DeviceID)
 
 	serverURL, err := url.Parse(server.URL)
 	if err != nil {
@@ -907,7 +911,7 @@ func runFakeDesktopBroker(t *testing.T, ctx context.Context, relayURL, token str
 	open := tunnel.NewStreamRequest(tunnel.NamespaceDesktop, tunnel.FrameRequest, tunnel.TypeTunnelOpen, "tun_test", &tunnel.StreamPayload{
 		IdentityToken: token,
 		DeviceID:      "mac-mini",
-		Client:        "zenmind-desktop",
+		Client:        "example-desktop",
 		Capabilities: []string{
 			"desktop.websocket",
 			"webapp.http",
@@ -988,7 +992,7 @@ func runFakeDesktopBrokerWithHandler(t *testing.T, ctx context.Context, relayURL
 	open := tunnel.NewStreamRequest(tunnel.NamespaceDesktop, tunnel.FrameRequest, tunnel.TypeTunnelOpen, "tun_test", &tunnel.StreamPayload{
 		IdentityToken: token,
 		DeviceID:      "mac-mini",
-		Client:        "zenmind-desktop",
+		Client:        "example-desktop",
 		Capabilities: []string{
 			"desktop.websocket",
 		},
@@ -1041,7 +1045,7 @@ func runFakeWebAppTunnelClient(t *testing.T, ctx context.Context, relayURL, toke
 	open := tunnel.NewStreamRequest(tunnel.NamespaceDesktop, tunnel.FrameRequest, tunnel.TypeTunnelOpen, "tun_test", &tunnel.StreamPayload{
 		IdentityToken: token,
 		DeviceID:      "mac-mini",
-		Client:        "zenmind-desktop",
+		Client:        "example-desktop",
 		Capabilities: []string{
 			"webapp.http",
 			"webapp.websocket",
@@ -1199,13 +1203,13 @@ func newDesktopRelayIntegrationServer(t *testing.T) (*proxy.Manager, *httptest.S
 	db := openDesktopTestDB(t)
 	manager := proxy.NewManager()
 	cfg := desktopTestConfig(t)
-	relay := proxy.NewRelay(db, manager, nil, 64<<20)
-	relay.SetPublicBaseDomains(cfg.DesktopPublicBaseDomain, cfg.WebAppPublicBaseDomain)
-	desktopServer, err := NewServer(db, cfg, nil)
+	relay := proxy.NewRelay(db, manager, nil, "example", cfg.DesktopPublicBaseDomain, cfg.WebAppPublicBaseDomain, 64<<20)
+	verifier := desktopTestVerifier(t, cfg)
+	relay.SetDesktopIdentityVerifier(verifier, cfg.SSOJWTAllowMissingScope)
+	desktopServer, err := NewServer(db, cfg, nil, verifier)
 	if err != nil {
 		t.Fatalf("new desktop server: %v", err)
 	}
-	relay.SetDesktopIdentityVerifier(desktopServer.ssoJWT, cfg.SSOJWTAllowMissingScope)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.URL.Path == "/tunnel":
@@ -1245,24 +1249,45 @@ func newDesktopTestServer(t *testing.T) (*Server, *store.DB) {
 func newDesktopTestServerWithConfig(t *testing.T, cfg config.RelayConfig) (*Server, *store.DB) {
 	t.Helper()
 	db := openDesktopTestDB(t)
-	server, err := NewServer(db, cfg, nil)
+	server, err := NewServer(db, cfg, nil, desktopTestVerifier(t, cfg))
 	if err != nil {
 		t.Fatalf("new desktop server: %v", err)
 	}
+	server.SetConversationShareRenderer(testConversationShareRenderer{})
 	return server, db
+}
+
+type testConversationShareRenderer struct{}
+
+func (testConversationShareRenderer) Render(snapshot []byte, _, _, _, _ string) ([]byte, error) {
+	return append([]byte(nil), snapshot...), nil
+}
+
+func desktopTestVerifier(t *testing.T, cfg config.RelayConfig) *auth.SSOJWTVerifier {
+	t.Helper()
+	verifier, err := auth.NewSSOJWTVerifier(auth.SSOJWTConfig{
+		Issuer: cfg.SSOJWTIssuer, Audience: cfg.SSOJWTAudience, UserIDClaim: cfg.SSOJWTUserIDClaim,
+		AllowAnyAudience: cfg.SSOJWTAllowAnyAudience, PublicKeyFile: cfg.SSOJWTPublicKeyFile, PublicKeyPEM: cfg.SSOJWTPublicKeyPEM,
+	})
+	if err != nil {
+		t.Fatalf("new SSO verifier: %v", err)
+	}
+	return verifier
 }
 
 func openDesktopTestDB(t *testing.T) *store.DB {
 	t.Helper()
-	db, err := store.Open(":memory:")
+	return dbtest.Open(t)
+}
+
+func createDesktopTestAgentToken(t *testing.T, db *store.DB, name string) (string, store.TunnelToken) {
+	t.Helper()
+	raw := "zt_test_" + name
+	token, err := db.CreateToken(context.Background(), name, raw)
 	if err != nil {
-		t.Fatalf("open db: %v", err)
+		t.Fatalf("create agent token: %v", err)
 	}
-	t.Cleanup(func() { _ = db.Close() })
-	if err := db.Migrate(context.Background()); err != nil {
-		t.Fatalf("migrate: %v", err)
-	}
-	return db
+	return raw, token
 }
 
 func desktopTestConfig(t *testing.T) config.RelayConfig {
@@ -1271,7 +1296,7 @@ func desktopTestConfig(t *testing.T) config.RelayConfig {
 	defaultDesktopPrivateKey = privateKey
 	defaultDesktopJWT = signTestSSOJWT(t, privateKey, testSSOJWTClaims{
 		Issuer:   "https://official.example.test",
-		Audience: "zenmind-tunnel-hub-server",
+		Audience: "tunnel-hub-server",
 		UserID:   "42",
 		Email:    "desktop@example.test",
 		Role:     "user",
@@ -1279,22 +1304,34 @@ func desktopTestConfig(t *testing.T) config.RelayConfig {
 		Expires:  time.Now().Add(time.Hour),
 	})
 	return config.RelayConfig{
-		PublicBaseDomain:        "tunnel-hub.zenmind.cc",
-		DesktopPublicBaseDomain: "m.zenmind.cc",
-		SSOJWTIssuer:            "https://official.example.test",
-		SSOJWTPublicKeyPEM:      publicKeyPEM,
-		SSOJWTAudience:          "zenmind-tunnel-hub-server",
+		PublicBaseDomain:             "hub.example.test",
+		DesktopPublicBaseDomain:      "m.example.test",
+		WebAppPublicBaseDomain:       "example.test",
+		SSOJWTIssuer:                 "https://official.example.test",
+		SSOJWTPublicKeyPEM:           publicKeyPEM,
+		SSOJWTAudience:               "tunnel-hub-server",
+		ConversationShareResourceDir: t.TempDir(),
 	}
 }
 
 func assertDesktopPublicHost(t *testing.T, publicHost, deviceID string) {
 	t.Helper()
-	assertGeneratedPublicHost(t, publicHost, "m.zenmind.cc", deviceID)
+	assertGeneratedPublicHost(t, publicHost, "m.example.test", deviceID)
 }
 
 func assertWebAppPublicHost(t *testing.T, publicHost string) {
 	t.Helper()
-	assertGeneratedPublicHost(t, publicHost, "wa.zenmind.cc", "")
+	suffix := "-wa.example.test"
+	if !strings.HasSuffix(publicHost, suffix) {
+		t.Fatalf("publicHost = %q, want *%s", publicHost, suffix)
+	}
+	label := strings.TrimSuffix(publicHost, suffix)
+	if len(label) != 13 {
+		t.Fatalf("publicHost label = %q, want 13 characters", label)
+	}
+	if !isLowercaseBase32Label(label) {
+		t.Fatalf("publicHost label = %q, want lowercase base32 [a-z2-7]+", label)
+	}
 }
 
 func assertGeneratedPublicHost(t *testing.T, publicHost, baseDomain, forbiddenFragment string) {
@@ -1464,22 +1501,22 @@ func decodeWebAppResponse(t *testing.T, body io.Reader) webAppResponse {
 	return response
 }
 
-func desktopRegisterBody(deviceID, targetURL string, _ bool) string {
-	return `{"deviceId":"` + deviceID + `","targetUrl":"` + targetURL + `"}`
+func desktopRegisterBody(deviceID, targetURL string, rotateToken bool) string {
+	return `{"deviceId":"` + deviceID + `","deviceName":"Test Desktop"}`
 }
 
-func waitForDesktopBroker(t *testing.T, manager *proxy.Manager, tokenID string) {
+func waitForDesktopDevice(t *testing.T, manager *proxy.Manager, deviceID string) {
 	t.Helper()
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
-		for _, agent := range manager.ActiveAgents() {
-			if agent.TokenID == tokenID {
+		for _, active := range manager.ActiveTunnels() {
+			if active.Kind == proxy.ConnectionKindDesktop && active.ConnectionID != "" {
 				return
 			}
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	t.Fatalf("Desktop broker %s did not connect", tokenID)
+	t.Fatalf("desktop device %s did not connect", deviceID)
 }
 
 func waitForTrafficEvent(t *testing.T, db *store.DB, objectType, publicHost, kind string) store.TrafficEvent {

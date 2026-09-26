@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io/fs"
 	"log"
 	"log/slog"
@@ -10,45 +11,67 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
-	"github.com/linlay/zenmind-tunnel-server/internal/admin"
-	"github.com/linlay/zenmind-tunnel-server/internal/auth"
-	"github.com/linlay/zenmind-tunnel-server/internal/config"
-	desktopapi "github.com/linlay/zenmind-tunnel-server/internal/desktop"
-	"github.com/linlay/zenmind-tunnel-server/internal/proxy"
-	"github.com/linlay/zenmind-tunnel-server/internal/store"
-	"github.com/linlay/zenmind-tunnel-server/internal/tunnel"
+	"example.invalid/tunnel-hub-server/internal/admin"
+	"example.invalid/tunnel-hub-server/internal/auth"
+	"example.invalid/tunnel-hub-server/internal/config"
+	desktopapi "example.invalid/tunnel-hub-server/internal/desktop"
+	"example.invalid/tunnel-hub-server/internal/proxy"
+	"example.invalid/tunnel-hub-server/internal/shareassets"
+	"example.invalid/tunnel-hub-server/internal/store"
+	"example.invalid/tunnel-hub-server/internal/tunnel"
 )
 
 func main() {
-	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
-	cfg := config.LoadRelayConfig()
+	if err := run(); err != nil {
+		log.Fatal(err)
+	}
+}
 
-	db, err := store.Open(cfg.DatabasePath)
+func run() error {
+	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
+	cfg, err := config.LoadRelayConfigStrict()
 	if err != nil {
-		log.Fatalf("open db: %v", err)
+		return fmt.Errorf("load config: %w", err)
+	}
+
+	var db *store.DB
+	switch cfg.DatabaseType {
+	case config.DatabaseSQLite:
+		db, err = store.OpenSQLite(context.Background(), cfg.SQLitePath)
+	default:
+		db, err = store.Open(context.Background(), cfg.MySQL)
+	}
+	if err != nil {
+		return fmt.Errorf("open db: %w", err)
 	}
 	defer db.Close()
-	if err := db.Migrate(context.Background()); err != nil {
-		log.Fatalf("migrate db: %v", err)
+	startup, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := db.Migrate(startup, cfg.ConversationShareResourceDir); err != nil {
+		return fmt.Errorf("migrate db: %w", err)
 	}
 	if cfg.AdminPassword != "" {
-		user, created, err := db.EnsureAdminUser(context.Background(), cfg.AdminUsername, cfg.AdminPassword)
+		user, created, err := db.EnsureAdminUser(startup, cfg.AdminUsername, cfg.AdminPassword)
 		if err != nil {
-			log.Fatalf("bootstrap admin user: %v", err)
+			return fmt.Errorf("bootstrap admin user: %w", err)
 		}
 		if created {
 			logger.Info("created bootstrap admin user", "username", user.Username)
 		}
-	} else if count, err := db.AdminUserCount(context.Background()); err == nil && count == 0 {
-		logger.Info("no local admin users configured; set ADMIN_USERNAME and ADMIN_PASSWORD to enable direct admin login")
+	} else {
+		count, err := db.AdminUserCount(startup)
+		if err != nil {
+			return fmt.Errorf("count admin users: %w", err)
+		}
+		if count == 0 {
+			logger.Info("no local admin users configured; set ADMIN_USERNAME and ADMIN_PASSWORD to enable direct admin login")
+		}
 	}
+	cancel()
 	manager := proxy.NewManager()
-	relay := proxy.NewRelay(db, manager, logger, cfg.MaxRequestBodyBytes)
-	relay.SetPublicBaseDomains(cfg.DesktopPublicBaseDomain, cfg.WebAppPublicBaseDomain)
-	relay.SetMobileWebAppCookieSecure(cfg.MobileWebAppCookieSecure)
-	relay.SetTrustedProxyCIDRs(cfg.TrustedProxyCIDRs)
-	desktopIdentityVerifier, err := auth.NewSSOJWTVerifier(auth.SSOJWTConfig{
+	ssoJWT, err := auth.NewSSOJWTVerifier(auth.SSOJWTConfig{
 		Issuer:           cfg.SSOJWTIssuer,
 		Audience:         cfg.SSOJWTAudience,
 		UserIDClaim:      cfg.SSOJWTUserIDClaim,
@@ -57,17 +80,25 @@ func main() {
 		PublicKeyPEM:     cfg.SSOJWTPublicKeyPEM,
 	})
 	if err != nil {
-		log.Fatalf("configure Desktop tunnel identity verifier: %v", err)
+		return fmt.Errorf("configure SSO JWT verifier: %w", err)
 	}
-	relay.SetDesktopIdentityVerifier(desktopIdentityVerifier, cfg.SSOJWTAllowMissingScope)
-	adminServer, err := admin.NewServer(db, manager, cfg, logger)
+	relay := proxy.NewRelay(db, manager, logger, cfg.BrandID, cfg.DesktopPublicBaseDomain, cfg.WebAppPublicBaseDomain, cfg.MaxRequestBodyBytes)
+	relay.SetDesktopIdentityVerifier(ssoJWT, cfg.SSOJWTAllowMissingScope)
+	relay.SetMobileWebAppCookieSecure(cfg.MobileWebAppCookieSecure)
+	relay.SetTrustedProxyCIDRs(cfg.TrustedProxyCIDRs)
+	adminServer, err := admin.NewServer(db, manager, cfg, logger, ssoJWT)
 	if err != nil {
-		log.Fatalf("configure admin server: %v", err)
+		return fmt.Errorf("configure admin server: %w", err)
 	}
-	desktopServer, err := desktopapi.NewServer(db, cfg, logger)
+	desktopServer, err := desktopapi.NewServer(db, cfg, logger, ssoJWT)
 	if err != nil {
-		log.Fatalf("configure desktop server: %v", err)
+		return fmt.Errorf("configure desktop server: %w", err)
 	}
+	cleanupContext, stopCleanup := context.WithCancel(context.Background())
+	defer stopCleanup()
+	go desktopServer.RunConversationShareCleanup(cleanupContext)
+	conversationAssets := shareassets.NewBundle()
+	desktopServer.SetConversationShareRenderer(conversationAssets)
 	static := staticHandler(cfg.WebsiteDist)
 
 	root := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -86,7 +117,9 @@ func main() {
 			http.NotFound(w, r)
 		case r.URL.Path == "/api/components":
 			adminServer.ServeComponents(w, r)
-		case strings.HasPrefix(r.URL.Path, "/api/desktop") || strings.HasPrefix(r.URL.Path, "/api/public/shares/"):
+		case strings.HasPrefix(r.URL.Path, shareassets.PublicPathPrefix):
+			conversationAssets.ServeHTTP(w, r)
+		case strings.HasPrefix(r.URL.Path, "/api/desktop") || strings.HasPrefix(r.URL.Path, "/share/"):
 			desktopServer.ServeHTTP(w, r)
 		case strings.HasPrefix(r.URL.Path, "/api/admin"):
 			adminServer.ServeHTTP(w, r)
@@ -97,10 +130,15 @@ func main() {
 		}
 	})
 
-	logger.Info("relay listening", "addr", cfg.Addr, "db", cfg.DatabasePath)
-	if err := http.ListenAndServe(cfg.Addr, root); err != nil && !errors.Is(err, http.ErrServerClosed) {
-		log.Fatalf("listen: %v", err)
+	if cfg.DatabaseType == config.DatabaseSQLite {
+		logger.Info("relay listening", "addr", cfg.Addr, "database_type", string(cfg.DatabaseType), "sqlite_path", cfg.SQLitePath)
+	} else {
+		logger.Info("relay listening", "addr", cfg.Addr, "mysql_host", cfg.MySQL.Host, "mysql_port", cfg.MySQL.Port, "mysql_database", cfg.MySQL.Database)
 	}
+	if err := http.ListenAndServe(cfg.Addr, root); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		return fmt.Errorf("listen: %w", err)
+	}
+	return nil
 }
 
 func staticHandler(dist string) http.Handler {

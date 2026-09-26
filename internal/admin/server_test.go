@@ -19,11 +19,12 @@ import (
 	"testing"
 	"time"
 
+	"example.invalid/tunnel-hub-server/internal/auth"
+	"example.invalid/tunnel-hub-server/internal/config"
+	"example.invalid/tunnel-hub-server/internal/proxy"
+	"example.invalid/tunnel-hub-server/internal/store"
+	"example.invalid/tunnel-hub-server/internal/testutil/dbtest"
 	"github.com/hashicorp/yamux"
-	"github.com/linlay/zenmind-tunnel-server/internal/auth"
-	"github.com/linlay/zenmind-tunnel-server/internal/config"
-	"github.com/linlay/zenmind-tunnel-server/internal/proxy"
-	"github.com/linlay/zenmind-tunnel-server/internal/store"
 )
 
 var defaultAdminJWT string
@@ -45,15 +46,15 @@ func TestLegacyAdminAPIKeyBearerAuthRejected(t *testing.T) {
 func TestAdminSSOJWTBearerAuth(t *testing.T) {
 	privateKey, publicKeyPEM := testSSOJWTKey(t)
 	server, _ := newAdminTestServerWithConfig(t, config.RelayConfig{
-		PublicBaseDomain:   "tunnel-hub.zenmind.cc",
+		PublicBaseDomain:   "hub.example.test",
 		SSOJWTIssuer:       "https://official.example.test",
 		SSOJWTPublicKeyPEM: publicKeyPEM,
-		SSOJWTAudience:     "zenmind-tunnel-hub-server",
+		SSOJWTAudience:     "tunnel-hub-server",
 	})
 
 	adminToken := signTestSSOJWT(t, privateKey, testSSOJWTClaims{
 		Issuer:   "https://official.example.test",
-		Audience: "zenmind-tunnel-hub-server",
+		Audience: "tunnel-hub-server",
 		UserID:   "1",
 		Email:    "admin@example.test",
 		Role:     "admin",
@@ -70,7 +71,7 @@ func TestAdminSSOJWTBearerAuth(t *testing.T) {
 
 	wrongAudienceToken := signTestSSOJWT(t, privateKey, testSSOJWTClaims{
 		Issuer:   "https://official.example.test",
-		Audience: "zenmind-market-server",
+		Audience: "market-server",
 		UserID:   "1",
 		Email:    "admin@example.test",
 		Role:     "admin",
@@ -89,7 +90,7 @@ func TestAdminSSOJWTBearerAuth(t *testing.T) {
 func TestAdminSSOJWTRelaxedCompatibility(t *testing.T) {
 	privateKey, publicKeyPEM := testSSOJWTKey(t)
 	server, _ := newAdminTestServerWithConfig(t, config.RelayConfig{
-		PublicBaseDomain:        "tunnel-hub.zenmind.cc",
+		PublicBaseDomain:        "hub.example.test",
 		SSOJWTIssuer:            "https://official.example.test",
 		SSOJWTPublicKeyPEM:      publicKeyPEM,
 		SSOJWTAudience:          "tunnel",
@@ -245,14 +246,14 @@ func TestAdminUsersManagement(t *testing.T) {
 func TestAdminJWTRejectsMissingOrInvalidClaims(t *testing.T) {
 	privateKey, publicKeyPEM := testSSOJWTKey(t)
 	server, _ := newAdminTestServerWithConfig(t, config.RelayConfig{
-		PublicBaseDomain:   "tunnel-hub.zenmind.cc",
+		PublicBaseDomain:   "hub.example.test",
 		SSOJWTIssuer:       "https://official.example.test",
 		SSOJWTPublicKeyPEM: publicKeyPEM,
-		SSOJWTAudience:     "zenmind-tunnel-hub-server",
+		SSOJWTAudience:     "tunnel-hub-server",
 	})
 	validClaims := testSSOJWTClaims{
 		Issuer:   "https://official.example.test",
-		Audience: "zenmind-tunnel-hub-server",
+		Audience: "tunnel-hub-server",
 		UserID:   "1",
 		Email:    "admin@example.test",
 		Role:     "admin",
@@ -298,7 +299,7 @@ func TestAdminAPIKeyEndpointRemoved(t *testing.T) {
 	}
 }
 
-func TestManualTokenCreationDisabledAndDesktopRegistrationStillCreatesBrokerIdentity(t *testing.T) {
+func TestManualTokenCreationDisabledAndDesktopRegistrationCreatesNoToken(t *testing.T) {
 	server, db := newAdminTestServer(t)
 	req := authedAdminRequest(http.MethodPost, "/api/admin/tokens", `{"name":"manual"}`)
 	rec := httptest.NewRecorder()
@@ -313,13 +314,14 @@ func TestManualTokenCreationDisabledAndDesktopRegistrationStillCreatesBrokerIden
 		DeviceName:  "Mac Mini",
 		OwnerUserID: "42",
 		OwnerEmail:  "desktop@example.test",
-		PublicHost:  "desk.m.zenmind.cc",
+		PublicHost:  "desk.m.example.test",
 	})
 	if err != nil {
 		t.Fatalf("register desktop device: %v", err)
 	}
-	if registration.Token.ID == "" || !registration.Created {
-		t.Fatalf("registration should still create an internal broker identity: %+v", registration)
+	tokens, err := db.ListTokens(context.Background())
+	if err != nil || len(tokens) != 0 || !registration.Created {
+		t.Fatalf("desktop registration created a token: registration=%+v tokens=%+v err=%v", registration, tokens, err)
 	}
 }
 
@@ -332,7 +334,7 @@ func TestConsoleAggregationEndpoints(t *testing.T) {
 		OwnerUserID: "42",
 		OwnerEmail:  "desktop@example.test",
 		OwnerName:   "Lin",
-		PublicHost:  "desk.m.zenmind.cc",
+		PublicHost:  "desk.m.example.test",
 	})
 	if err != nil {
 		t.Fatalf("register desktop: %v", err)
@@ -341,22 +343,22 @@ func TestConsoleAggregationEndpoints(t *testing.T) {
 		OwnerUserID: "42",
 		DeviceID:    "mac-mini",
 		Name:        "notes",
-		PublicHost:  "notes.wa.zenmind.cc",
+		PublicHost:  "abcdefghijk23-wa.example.test",
 		TargetURL:   "http://127.0.0.1:5173",
 		Active:      true,
 	})
 	if err != nil {
 		t.Fatalf("register webapp: %v", err)
 	}
-	sessionRecord, err := db.CreateAgentSession(ctx, registration.Token.ID, "127.0.0.1:50000")
+	sessionRecord, err := db.CreateDesktopSession(ctx, registration.Device, "127.0.0.1:50000")
 	if err != nil {
 		t.Fatalf("create agent session: %v", err)
 	}
 	activeYamux, peer := newAdminTestSession(t)
 	defer peer.Close()
-	server.Manager.SetActive(&proxy.ActiveAgent{
+	server.Manager.SetActive(&proxy.ActiveTunnel{
 		SessionID:   sessionRecord.ID,
-		TokenID:     registration.Token.ID,
+		Key:         proxy.DesktopConnectionKey(registration.Device.DeviceKey),
 		RemoteAddr:  sessionRecord.RemoteAddr,
 		ConnectedAt: sessionRecord.ConnectedAt,
 		Yamux:       activeYamux,
@@ -365,7 +367,7 @@ func TestConsoleAggregationEndpoints(t *testing.T) {
 		ObjectType: "webapp",
 		PublicHost: webapp.Route.PublicHost,
 		RouteID:    webapp.Route.ID,
-		TokenID:    registration.Token.ID,
+		DeviceID:   registration.Device.DeviceKey,
 		SessionID:  sessionRecord.ID,
 		Kind:       "http",
 		Method:     http.MethodGet,
@@ -411,7 +413,7 @@ func TestConsoleAggregationEndpoints(t *testing.T) {
 	if err := json.NewDecoder(desktopsRec.Body).Decode(&desktops); err != nil {
 		t.Fatalf("decode desktops: %v", err)
 	}
-	if len(desktops) != 1 || desktops[0].PublicHost != "desk.m.zenmind.cc" || !desktops[0].Online || desktops[0].SessionID != sessionRecord.ID || desktops[0].Traffic.BytesOut != 222 {
+	if len(desktops) != 1 || desktops[0].PublicHost != "desk.m.example.test" || !desktops[0].Online || desktops[0].SessionID != sessionRecord.ID || desktops[0].Traffic.BytesOut != 222 {
 		t.Fatalf("unexpected desktops: %+v", desktops)
 	}
 
@@ -425,11 +427,11 @@ func TestConsoleAggregationEndpoints(t *testing.T) {
 	if err := json.NewDecoder(webappsRec.Body).Decode(&webapps); err != nil {
 		t.Fatalf("decode webapps: %v", err)
 	}
-	if len(webapps) != 1 || webapps[0].PublicHost != "notes.wa.zenmind.cc" || !webapps[0].Online || webapps[0].Traffic.BytesIn != 111 || webapps[0].Route.ID != webapp.Route.ID {
+	if len(webapps) != 1 || webapps[0].PublicHost != "abcdefghijk23-wa.example.test" || !webapps[0].Online || webapps[0].Traffic.BytesIn != 111 || webapps[0].Route.ID != webapp.Route.ID {
 		t.Fatalf("unexpected webapps: %+v", webapps)
 	}
 
-	activityReq := authedAdminRequest(http.MethodGet, "/api/admin/activity?objectType=webapp&q=notes", "")
+	activityReq := authedAdminRequest(http.MethodGet, "/api/admin/activity?objectType=webapp&q=abcdefghijk23", "")
 	activityRec := httptest.NewRecorder()
 	server.ServeHTTP(activityRec, activityReq)
 	if activityRec.Code != http.StatusOK {
@@ -506,9 +508,9 @@ func TestSessionCloseEndpoint(t *testing.T) {
 	}
 	activeYamux, peer := newAdminTestSession(t)
 	defer peer.Close()
-	server.Manager.SetActive(&proxy.ActiveAgent{
+	server.Manager.SetActive(&proxy.ActiveTunnel{
 		SessionID:   activeRecord.ID,
-		TokenID:     token.ID,
+		Key:         proxy.AgentConnectionKey(token.ID),
 		RemoteAddr:  activeRecord.RemoteAddr,
 		ConnectedAt: activeRecord.ConnectedAt,
 		Yamux:       activeYamux,
@@ -543,10 +545,10 @@ func TestServicePublishUpsertsManagedRoute(t *testing.T) {
 		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
 	}
 	created := decodeServiceResponse(t, rec)
-	if created.PublicHost != "auditor.tunnel-hub.zenmind.cc" {
+	if created.PublicHost != "auditor.hub.example.test" {
 		t.Fatalf("publicHost = %q", created.PublicHost)
 	}
-	if created.PublicURL != "https://auditor.tunnel-hub.zenmind.cc" {
+	if created.PublicURL != "https://auditor.hub.example.test" {
 		t.Fatalf("publicUrl = %q", created.PublicURL)
 	}
 	if created.Route.TargetURL != "http://127.0.0.1:3000" || !created.Route.Active {
@@ -570,7 +572,7 @@ func TestServicePublishUpsertsManagedRoute(t *testing.T) {
 	if updated.Route.TargetURL != "http://127.0.0.1:4000" || updated.Route.Active {
 		t.Fatalf("unexpected updated route: %+v", updated.Route)
 	}
-	route, err := db.GetRouteByHost(context.Background(), "auditor.tunnel-hub.zenmind.cc")
+	route, err := db.GetRouteByHost(context.Background(), "auditor.hub.example.test")
 	if err != nil {
 		t.Fatalf("get route by host: %v", err)
 	}
@@ -642,7 +644,7 @@ func TestServicePublishValidation(t *testing.T) {
 func TestCreateRouteRequiresActiveToken(t *testing.T) {
 	server, db := newAdminTestServer(t)
 	token := createAdminTestToken(t, db, "mac-mini")
-	req := authedAdminRequest(http.MethodPost, "/api/admin/routes", fmt.Sprintf(`{"publicHost":"app.example.com","targetUrl":"http://127.0.0.1:3000","active":true,"tokenId":%q}`, token.ID))
+	req := authedAdminRequest(http.MethodPost, "/api/admin/routes", fmt.Sprintf(`{"publicHost":"app.example.test","targetUrl":"http://127.0.0.1:3000","active":true,"tokenId":%q}`, token.ID))
 	rec := httptest.NewRecorder()
 
 	server.ServeHTTP(rec, req)
@@ -658,7 +660,7 @@ func TestCreateRouteRequiresActiveToken(t *testing.T) {
 		t.Fatalf("route token id = %q", route.TokenID)
 	}
 
-	req = authedAdminRequest(http.MethodPost, "/api/admin/routes", `{"publicHost":"bad.example.com","targetUrl":"http://127.0.0.1:3000","active":true}`)
+	req = authedAdminRequest(http.MethodPost, "/api/admin/routes", `{"publicHost":"bad.example.test","targetUrl":"http://127.0.0.1:3000","active":true}`)
 	rec = httptest.NewRecorder()
 	server.ServeHTTP(rec, req)
 	if rec.Code != http.StatusBadRequest {
@@ -669,14 +671,14 @@ func TestCreateRouteRequiresActiveToken(t *testing.T) {
 func TestAgentsEndpointCombinesTokenConnectionAndRoutes(t *testing.T) {
 	server, db := newAdminTestServer(t)
 	token := createAdminTestToken(t, db, "mac-mini")
-	if _, err := db.CreateRoute(context.Background(), "app.example.com", "http://127.0.0.1:3000", true, token.ID); err != nil {
+	if _, err := db.CreateRoute(context.Background(), "app.example.test", "http://127.0.0.1:3000", true, token.ID); err != nil {
 		t.Fatalf("create route: %v", err)
 	}
 	session, peer := newAdminTestSession(t)
 	connectedAt := time.Now().UTC()
-	server.Manager.SetActive(&proxy.ActiveAgent{
+	server.Manager.SetActive(&proxy.ActiveTunnel{
 		SessionID:   "session_1",
-		TokenID:     token.ID,
+		Key:         proxy.AgentConnectionKey(token.ID),
 		RemoteAddr:  "127.0.0.1:50000",
 		ConnectedAt: connectedAt,
 		Yamux:       session,
@@ -702,7 +704,7 @@ func TestAgentsEndpointCombinesTokenConnectionAndRoutes(t *testing.T) {
 func TestComponentsEndpointIsPublicAndRedactsSensitiveFields(t *testing.T) {
 	server, db := newAdminTestServer(t)
 	token := createAdminTestToken(t, db, "mac-mini")
-	if _, err := db.CreateRoute(context.Background(), "app.example.com", "http://127.0.0.1:3000", true, token.ID); err != nil {
+	if _, err := db.CreateRoute(context.Background(), "app.example.test", "http://127.0.0.1:3000", true, token.ID); err != nil {
 		t.Fatalf("create route: %v", err)
 	}
 	req := httptest.NewRequest(http.MethodGet, "/api/components", nil)
@@ -723,7 +725,7 @@ func TestComponentsEndpointIsPublicAndRedactsSensitiveFields(t *testing.T) {
 	if err := json.Unmarshal([]byte(body), &components); err != nil {
 		t.Fatalf("decode components: %v", err)
 	}
-	if len(components) != 1 || components[0].PublicHost != "app.example.com" || components[0].PublicURL != "https://app.example.com" {
+	if len(components) != 1 || components[0].PublicHost != "app.example.test" || components[0].PublicURL != "https://app.example.test" {
 		t.Fatalf("unexpected components: %+v", components)
 	}
 }
@@ -733,7 +735,7 @@ func newAdminTestServer(t *testing.T) (*Server, *store.DB) {
 	privateKey, publicKeyPEM := testSSOJWTKey(t)
 	defaultAdminJWT = signTestSSOJWT(t, privateKey, testSSOJWTClaims{
 		Issuer:   "https://official.example.test",
-		Audience: "zenmind-tunnel-hub-server",
+		Audience: "tunnel-hub-server",
 		UserID:   "1",
 		Email:    "admin@example.test",
 		Role:     "admin",
@@ -741,24 +743,24 @@ func newAdminTestServer(t *testing.T) (*Server, *store.DB) {
 		Expires:  time.Now().Add(time.Hour),
 	})
 	return newAdminTestServerWithConfig(t, config.RelayConfig{
-		PublicBaseDomain:   "tunnel-hub.zenmind.cc",
+		PublicBaseDomain:   "hub.example.test",
 		SSOJWTIssuer:       "https://official.example.test",
 		SSOJWTPublicKeyPEM: publicKeyPEM,
-		SSOJWTAudience:     "zenmind-tunnel-hub-server",
+		SSOJWTAudience:     "tunnel-hub-server",
 	})
 }
 
 func newAdminTestServerWithConfig(t *testing.T, cfg config.RelayConfig) (*Server, *store.DB) {
 	t.Helper()
-	db, err := store.Open(":memory:")
+	db := dbtest.Open(t)
+	verifier, err := auth.NewSSOJWTVerifier(auth.SSOJWTConfig{
+		Issuer: cfg.SSOJWTIssuer, Audience: cfg.SSOJWTAudience, UserIDClaim: cfg.SSOJWTUserIDClaim,
+		AllowAnyAudience: cfg.SSOJWTAllowAnyAudience, PublicKeyFile: cfg.SSOJWTPublicKeyFile, PublicKeyPEM: cfg.SSOJWTPublicKeyPEM,
+	})
 	if err != nil {
-		t.Fatalf("open db: %v", err)
+		t.Fatalf("new SSO verifier: %v", err)
 	}
-	t.Cleanup(func() { _ = db.Close() })
-	if err := db.Migrate(context.Background()); err != nil {
-		t.Fatalf("migrate: %v", err)
-	}
-	server, err := NewServer(db, proxy.NewManager(), cfg, nil)
+	server, err := NewServer(db, proxy.NewManager(), cfg, nil, verifier)
 	if err != nil {
 		t.Fatalf("new admin server: %v", err)
 	}

@@ -1,6 +1,6 @@
 # AGENTS.md
 
-This project is the lightweight public web client for ZenMind Desktop public hosts under `*.m.zenmind.cc`.
+This project is the lightweight public web client for Desktop public hosts under the configured `DESKTOP_PUBLIC_BASE_DOMAIN` wildcard.
 
 ## Purpose
 
@@ -20,6 +20,8 @@ This project is the lightweight public web client for ZenMind Desktop public hos
 - Do not store Desktop/platform auth tokens in `localStorage`, source, docs, snapshots, or logs.
 - URL `?token=` may be consumed at startup, but it must be removed from browser history immediately.
 - Default WebSocket target is same-host `/ws`; do not hard-code production random hosts.
+- Do not add a default agent key. Agents come only from Desktop `agent.list` or Agent Platform `/api/agents`; empty/error states must disable agent-dependent actions.
+- Static builds must remain environment-neutral. Vite serves `PUBLIC_SITE_TITLE` only at dev/preview runtime; the Nginx entrypoint generates the same plain-text runtime resource and must fail when the variable is missing.
 - Do not change the Tunnel Hub server API or Desktop WS protocol from this project.
 - Keep the UI compact, responsive, and operational. Avoid marketing-style landing pages.
 

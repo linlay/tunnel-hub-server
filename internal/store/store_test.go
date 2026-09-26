@@ -2,303 +2,149 @@ package store
 
 import (
 	"context"
-	"errors"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
-	"github.com/linlay/zenmind-tunnel-server/internal/auth"
+	"example.invalid/tunnel-hub-server/internal/testutil/mysqltest"
 )
 
-func TestRouteCRUDAndHostNormalization(t *testing.T) {
+func TestAgentRouteAndTokenRemainSupported(t *testing.T) {
 	db := openTestDB(t)
-	ctx := context.Background()
-	token := createTestToken(t, db, "laptop")
-
-	route, err := db.CreateRoute(ctx, "App.Example.COM:443", "http://127.0.0.1:3000", true, token.ID)
-	if err != nil {
-		t.Fatalf("create route: %v", err)
-	}
-	if route.PublicHost != "app.example.com" {
-		t.Fatalf("host was not normalized: %q", route.PublicHost)
-	}
-	if route.TokenID != token.ID {
-		t.Fatalf("route token id = %q", route.TokenID)
-	}
-
-	found, err := db.GetActiveRouteByHost(ctx, "app.example.com")
-	if err != nil {
-		t.Fatalf("get route: %v", err)
-	}
-	if found.TargetURL != "http://127.0.0.1:3000" {
-		t.Fatalf("unexpected target: %q", found.TargetURL)
-	}
-
-	updated, err := db.UpdateRoute(ctx, route.ID, "api.example.com", "http://127.0.0.1:8080", false, token.ID)
-	if err != nil {
-		t.Fatalf("update route: %v", err)
-	}
-	if updated.Active {
-		t.Fatal("route should be inactive")
-	}
-	if _, err := db.GetActiveRouteByHost(ctx, "api.example.com"); err != ErrNotFound {
-		t.Fatalf("inactive route should not match, got %v", err)
-	}
-}
-
-func TestUnassignedRoutesAreNotActive(t *testing.T) {
-	db := openTestDB(t)
-	ctx := context.Background()
-
-	if _, err := db.CreateRoute(ctx, "legacy.example.com", "http://127.0.0.1:3000", true, ""); err != nil {
-		t.Fatalf("create legacy route: %v", err)
-	}
-	if _, err := db.GetRouteByHost(ctx, "legacy.example.com"); err != nil {
-		t.Fatalf("legacy route should remain listable: %v", err)
-	}
-	if _, err := db.GetActiveRouteByHost(ctx, "legacy.example.com"); err != ErrNotFound {
-		t.Fatalf("unassigned route should not be active, got %v", err)
-	}
-}
-
-func TestTokenValidation(t *testing.T) {
-	db := openTestDB(t)
-	ctx := context.Background()
-
-	raw, err := auth.NewToken()
-	if err != nil {
-		t.Fatalf("new token: %v", err)
-	}
-	token, err := db.CreateToken(ctx, "laptop", raw)
+	token, err := db.CreateToken(context.Background(), "agent", "zt_agent_secret")
 	if err != nil {
 		t.Fatalf("create token: %v", err)
 	}
-
-	found, err := db.FindActiveTokenBySecret(ctx, raw)
+	route, err := db.CreateRoute(context.Background(), " Demo.Example.Test:443 ", "http://127.0.0.1:3000", true, token.ID)
 	if err != nil {
+		t.Fatalf("create route: %v", err)
+	}
+	if route.PublicHost != "demo.example.test" || route.TokenID != token.ID {
+		t.Fatalf("route = %+v", route)
+	}
+	if _, err := db.FindActiveTokenBySecret(context.Background(), "zt_agent_secret"); err != nil {
 		t.Fatalf("find token: %v", err)
 	}
-	if found.ID != token.ID {
-		t.Fatalf("wrong token: %s", found.ID)
-	}
+}
 
-	if err := db.DeactivateToken(ctx, token.ID); err != nil {
-		t.Fatalf("deactivate: %v", err)
+func TestRegisterDesktopDeviceUsesOwnerAndDeviceID(t *testing.T) {
+	db := openTestDB(t)
+	first, err := db.RegisterDesktopDevice(context.Background(), RegisterDesktopDeviceInput{DeviceID: "mac-lan", DeviceName: "Mac LAN", OwnerUserID: "user-1", OwnerEmail: "one@example.test", PublicHost: "a.m.example.test"})
+	if err != nil {
+		t.Fatalf("register first: %v", err)
 	}
-	if _, err := db.FindActiveTokenBySecret(ctx, raw); err != ErrNotFound {
-		t.Fatalf("inactive token should not validate, got %v", err)
+	if !first.Created || first.Device.DeviceKey == "" {
+		t.Fatalf("first = %+v", first)
+	}
+	second, err := db.RegisterDesktopDevice(context.Background(), RegisterDesktopDeviceInput{DeviceID: "mac-lan", DeviceName: "Renamed", OwnerUserID: "user-1", PublicHost: "ignored.m.example.test"})
+	if err != nil {
+		t.Fatalf("register second: %v", err)
+	}
+	if second.Created || second.Device.DeviceKey != first.Device.DeviceKey || second.Device.PublicHost != first.Device.PublicHost {
+		t.Fatalf("idempotent registration failed: first=%+v second=%+v", first, second)
+	}
+	other, err := db.RegisterDesktopDevice(context.Background(), RegisterDesktopDeviceInput{DeviceID: "mac-lan", DeviceName: "Other", OwnerUserID: "user-2", PublicHost: "b.m.example.test"})
+	if err != nil {
+		t.Fatalf("register other owner: %v", err)
+	}
+	if other.Device.DeviceKey == first.Device.DeviceKey || other.Device.PublicHost == first.Device.PublicHost {
+		t.Fatalf("owners shared device identity: first=%+v other=%+v", first, other)
+	}
+	resolved, err := db.GetDesktopDeviceByOwnerAndID(context.Background(), "user-1", "mac-lan")
+	if err != nil || resolved.DeviceKey != first.Device.DeviceKey {
+		t.Fatalf("owner lookup = %+v, %v", resolved, err)
 	}
 }
 
-func TestDesktopBrokerIdentityCannotAuthenticateAsAgentBearer(t *testing.T) {
+func TestDesktopWebAppRouteUsesDeviceJoinWithoutToken(t *testing.T) {
 	db := openTestDB(t)
-	ctx := context.Background()
-
-	raw, err := auth.NewToken()
+	device, err := db.RegisterDesktopDevice(context.Background(), RegisterDesktopDeviceInput{DeviceID: "mac-lan", OwnerUserID: "user-1", PublicHost: "a.m.example.test"})
 	if err != nil {
-		t.Fatalf("new token: %v", err)
+		t.Fatalf("register device: %v", err)
 	}
-	token, err := db.CreateToken(ctx, "legacy-desktop-token", raw)
-	if err != nil {
-		t.Fatalf("create token: %v", err)
-	}
-	registration, err := db.RegisterDesktopDevice(ctx, RegisterDesktopDeviceInput{
-		DeviceID:    "legacy-desktop",
-		OwnerUserID: "42",
-		PublicHost:  "legacy-desktop.m.example.test",
-	})
-	if err != nil {
-		t.Fatalf("register desktop: %v", err)
-	}
-	if _, err := db.sql.ExecContext(ctx, `
-		UPDATE desktop_devices SET token_id = ? WHERE device_id = ?
-	`, token.ID, registration.Device.DeviceKey); err != nil {
-		t.Fatalf("bind legacy token to desktop: %v", err)
-	}
-
-	if _, err := db.FindActiveTokenBySecret(ctx, raw); !errors.Is(err, ErrNotFound) {
-		t.Fatalf("Desktop broker identity authenticated through Agent bearer path: %v", err)
-	}
-}
-
-func TestRegisterDesktopDeviceOwnership(t *testing.T) {
-	db := openTestDB(t)
-	ctx := context.Background()
-
-	first, err := db.RegisterDesktopDevice(ctx, RegisterDesktopDeviceInput{
-		DeviceID:    "mac-mini",
-		OwnerUserID: "42",
-		OwnerEmail:  "desktop.test",
-		PublicHost:  "mac-mini.tunnel-hub.zenmind.cc",
-	})
-	if err != nil {
-		t.Fatalf("register desktop device: %v", err)
-	}
-	if !first.Created || first.Device.OwnerUserID != "42" || first.Token.ID == "" {
-		t.Fatalf("unexpected first registration: %+v", first)
-	}
-	if first.Token.Active || first.Token.TokenHash != "" || first.Token.TokenPrefix != "" {
-		t.Fatalf("Desktop broker identity must not contain a credential: %+v", first.Token)
-	}
-
-	second, err := db.RegisterDesktopDevice(ctx, RegisterDesktopDeviceInput{
-		DeviceID:    "mac-mini",
-		OwnerUserID: "42",
-		OwnerEmail:  "desktop.test",
-		PublicHost:  "mac-mini.tunnel-hub.zenmind.cc",
-	})
-	if err != nil {
-		t.Fatalf("update desktop device: %v", err)
-	}
-	if second.Created || second.Token.ID != first.Token.ID || second.Device.TargetURL != "" {
-		t.Fatalf("unexpected second registration: %+v", second)
-	}
-
-	other, err := db.RegisterDesktopDevice(ctx, RegisterDesktopDeviceInput{
-		DeviceID:    "mac-mini",
-		OwnerUserID: "43",
-		OwnerEmail:  "other.test",
-		PublicHost:  "random.m.zenmind.cc",
-	})
-	if err != nil {
-		t.Fatalf("different owner with same display device id should register independently: %v", err)
-	}
-	if !other.Created || other.Device.DeviceID != "mac-mini" || other.Device.OwnerUserID != "43" {
-		t.Fatalf("unexpected different owner registration: %+v", other)
-	}
-	if _, err := db.GetRouteByHost(ctx, "mac-mini.tunnel-hub.zenmind.cc"); err != ErrNotFound {
-		t.Fatalf("desktop registration should not create route, got %v", err)
-	}
-
-	third, err := db.RegisterDesktopDevice(ctx, RegisterDesktopDeviceInput{
-		DeviceID:    "mac-mini",
-		OwnerUserID: "42",
-		OwnerEmail:  "desktop.test",
-		PublicHost:  "mac-mini.tunnel-hub.zenmind.cc",
-	})
-	if err != nil {
-		t.Fatalf("same owner should update without device secret: %v", err)
-	}
-	if third.Device.TargetURL != "" {
-		t.Fatalf("desktop target url should stay empty: %+v", third)
-	}
-}
-
-func TestRegisterDesktopDeviceClaimsLegacyDevice(t *testing.T) {
-	db := openTestDB(t)
-	ctx := context.Background()
-	token := createTestToken(t, db, "desktop:legacy")
-	route, err := db.CreateRoute(ctx, "legacy.tunnel-hub.zenmind.cc", "http://127.0.0.1:7082", true, token.ID)
-	if err != nil {
-		t.Fatalf("create route: %v", err)
-	}
-	now := time.Now().UTC()
-	secretHash, err := auth.HashSecret("legacy-secret")
-	if err != nil {
-		t.Fatalf("hash legacy secret: %v", err)
-	}
-	if _, err := db.sql.ExecContext(ctx, `
-		INSERT INTO desktop_devices (device_id, device_secret_hash, token_id, route_id, public_host, target_url, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-	`, "legacy", secretHash, token.ID, route.ID, route.PublicHost, route.TargetURL, now, now); err != nil {
-		t.Fatalf("insert legacy device: %v", err)
-	}
-
-	result, err := db.RegisterDesktopDevice(ctx, RegisterDesktopDeviceInput{
-		DeviceID:    "legacy",
-		OwnerUserID: "42",
-		OwnerEmail:  "desktop.test",
-		PublicHost:  "legacy.tunnel-hub.zenmind.cc",
-	})
-	if err != nil {
-		t.Fatalf("claim legacy device: %v", err)
-	}
-	if result.Device.OwnerUserID != "42" || result.Token.ID != token.ID || result.Device.TargetURL != "" {
-		t.Fatalf("unexpected legacy claim: %+v", result)
-	}
-
-	other, err := db.RegisterDesktopDevice(ctx, RegisterDesktopDeviceInput{
-		DeviceID:    "legacy",
-		OwnerUserID: "43",
-		OwnerEmail:  "other.test",
-		PublicHost:  "other-legacy.m.zenmind.cc",
-	})
-	if err != nil {
-		t.Fatalf("different owner should register independent legacy display id: %v", err)
-	}
-	if !other.Created || other.Device.OwnerUserID != "43" || other.Device.TargetURL != "" {
-		t.Fatalf("unexpected different owner legacy registration: %+v", other)
-	}
-}
-
-func TestRegisterDesktopWebAppCreatesRoute(t *testing.T) {
-	db := openTestDB(t)
-	ctx := context.Background()
-	device, err := db.RegisterDesktopDevice(ctx, RegisterDesktopDeviceInput{
-		DeviceID:    "mac-mini",
-		OwnerUserID: "42",
-		OwnerEmail:  "desktop.test",
-		PublicHost:  "desktop.m.zenmind.cc",
-	})
-	if err != nil {
-		t.Fatalf("register desktop: %v", err)
-	}
-
-	webapp, err := db.RegisterDesktopWebApp(ctx, RegisterDesktopWebAppInput{
-		OwnerUserID: "42",
-		DeviceID:    "mac-mini",
-		Name:        "notes",
-		PublicHost:  "notes.wa.zenmind.cc",
-		TargetURL:   "http://127.0.0.1:5173",
-		Active:      true,
-	})
+	created, err := db.RegisterDesktopWebApp(context.Background(), RegisterDesktopWebAppInput{OwnerUserID: "user-1", DeviceID: "mac-lan", Name: "notes", PublicHost: "abcdefghijk23-wa.example.test", TargetURL: "http://127.0.0.1:5173", Active: true})
 	if err != nil {
 		t.Fatalf("register webapp: %v", err)
 	}
-	if webapp.Device.TokenID != device.Token.ID || webapp.Route.TokenID != device.Token.ID {
-		t.Fatalf("webapp should bind to desktop token: %+v", webapp)
+	if created.Route.TokenID != "" || !created.Route.Active {
+		t.Fatalf("webapp route = %+v", created.Route)
 	}
-	if webapp.Route.TargetURL != "http://127.0.0.1:5173" || !webapp.Route.Active {
-		t.Fatalf("unexpected webapp route: %+v", webapp.Route)
-	}
-
-	updated, err := db.RegisterDesktopWebApp(ctx, RegisterDesktopWebAppInput{
-		OwnerUserID: "42",
-		DeviceID:    "mac-mini",
-		Name:        "notes",
-		PublicHost:  "ignored.wa.zenmind.cc",
-		TargetURL:   "http://127.0.0.1:8080",
-		Active:      false,
-	})
+	joined, err := db.GetActiveDesktopWebAppRouteByHost(context.Background(), "ABCDEFGHIJK23-WA.EXAMPLE.TEST:443")
 	if err != nil {
-		t.Fatalf("update webapp: %v", err)
+		t.Fatalf("join route: %v", err)
 	}
-	if updated.Route.PublicHost != "notes.wa.zenmind.cc" || updated.Route.TargetURL != "http://127.0.0.1:8080" || updated.Route.Active {
-		t.Fatalf("webapp update should reuse host and route: %+v", updated.Route)
+	if joined.Device.DeviceKey != device.Device.DeviceKey || joined.Route.ID != created.Route.ID {
+		t.Fatalf("joined route = %+v", joined)
+	}
+}
+
+func TestDesktopSessionsAndTrafficUseDeviceIdentity(t *testing.T) {
+	db := openTestDB(t)
+	registered, err := db.RegisterDesktopDevice(context.Background(), RegisterDesktopDeviceInput{DeviceID: "mac-lan", OwnerUserID: "user-1", PublicHost: "a.m.example.test"})
+	if err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	session, err := db.CreateDesktopSession(context.Background(), registered.Device, "127.0.0.1")
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	if err := db.RecordTrafficEvent(context.Background(), TrafficEvent{ObjectType: "desktop", DeviceID: registered.Device.DeviceKey, SessionID: session.ID, Kind: "websocket", BytesIn: 3, BytesOut: 5}); err != nil {
+		t.Fatalf("record traffic: %v", err)
+	}
+	stats, err := db.TrafficStatsByDevice(context.Background())
+	if err != nil || stats[registered.Device.DeviceKey].BytesOut != 5 {
+		t.Fatalf("stats = %+v, %v", stats, err)
+	}
+}
+
+func TestConversationShareSchemaRejectsSingleUseWithExpiration(t *testing.T) {
+	assertConversationShareSingleUseExpirationConstraint(t, openTestDB(t), "share_invalid_fresh_once")
+}
+
+func assertConversationShareSingleUseExpirationConstraint(t *testing.T, db *DB, id string) {
+	t.Helper()
+	now := time.Date(2026, time.August, 17, 1, 2, 3, 0, time.UTC)
+	if _, err := db.sql.Exec(`
+		INSERT INTO conversation_shares (
+			id, owner_user_id, conversation_id, snapshot_version,
+			snapshot_json, created_at, expires_at, single_use
+		) VALUES (?, 'owner-a', 'chat-a', 1, '{"version":1}', ?, ?, 1)
+	`, id, now, now.Add(24*time.Hour)); err == nil {
+		t.Fatal("database accepted a single-use share with an expiration")
 	}
 }
 
 func openTestDB(t *testing.T) *DB {
 	t.Helper()
-	db, err := Open(":memory:")
-	if err != nil {
-		t.Fatalf("open db: %v", err)
+	if os.Getenv("TEST_DATABASE_TYPE") == "sqlite" {
+		db, err := OpenSQLite(context.Background(), filepath.Join(t.TempDir(), "relay.sqlite"))
+		return finishOpeningTestDB(t, db, err)
 	}
-	t.Cleanup(func() { _ = db.Close() })
+	return openMySQLTestDB(t)
+}
+
+func openMySQLTestDB(t *testing.T) *DB {
+	t.Helper()
+	if os.Getenv("TEST_DATABASE_TYPE") == "sqlite" {
+		t.Skip("MySQL-specific integration test")
+	}
+	db, err := Open(context.Background(), mysqltest.NewConfig(t))
+	return finishOpeningTestDB(t, db, err)
+}
+
+func finishOpeningTestDB(t *testing.T, db *DB, err error) *DB {
+	t.Helper()
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := db.Close(); err != nil {
+			t.Errorf("close database: %v", err)
+		}
+	})
 	if err := db.Migrate(context.Background()); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
 	return db
-}
-
-func createTestToken(t *testing.T, db *DB, name string) TunnelToken {
-	t.Helper()
-	raw, err := auth.NewToken()
-	if err != nil {
-		t.Fatalf("new token: %v", err)
-	}
-	token, err := db.CreateToken(context.Background(), name, raw)
-	if err != nil {
-		t.Fatalf("create token: %v", err)
-	}
-	return token
 }

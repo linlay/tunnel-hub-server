@@ -15,9 +15,9 @@ import (
 	"testing"
 	"time"
 
+	"example.invalid/tunnel-hub-server/internal/tunnel"
 	"github.com/gorilla/websocket"
 	"github.com/hashicorp/yamux"
-	"github.com/linlay/zenmind-tunnel-server/internal/tunnel"
 )
 
 type fakeResourceResult struct {
@@ -29,19 +29,18 @@ type fakeResourceResult struct {
 func TestRelayResourceRequestsDesktopAndReturnsPushedFile(t *testing.T) {
 	db := openProxyTestDB(t)
 	manager := NewManager()
-	relay := NewRelay(db, manager, nil, 64<<20)
-	relay.SetPublicBaseDomains("m.zenmind.cc", "wa.zenmind.cc")
+	relay := NewRelay(db, manager, nil, "example", "m.example.test", "example.test", 64<<20)
+	identityToken := configureProxyDesktopIdentity(t, relay, "user_1")
 	server := newResourceRelayTestServer(t, relay)
 	defer server.Close()
 
-	registration := registerUploadDesktop(t, db, "desk.m.zenmind.cc")
-	configureRegisteredProxyDesktopIdentity(relay, "official-jwt", registration)
+	registration := registerUploadDesktop(t, db, "desk.m.example.test")
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	resultCh := make(chan fakeResourceResult, 1)
 	fileBody := []byte("hello resource")
-	go runFakeResourceDesktop(t, ctx, server.URL, "official-jwt", resultCh, fileBody, "text/plain", false, nil)
-	waitForAgentToken(t, manager, registration.Token.ID)
+	go runFakeResourceDesktop(t, ctx, server.URL, identityToken, resultCh, fileBody, "text/plain", false, nil)
+	waitForDesktopConnection(t, manager, registration.Device.DeviceKey)
 
 	req, err := http.NewRequest(http.MethodGet, server.URL+"/api/resource?file=chat_resource%2Fnote.txt", nil)
 	if err != nil {
@@ -101,10 +100,8 @@ func TestRelayResourceRequestsDesktopAndReturnsPushedFile(t *testing.T) {
 func TestRelayResourceEnforcesDesktopHostAuthAndSafeFile(t *testing.T) {
 	db := openProxyTestDB(t)
 	manager := NewManager()
-	relay := NewRelay(db, manager, nil, 64<<20)
-	relay.SetPublicBaseDomains("m.zenmind.cc", "wa.zenmind.cc")
-	registration := registerUploadDesktop(t, db, "desk.m.zenmind.cc")
-	configureRegisteredProxyDesktopIdentity(relay, "official-jwt", registration)
+	relay := NewRelay(db, manager, nil, "example", "m.example.test", "example.test", 64<<20)
+	registration := registerUploadDesktop(t, db, "desk.m.example.test")
 
 	tests := []struct {
 		name   string
@@ -113,7 +110,7 @@ func TestRelayResourceEnforcesDesktopHostAuthAndSafeFile(t *testing.T) {
 		target string
 		status int
 	}{
-		{name: "main host", host: "tunnel-hub.zenmind.cc", auth: "desktop-token", target: "/api/resource?file=chat%2Fa.txt", status: http.StatusNotFound},
+		{name: "main host", host: "hub.example.test", auth: "desktop-token", target: "/api/resource?file=chat%2Fa.txt", status: http.StatusNotFound},
 		{name: "missing token", host: registration.Device.PublicHost, target: "/api/resource?file=chat%2Fa.txt", status: http.StatusUnauthorized},
 		{name: "missing file", host: registration.Device.PublicHost, auth: "desktop-token", target: "/api/resource", status: http.StatusBadRequest},
 		{name: "absolute file", host: registration.Device.PublicHost, auth: "desktop-token", target: "/api/resource?file=%2Ftmp%2Fa.txt", status: http.StatusBadRequest},
@@ -140,15 +137,15 @@ func TestRelayResourceEnforcesDesktopHostAuthAndSafeFile(t *testing.T) {
 func TestRelayResourcePropagatesDesktopTokenRejection(t *testing.T) {
 	db := openProxyTestDB(t)
 	manager := NewManager()
-	relay := NewRelay(db, manager, nil, 64<<20)
+	relay := NewRelay(db, manager, nil, "example", "m.example.test", "example.test", 64<<20)
+	identityToken := configureProxyDesktopIdentity(t, relay, "user_1")
 	server := newResourceRelayTestServer(t, relay)
 	defer server.Close()
-	registration := registerUploadDesktop(t, db, "desk.m.zenmind.cc")
-	configureRegisteredProxyDesktopIdentity(relay, "official-jwt", registration)
+	registration := registerUploadDesktop(t, db, "desk.m.example.test")
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go runFakeResourceDesktop(t, ctx, server.URL, "official-jwt", nil, nil, "", true, nil)
-	waitForAgentToken(t, manager, registration.Token.ID)
+	go runFakeResourceDesktop(t, ctx, server.URL, identityToken, nil, nil, "", true, nil)
+	waitForDesktopConnection(t, manager, registration.Device.DeviceKey)
 
 	req, _ := http.NewRequest(http.MethodGet, server.URL+"/api/resource?file=chat%2Fa.txt", nil)
 	req.Host = registration.Device.PublicHost
@@ -165,7 +162,7 @@ func TestRelayResourcePropagatesDesktopTokenRejection(t *testing.T) {
 }
 
 func TestRelayPushValidatesTicketExpiryAndSizeWithoutFileNameHeader(t *testing.T) {
-	relay := NewRelay(nil, NewManager(), nil, 4)
+	relay := NewRelay(nil, NewManager(), nil, "example", "m.example.test", "example.test", 4)
 	relay.resources.add(&pendingResource{
 		ID: "resource_ok", Ticket: "ticket_ok", FileName: "note.txt",
 		ExpiresAt: time.Now().Add(time.Minute), Ready: make(chan struct{}),
@@ -215,17 +212,17 @@ func TestWaitResourceReadyReturnsContextError(t *testing.T) {
 func TestRelayResourceCleansPendingStateAfterDesktopError(t *testing.T) {
 	db := openProxyTestDB(t)
 	manager := NewManager()
-	relay := NewRelay(db, manager, nil, 64<<20)
+	relay := NewRelay(db, manager, nil, "example", "m.example.test", "example.test", 64<<20)
+	identityToken := configureProxyDesktopIdentity(t, relay, "user_1")
 	server := newResourceRelayTestServer(t, relay)
 	defer server.Close()
-	registration := registerUploadDesktop(t, db, "desk.m.zenmind.cc")
-	configureRegisteredProxyDesktopIdentity(relay, "official-jwt", registration)
+	registration := registerUploadDesktop(t, db, "desk.m.example.test")
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go runFakeResourceDesktop(t, ctx, server.URL, "official-jwt", nil, nil, "", false, func(stream *yamux.Stream, frame desktopResourceBusinessRequest) {
+	go runFakeResourceDesktop(t, ctx, server.URL, identityToken, nil, nil, "", false, func(stream *yamux.Stream, frame desktopResourceBusinessRequest) {
 		_ = tunnel.WriteWSFrame(stream, websocket.TextMessage, []byte(`{"ns":"ap","frame":"error","type":"/api/resource","id":"`+frame.ID+`","code":404,"msg":"resource not found"}`))
 	})
-	waitForAgentToken(t, manager, registration.Token.ID)
+	waitForDesktopConnection(t, manager, registration.Device.DeviceKey)
 
 	req, _ := http.NewRequest(http.MethodGet, server.URL+"/api/resource?file=chat%2Fmissing.txt", nil)
 	req.Host = registration.Device.PublicHost
@@ -274,7 +271,7 @@ func runFakeResourceDesktop(t *testing.T, ctx context.Context, relayURL, token s
 	open := tunnel.NewStreamRequest(tunnel.NamespaceDesktop, tunnel.FrameRequest, tunnel.TypeTunnelOpen, "tun_resource", &tunnel.StreamPayload{
 		IdentityToken: token,
 		DeviceID:      "mac-mini",
-		Client:        "zenmind-desktop",
+		Client:        "example-desktop",
 		Capabilities: []string{
 			"desktop.websocket",
 		},

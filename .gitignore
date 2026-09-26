@@ -1,15 +1,16 @@
 .DS_Store
 .env
 .env.local
+.env.test.local
 .local/
 data/*
-!data/.gitkeep
 configs/*.pem
 configs/*.key
 *.db
 *.db-*
 node_modules/
 dist/
+bin/
 *.tsbuildinfo
 vite.config.js
 vite.config.d.ts

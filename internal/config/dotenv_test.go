@@ -22,7 +22,7 @@ func TestLoadDotEnvFileParsesSupportedSyntax(t *testing.T) {
 	content := `
 # comment
 RELAY_ADDR=:9090
-export PUBLIC_BASE_DOMAIN="local.test"
+export ADMIN_HOST="local.test"
 SSO_JWT_PUBLIC_KEY_FILE='configs/jwt-public.pem'
 EMPTY_VALUE=
 MAX_REQUEST_BODY_BYTES=1024 # inline comment
@@ -32,7 +32,7 @@ INVALID LINE
 		t.Fatalf("write .env: %v", err)
 	}
 
-	for _, key := range []string{"RELAY_ADDR", "PUBLIC_BASE_DOMAIN", "SSO_JWT_PUBLIC_KEY_FILE", "EMPTY_VALUE", "MAX_REQUEST_BODY_BYTES"} {
+	for _, key := range []string{"RELAY_ADDR", "ADMIN_HOST", "SSO_JWT_PUBLIC_KEY_FILE", "EMPTY_VALUE", "MAX_REQUEST_BODY_BYTES"} {
 		t.Setenv(key, "")
 		_ = os.Unsetenv(key)
 	}
@@ -42,7 +42,7 @@ INVALID LINE
 	}
 
 	assertEnv(t, "RELAY_ADDR", ":9090")
-	assertEnv(t, "PUBLIC_BASE_DOMAIN", "local.test")
+	assertEnv(t, "ADMIN_HOST", "local.test")
 	assertEnv(t, "SSO_JWT_PUBLIC_KEY_FILE", "configs/jwt-public.pem")
 	assertEnv(t, "EMPTY_VALUE", "")
 	assertEnv(t, "MAX_REQUEST_BODY_BYTES", "1024")

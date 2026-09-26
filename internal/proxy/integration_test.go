@@ -2,7 +2,14 @@ package proxy
 
 import (
 	"context"
-	"errors"
+	"crypto"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/sha256"
+	"crypto/x509"
+	"encoding/base64"
+	"encoding/json"
+	"encoding/pem"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -10,12 +17,13 @@ import (
 	"testing"
 	"time"
 
+	"example.invalid/tunnel-hub-server/internal/auth"
+	"example.invalid/tunnel-hub-server/internal/config"
+	"example.invalid/tunnel-hub-server/internal/store"
+	"example.invalid/tunnel-hub-server/internal/testutil/dbtest"
+	"example.invalid/tunnel-hub-server/internal/tunnel"
 	"github.com/gorilla/websocket"
 	"github.com/hashicorp/yamux"
-	"github.com/linlay/zenmind-tunnel-server/internal/auth"
-	"github.com/linlay/zenmind-tunnel-server/internal/config"
-	"github.com/linlay/zenmind-tunnel-server/internal/store"
-	"github.com/linlay/zenmind-tunnel-server/internal/tunnel"
 )
 
 func TestRelayAgentHTTPIntegration(t *testing.T) {
@@ -94,23 +102,27 @@ func TestRelayAgentWebSocketIntegration(t *testing.T) {
 func TestRelayRejectsInvalidTunnelToken(t *testing.T) {
 	db := openProxyTestDB(t)
 	manager := NewManager()
-	relay := NewRelay(db, manager, nil, 64<<20)
+	relay := NewRelay(db, manager, nil, "example", "m.example.test", "example.test", 64<<20)
 	server := httptest.NewServer(http.HandlerFunc(relay.HandleTunnel))
 	defer server.Close()
 
-	_, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(server.URL, "http"), http.Header{
-		"Authorization": []string{"Bearer wrong"},
-	})
-	if err == nil {
-		t.Fatal("expected invalid token dial to fail")
+	for _, header := range []string{"Bearer wrong", "Basic wrong", "Bearer", ""} {
+		_, response, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(server.URL, "http"), http.Header{
+			"Authorization": []string{header},
+		})
+		if err == nil {
+			t.Fatalf("expected %q dial to fail", header)
+		}
+		if response == nil || response.StatusCode != http.StatusUnauthorized {
+			t.Fatalf("%q response = %#v", header, response)
+		}
 	}
 }
 
-func TestRelayTunnelFirstFrameSSOAuthStartsYamux(t *testing.T) {
+func TestRelayTunnelRejectsLegacyAgentTokenFrame(t *testing.T) {
 	db := openProxyTestDB(t)
 	manager := NewManager()
-	relay := NewRelay(db, manager, nil, 64<<20)
-	device := configureProxyDesktopIdentity(t, db, relay, "official-jwt", "42", "desktop-1", "profile tunnel")
+	relay := NewRelay(db, manager, nil, "example", "m.example.test", "example.test", 64<<20)
 	server := httptest.NewServer(http.HandlerFunc(relay.HandleTunnel))
 	defer server.Close()
 
@@ -119,89 +131,150 @@ func TestRelayTunnelFirstFrameSSOAuthStartsYamux(t *testing.T) {
 		t.Fatalf("dial tunnel: %v", err)
 	}
 	defer ws.Close()
-	if err := ws.WriteJSON(tunnel.NewStreamRequest(tunnel.NamespaceDesktop, tunnel.FrameRequest, tunnel.TypeTunnelOpen, "tun_1", &tunnel.StreamPayload{
-		IdentityToken: "official-jwt",
-		DeviceID:      "desktop-1",
-		Client:        "zenmind-desktop",
-	})); err != nil {
+	if err := ws.WriteJSON(map[string]any{
+		"v": 1, "ns": "d", "frame": "request", "type": "tunnel.open", "id": "tun_1",
+		"payload": map[string]any{"agentToken": "legacy", "deviceId": "desktop-1"},
+	}); err != nil {
 		t.Fatalf("write tunnel.open: %v", err)
 	}
 	var response tunnel.StreamResponse
 	if err := ws.ReadJSON(&response); err != nil {
 		t.Fatalf("read tunnel.open response: %v", err)
 	}
-	if response.Frame != tunnel.FrameResponse || response.Type != tunnel.TypeTunnelOpen || response.Code != 0 || response.Data == nil || response.Data.SessionID == "" || response.Data.Multiplex != "yamux" {
+	if response.Frame != tunnel.FrameError || response.Code != http.StatusBadRequest {
 		t.Fatalf("tunnel.open response = %#v", response)
 	}
-	session, err := yamux.Client(tunnel.NewWebSocketNetConn(ws), yamux.DefaultConfig())
-	if err != nil {
-		t.Fatalf("start yamux client: %v", err)
-	}
-	defer session.Close()
-	waitForAgentToken(t, manager, device.TokenID)
 }
 
-func TestRelayTunnelFirstFrameSSOAuthExpiresSession(t *testing.T) {
+func TestRelayDesktopIdentityAuthorization(t *testing.T) {
+	tests := []struct {
+		name       string
+		registered bool
+		userID     string
+		scope      string
+		invalidJWT bool
+		allowScope bool
+		wantCode   int
+	}{
+		{name: "valid", registered: true, userID: "user-1", scope: "profile tunnel", wantCode: 0},
+		{name: "invalid identity", registered: true, userID: "user-1", scope: "profile tunnel", invalidJWT: true, wantCode: http.StatusUnauthorized},
+		{name: "missing scope", registered: true, userID: "user-1", scope: "profile", wantCode: http.StatusForbidden},
+		{name: "missing scope allowed by explicit compatibility switch", registered: true, userID: "user-1", scope: "profile", allowScope: true, wantCode: 0},
+		{name: "wrong owner", registered: true, userID: "user-2", scope: "profile tunnel", wantCode: http.StatusForbidden},
+		{name: "unregistered device", userID: "user-1", scope: "profile tunnel", wantCode: http.StatusForbidden},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			db := openProxyTestDB(t)
+			manager := NewManager()
+			relay := NewRelay(db, manager, nil, "example", "m.example.test", "example.test", 64<<20)
+			identityToken := configureProxyDesktopIdentityClaims(t, relay, tc.userID, tc.scope, time.Now().Add(time.Hour))
+			relay.allowMissingTunnelScope = tc.allowScope
+			if tc.invalidJWT {
+				identityToken = "invalid.jwt.value"
+			}
+			var deviceKey string
+			if tc.registered {
+				registered, err := db.RegisterDesktopDevice(context.Background(), store.RegisterDesktopDeviceInput{DeviceID: "mac-lan", OwnerUserID: "user-1", PublicHost: "desk.m.example.test"})
+				if err != nil {
+					t.Fatalf("register desktop: %v", err)
+				}
+				deviceKey = registered.Device.DeviceKey
+			}
+			server := httptest.NewServer(http.HandlerFunc(relay.HandleTunnel))
+			defer server.Close()
+			ws, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(server.URL, "http"), nil)
+			if err != nil {
+				t.Fatalf("dial desktop tunnel: %v", err)
+			}
+			defer ws.Close()
+			if err := ws.WriteJSON(tunnel.NewStreamRequest(tunnel.NamespaceDesktop, tunnel.FrameRequest, tunnel.TypeTunnelOpen, "tun_identity", &tunnel.StreamPayload{IdentityToken: identityToken, DeviceID: "mac-lan", Client: "test"})); err != nil {
+				t.Fatalf("write tunnel.open: %v", err)
+			}
+			var response tunnel.StreamResponse
+			if err := ws.ReadJSON(&response); err != nil {
+				t.Fatalf("read tunnel.open: %v", err)
+			}
+			if response.Code != tc.wantCode {
+				t.Fatalf("code = %d, want %d, response=%+v", response.Code, tc.wantCode, response)
+			}
+			if tc.wantCode == 0 {
+				session, err := yamux.Client(tunnel.NewWebSocketNetConn(ws), yamux.DefaultConfig())
+				if err != nil {
+					t.Fatalf("start yamux: %v", err)
+				}
+				defer session.Close()
+				waitForDesktopConnection(t, manager, deviceKey)
+			}
+		})
+	}
+}
+
+func TestRelayDesktopIdentityExpiryAndConnectionReplacement(t *testing.T) {
 	db := openProxyTestDB(t)
 	manager := NewManager()
-	relay := NewRelay(db, manager, nil, 64<<20)
-	registration, err := db.RegisterDesktopDevice(context.Background(), store.RegisterDesktopDeviceInput{
-		DeviceID: "desktop-expiring", OwnerUserID: "42", PublicHost: "desktop-expiring.m.example.test",
-	})
+	relay := NewRelay(db, manager, nil, "example", "m.example.test", "example.test", 64<<20)
+	identityToken := configureProxyDesktopIdentityClaims(t, relay, "user-1", "profile tunnel", time.Now().Add(2*time.Second))
+	registered, err := db.RegisterDesktopDevice(context.Background(), store.RegisterDesktopDeviceInput{DeviceID: "mac-lan", OwnerUserID: "user-1", PublicHost: "desk.m.example.test"})
 	if err != nil {
 		t.Fatalf("register desktop: %v", err)
 	}
-	relay.SetDesktopIdentityVerifier(staticDesktopIdentityVerifier{
-		token: "expiring-jwt",
-		principal: auth.SSOJWTPrincipal{
-			UserID: "42", Scope: "profile tunnel", ExpiresAt: time.Now().Add(250 * time.Millisecond),
-		},
-	}, false)
 	server := httptest.NewServer(http.HandlerFunc(relay.HandleTunnel))
 	defer server.Close()
-
-	ws, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(server.URL, "http"), nil)
-	if err != nil {
-		t.Fatalf("dial tunnel: %v", err)
+	open := func(id string) (*websocket.Conn, *yamux.Session) {
+		ws, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(server.URL, "http"), nil)
+		if err != nil {
+			t.Fatalf("dial: %v", err)
+		}
+		if err := ws.WriteJSON(tunnel.NewStreamRequest(tunnel.NamespaceDesktop, tunnel.FrameRequest, tunnel.TypeTunnelOpen, id, &tunnel.StreamPayload{IdentityToken: identityToken, DeviceID: "mac-lan", Client: "test"})); err != nil {
+			t.Fatalf("write open: %v", err)
+		}
+		var response tunnel.StreamResponse
+		if err := ws.ReadJSON(&response); err != nil || response.Code != 0 {
+			t.Fatalf("open response=%+v err=%v", response, err)
+		}
+		session, err := yamux.Client(tunnel.NewWebSocketNetConn(ws), yamux.DefaultConfig())
+		if err != nil {
+			t.Fatalf("yamux: %v", err)
+		}
+		return ws, session
 	}
-	defer ws.Close()
-	if err := ws.WriteJSON(tunnel.NewStreamRequest(tunnel.NamespaceDesktop, tunnel.FrameRequest, tunnel.TypeTunnelOpen, "tun_expiring", &tunnel.StreamPayload{
-		IdentityToken: "expiring-jwt",
-		DeviceID:      "desktop-expiring",
-	})); err != nil {
-		t.Fatalf("write tunnel.open: %v", err)
-	}
-	var response tunnel.StreamResponse
-	if err := ws.ReadJSON(&response); err != nil {
-		t.Fatalf("read tunnel.open response: %v", err)
-	}
-	session, err := yamux.Client(tunnel.NewWebSocketNetConn(ws), yamux.DefaultConfig())
-	if err != nil {
-		t.Fatalf("start yamux client: %v", err)
-	}
-	defer session.Close()
-	waitForAgentToken(t, manager, registration.Device.TokenID)
-
+	firstWS, first := open("first")
+	defer firstWS.Close()
+	waitForDesktopConnection(t, manager, registered.Device.DeviceKey)
+	firstActive, _ := manager.ActiveFor(DesktopConnectionKey(registered.Device.DeviceKey))
+	secondWS, second := open("second")
+	defer secondWS.Close()
+	defer second.Close()
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
-		if _, ok := manager.ActiveAgentForToken(registration.Device.TokenID); !ok {
-			return
+		active, ok := manager.ActiveFor(DesktopConnectionKey(registered.Device.DeviceKey))
+		if ok && active.SessionID != firstActive.SessionID && first.IsClosed() {
+			break
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	t.Fatal("Desktop tunnel remained active after identity JWT expiry")
+	if !first.IsClosed() {
+		t.Fatal("old desktop connection was not replaced")
+	}
+	select {
+	case <-second.CloseChan():
+	case <-time.After(4 * time.Second):
+		t.Fatal("desktop connection was not closed at identity expiry")
+	}
 }
 
 func TestRelayTunnelTrustedProxyRemoteAddrPersistsToSessionAndManager(t *testing.T) {
 	db := openProxyTestDB(t)
 	manager := NewManager()
-	relay := NewRelay(db, manager, nil, 64<<20)
-	device := configureProxyDesktopIdentity(t, db, relay, "official-jwt", "42", "desktop-1", "profile tunnel")
+	relay := NewRelay(db, manager, nil, "example", "m.example.test", "example.test", 64<<20)
 	relay.SetTrustedProxyCIDRs("127.0.0.1/32")
 	server := httptest.NewServer(http.HandlerFunc(relay.HandleTunnel))
 	defer server.Close()
 
+	raw, token := createProxyToken(t, db, "desktop")
 	ws, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(server.URL, "http"), http.Header{
+		"Authorization":   []string{"Bearer " + raw},
 		"X-Real-IP":       []string{"203.0.113.24"},
 		"X-Forwarded-For": []string{"198.51.100.99, 203.0.113.24"},
 	})
@@ -209,48 +282,33 @@ func TestRelayTunnelTrustedProxyRemoteAddrPersistsToSessionAndManager(t *testing
 		t.Fatalf("dial tunnel: %v", err)
 	}
 	defer ws.Close()
-	if err := ws.WriteJSON(tunnel.NewStreamRequest(tunnel.NamespaceDesktop, tunnel.FrameRequest, tunnel.TypeTunnelOpen, "tun_1", &tunnel.StreamPayload{
-		IdentityToken: "official-jwt",
-		DeviceID:      "desktop-1",
-		Client:        "zenmind-desktop",
-	})); err != nil {
-		t.Fatalf("write tunnel.open: %v", err)
-	}
-	var response tunnel.StreamResponse
-	if err := ws.ReadJSON(&response); err != nil {
-		t.Fatalf("read tunnel.open response: %v", err)
-	}
-	if response.Data == nil || response.Data.SessionID == "" {
-		t.Fatalf("tunnel.open response = %#v", response)
-	}
 	session, err := yamux.Client(tunnel.NewWebSocketNetConn(ws), yamux.DefaultConfig())
 	if err != nil {
 		t.Fatalf("start yamux client: %v", err)
 	}
 	defer session.Close()
-	waitForAgentToken(t, manager, device.TokenID)
+	waitForAgentToken(t, manager, token.ID)
 
-	stored, err := db.GetAgentSession(context.Background(), response.Data.SessionID)
+	active, ok := manager.ActiveFor(AgentConnectionKey(token.ID))
+	if !ok {
+		t.Fatal("active agent not found")
+	}
+	stored, err := db.GetAgentSession(context.Background(), active.SessionID)
 	if err != nil {
 		t.Fatalf("get agent session: %v", err)
 	}
 	if stored.RemoteAddr != "203.0.113.24" {
 		t.Fatalf("stored RemoteAddr = %q", stored.RemoteAddr)
 	}
-	active, ok := manager.ActiveAgentForToken(device.TokenID)
-	if !ok {
-		t.Fatal("active agent not found")
-	}
 	if active.RemoteAddr != "203.0.113.24" {
 		t.Fatalf("active RemoteAddr = %q", active.RemoteAddr)
 	}
 }
 
-func TestRelayTunnelFirstFrameInvalidIdentityReturnsStandardError(t *testing.T) {
+func TestRelayTunnelFirstFrameMissingIdentityReturnsStandardError(t *testing.T) {
 	db := openProxyTestDB(t)
 	manager := NewManager()
-	relay := NewRelay(db, manager, nil, 64<<20)
-	configureProxyDesktopIdentity(t, db, relay, "official-jwt", "42", "desktop-1", "profile tunnel")
+	relay := NewRelay(db, manager, nil, "example", "m.example.test", "example.test", 64<<20)
 	server := httptest.NewServer(http.HandlerFunc(relay.HandleTunnel))
 	defer server.Close()
 
@@ -260,8 +318,7 @@ func TestRelayTunnelFirstFrameInvalidIdentityReturnsStandardError(t *testing.T) 
 	}
 	defer ws.Close()
 	if err := ws.WriteJSON(tunnel.NewStreamRequest(tunnel.NamespaceDesktop, tunnel.FrameRequest, tunnel.TypeTunnelOpen, "tun_bad", &tunnel.StreamPayload{
-		IdentityToken: "wrong",
-		DeviceID:      "desktop-1",
+		DeviceID: "desktop-1",
 	})); err != nil {
 		t.Fatalf("write tunnel.open: %v", err)
 	}
@@ -269,57 +326,8 @@ func TestRelayTunnelFirstFrameInvalidIdentityReturnsStandardError(t *testing.T) 
 	if err := ws.ReadJSON(&response); err != nil {
 		t.Fatalf("read tunnel.open error: %v", err)
 	}
-	if response.Frame != tunnel.FrameError || response.Type != tunnel.TypeTunnelOpen || response.ID != "tun_bad" || response.Code != http.StatusUnauthorized || response.Msg != "invalid identity token" {
+	if response.Frame != tunnel.FrameError || response.Type != tunnel.TypeTunnelOpen || response.ID != "tun_bad" || response.Code != http.StatusBadRequest {
 		t.Fatalf("tunnel.open error = %#v", response)
-	}
-}
-
-func TestRelayTunnelFirstFrameRejectsMissingScopeAndWrongOwner(t *testing.T) {
-	tests := []struct {
-		name     string
-		userID   string
-		scope    string
-		wantCode int
-		wantMsg  string
-	}{
-		{name: "missing scope", userID: "42", scope: "profile", wantCode: http.StatusForbidden, wantMsg: "tunnel scope required"},
-		{name: "wrong owner", userID: "43", scope: "profile tunnel", wantCode: http.StatusForbidden, wantMsg: "desktop device is not registered for this user"},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			db := openProxyTestDB(t)
-			manager := NewManager()
-			relay := NewRelay(db, manager, nil, 64<<20)
-			device, err := db.RegisterDesktopDevice(context.Background(), store.RegisterDesktopDeviceInput{
-				DeviceID: "desktop-1", OwnerUserID: "42", PublicHost: "desktop.m.example.test",
-			})
-			if err != nil {
-				t.Fatalf("register desktop: %v", err)
-			}
-			relay.SetDesktopIdentityVerifier(staticDesktopIdentityVerifier{
-				token:     "official-jwt",
-				principal: auth.SSOJWTPrincipal{UserID: tc.userID, Scope: tc.scope, ExpiresAt: time.Now().Add(time.Hour)},
-			}, false)
-			server := httptest.NewServer(http.HandlerFunc(relay.HandleTunnel))
-			defer server.Close()
-			ws, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(server.URL, "http"), nil)
-			if err != nil {
-				t.Fatalf("dial tunnel: %v", err)
-			}
-			defer ws.Close()
-			if err := ws.WriteJSON(tunnel.NewStreamRequest(tunnel.NamespaceDesktop, tunnel.FrameRequest, tunnel.TypeTunnelOpen, "tun_denied", &tunnel.StreamPayload{
-				IdentityToken: "official-jwt", DeviceID: device.Device.DeviceID,
-			})); err != nil {
-				t.Fatalf("write tunnel.open: %v", err)
-			}
-			var response tunnel.StreamResponse
-			if err := ws.ReadJSON(&response); err != nil {
-				t.Fatalf("read tunnel.open error: %v", err)
-			}
-			if response.Code != tc.wantCode || response.Msg != tc.wantMsg {
-				t.Fatalf("tunnel.open error = %#v", response)
-			}
-		})
 	}
 }
 
@@ -359,7 +367,7 @@ func TestRelayTunnelFirstFrameMalformedOrWrongFrameReturnsStandardError(t *testi
 		t.Run(tc.name, func(t *testing.T) {
 			db := openProxyTestDB(t)
 			manager := NewManager()
-			relay := NewRelay(db, manager, nil, 64<<20)
+			relay := NewRelay(db, manager, nil, "example", "m.example.test", "example.test", 64<<20)
 			server := httptest.NewServer(http.HandlerFunc(relay.HandleTunnel))
 			defer server.Close()
 
@@ -383,7 +391,7 @@ func TestRelayTunnelFirstFrameMalformedOrWrongFrameReturnsStandardError(t *testi
 func TestRelayTunnelLegacyBearerCompatibilityStartsYamux(t *testing.T) {
 	db := openProxyTestDB(t)
 	manager := NewManager()
-	relay := NewRelay(db, manager, nil, 64<<20)
+	relay := NewRelay(db, manager, nil, "example", "m.example.test", "example.test", 64<<20)
 	server := httptest.NewServer(http.HandlerFunc(relay.HandleTunnel))
 	defer server.Close()
 
@@ -415,7 +423,7 @@ func TestRelayRoutesToAssignedAgent(t *testing.T) {
 
 	db := openProxyTestDB(t)
 	manager := NewManager()
-	relay := NewRelay(db, manager, nil, 64<<20)
+	relay := NewRelay(db, manager, nil, "example", "m.example.test", "example.test", 64<<20)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/tunnel" {
 			relay.HandleTunnel(w, r)
@@ -452,7 +460,7 @@ func TestRelayRoutesToAssignedAgent(t *testing.T) {
 func TestRelayDoesNotForwardUnassignedRoute(t *testing.T) {
 	db := openProxyTestDB(t)
 	manager := NewManager()
-	relay := NewRelay(db, manager, nil, 64<<20)
+	relay := NewRelay(db, manager, nil, "example", "m.example.test", "example.test", 64<<20)
 	server := httptest.NewServer(http.HandlerFunc(relay.HandlePublic))
 	defer server.Close()
 
@@ -479,7 +487,7 @@ func startTunnelPair(t *testing.T, targetURL string) (*store.DB, *Manager, strin
 	db := openProxyTestDB(t)
 	manager := NewManager()
 	raw, token := createProxyToken(t, db, "test-agent")
-	relay := NewRelay(db, manager, nil, 64<<20)
+	relay := NewRelay(db, manager, nil, "example", "m.example.test", "example.test", 64<<20)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/tunnel" {
 			relay.HandleTunnel(w, r)
@@ -510,42 +518,38 @@ func createProxyToken(t *testing.T, db *store.DB, name string) (string, store.Tu
 	return raw, token
 }
 
-type staticDesktopIdentityVerifier struct {
-	token     string
-	principal auth.SSOJWTPrincipal
+func configureProxyDesktopIdentity(t *testing.T, relay *Relay, userID string) string {
+	return configureProxyDesktopIdentityClaims(t, relay, userID, "profile tunnel", time.Now().Add(time.Hour))
 }
 
-func (v staticDesktopIdentityVerifier) Verify(token string, _ time.Time) (auth.SSOJWTPrincipal, error) {
-	if token != v.token {
-		return auth.SSOJWTPrincipal{}, errors.New("invalid identity token")
-	}
-	return v.principal, nil
-}
-
-func configureProxyDesktopIdentity(t *testing.T, db *store.DB, relay *Relay, identityToken, ownerUserID, deviceID, scope string) store.DesktopDevice {
+func configureProxyDesktopIdentityClaims(t *testing.T, relay *Relay, userID, scope string, expiresAt time.Time) string {
 	t.Helper()
-	registration, err := db.RegisterDesktopDevice(context.Background(), store.RegisterDesktopDeviceInput{
-		DeviceID: deviceID, OwnerUserID: ownerUserID, PublicHost: deviceID + ".m.example.test",
-	})
+	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
-		t.Fatalf("register desktop: %v", err)
+		t.Fatalf("generate identity key: %v", err)
 	}
-	relay.SetDesktopIdentityVerifier(staticDesktopIdentityVerifier{
-		token: identityToken,
-		principal: auth.SSOJWTPrincipal{
-			UserID: ownerUserID, Scope: scope, ExpiresAt: time.Now().Add(time.Hour),
-		},
-	}, false)
-	return registration.Device
-}
-
-func configureRegisteredProxyDesktopIdentity(relay *Relay, identityToken string, registration store.RegisterDesktopDeviceResult) {
-	relay.SetDesktopIdentityVerifier(staticDesktopIdentityVerifier{
-		token: identityToken,
-		principal: auth.SSOJWTPrincipal{
-			UserID: registration.Device.OwnerUserID, Scope: "profile tunnel", ExpiresAt: time.Now().Add(time.Hour),
-		},
-	}, false)
+	publicDER, err := x509.MarshalPKIXPublicKey(&privateKey.PublicKey)
+	if err != nil {
+		t.Fatalf("marshal identity key: %v", err)
+	}
+	publicPEM := pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: publicDER})
+	verifier, err := auth.NewSSOJWTVerifier(auth.SSOJWTConfig{Issuer: "https://sso.example.test", Audience: "tunnel-hub-server", PublicKeyPEM: string(publicPEM)})
+	if err != nil {
+		t.Fatalf("new identity verifier: %v", err)
+	}
+	relay.SetDesktopIdentityVerifier(verifier, false)
+	header, _ := json.Marshal(map[string]any{"alg": "RS256", "typ": "JWT"})
+	claims, _ := json.Marshal(map[string]any{
+		"iss": "https://sso.example.test", "aud": "tunnel-hub-server", "sub": userID,
+		"scope": scope, "iat": time.Now().Unix(), "exp": expiresAt.Unix(),
+	})
+	signed := base64.RawURLEncoding.EncodeToString(header) + "." + base64.RawURLEncoding.EncodeToString(claims)
+	digest := sha256.Sum256([]byte(signed))
+	signature, err := rsa.SignPKCS1v15(rand.Reader, privateKey, crypto.SHA256, digest[:])
+	if err != nil {
+		t.Fatalf("sign identity JWT: %v", err)
+	}
+	return signed + "." + base64.RawURLEncoding.EncodeToString(signature)
 }
 
 func runProxyAgent(ctx context.Context, relayURL, token string) {
@@ -580,22 +584,14 @@ func publicRequestBody(t *testing.T, relayURL, host string) string {
 
 func openProxyTestDB(t *testing.T) *store.DB {
 	t.Helper()
-	db, err := store.Open(":memory:")
-	if err != nil {
-		t.Fatalf("open db: %v", err)
-	}
-	t.Cleanup(func() { _ = db.Close() })
-	if err := db.Migrate(context.Background()); err != nil {
-		t.Fatalf("migrate: %v", err)
-	}
-	return db
+	return dbtest.Open(t)
 }
 
 func waitForAgent(t *testing.T, manager *Manager) {
 	t.Helper()
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
-		if manager.Metrics().HasActiveAgent {
+		if manager.Metrics().ActiveAgentCount > 0 {
 			return
 		}
 		time.Sleep(20 * time.Millisecond)
@@ -607,12 +603,24 @@ func waitForAgentToken(t *testing.T, manager *Manager, tokenID string) {
 	t.Helper()
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
-		for _, agent := range manager.ActiveAgents() {
-			if agent.TokenID == tokenID {
+		for _, active := range manager.ActiveTunnels() {
+			if active.Kind == ConnectionKindAgent && active.ConnectionID == tokenID {
 				return
 			}
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
 	t.Fatalf("agent token %s did not connect", tokenID)
+}
+
+func waitForDesktopConnection(t *testing.T, manager *Manager, deviceKey string) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, ok := manager.ActiveFor(DesktopConnectionKey(deviceKey)); ok {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("desktop %s did not connect", deviceKey)
 }

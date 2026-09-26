@@ -2,13 +2,14 @@
 .DS_Store
 .env
 .env.local
-.local
+.env.test.local
+.local/*
 data/*
-!data/.gitkeep
 configs/*.pem
 configs/*.key
 *.db
 *.db-*
 dist
+bin
 node_modules
 *.tsbuildinfo

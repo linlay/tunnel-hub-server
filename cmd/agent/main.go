@@ -9,8 +9,8 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/linlay/zenmind-tunnel-server/internal/config"
-	"github.com/linlay/zenmind-tunnel-server/internal/proxy"
+	"example.invalid/tunnel-hub-server/internal/config"
+	"example.invalid/tunnel-hub-server/internal/proxy"
 )
 
 func main() {
