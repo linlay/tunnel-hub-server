@@ -199,7 +199,7 @@ func TestRelayDesktopIdentityAuthorization(t *testing.T) {
 				t.Fatalf("code = %d, want %d, response=%+v", response.Code, tc.wantCode, response)
 			}
 			if tc.wantCode == 0 {
-				session, err := yamux.Client(tunnel.NewWebSocketNetConn(ws), yamux.DefaultConfig())
+				session, err := yamux.Client(tunnel.NewWebSocketNetConn(ws))
 				if err != nil {
 					t.Fatalf("start yamux: %v", err)
 				}
@@ -233,7 +233,7 @@ func TestRelayDesktopIdentityExpiryAndConnectionReplacement(t *testing.T) {
 		if err := ws.ReadJSON(&response); err != nil || response.Code != 0 {
 			t.Fatalf("open response=%+v err=%v", response, err)
 		}
-		session, err := yamux.Client(tunnel.NewWebSocketNetConn(ws), yamux.DefaultConfig())
+		session, err := yamux.Client(tunnel.NewWebSocketNetConn(ws))
 		if err != nil {
 			t.Fatalf("yamux: %v", err)
 		}
@@ -282,7 +282,7 @@ func TestRelayTunnelTrustedProxyRemoteAddrPersistsToSessionAndManager(t *testing
 		t.Fatalf("dial tunnel: %v", err)
 	}
 	defer ws.Close()
-	session, err := yamux.Client(tunnel.NewWebSocketNetConn(ws), yamux.DefaultConfig())
+	session, err := yamux.Client(tunnel.NewWebSocketNetConn(ws))
 	if err != nil {
 		t.Fatalf("start yamux client: %v", err)
 	}
@@ -403,7 +403,7 @@ func TestRelayTunnelLegacyBearerCompatibilityStartsYamux(t *testing.T) {
 		t.Fatalf("dial legacy tunnel: %v", err)
 	}
 	defer ws.Close()
-	session, err := yamux.Client(tunnel.NewWebSocketNetConn(ws), yamux.DefaultConfig())
+	session, err := yamux.Client(tunnel.NewWebSocketNetConn(ws))
 	if err != nil {
 		t.Fatalf("start legacy yamux client: %v", err)
 	}

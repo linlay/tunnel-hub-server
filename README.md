@@ -243,6 +243,8 @@ docker compose up -d --build
 
 Tunnel 端模板在 `deploy/nginx/tunnel-hub.conf.template` 和 `deploy/caddy/Caddyfile.template`，其中包含分享 origin 的 `/share/*`，以及分享/Tunnel API 两个 origin 的 `/assets/conversation-export/*` 直连 Relay 规则。上线前必须替换全部 `{{...}}` 占位符；分享关闭时删除分享 Host block。
 
+Relay 在 `/tunnel` 完成握手后每 20 秒发送一次空载荷的标准 WebSocket Ping，Agent 和 Desktop 必须按 WebSocket 协议返回 Pong。反向代理、负载均衡器、NAT 和防火墙的 WebSocket 空闲超时都必须大于 20 秒；生产模板使用更长的超时，避免空闲隧道被中间链路误判为失活。
+
 | 模板占位符 | 环境变量来源 |
 | --- | --- |
 | `{{PUBLIC_BASE}}` | `PUBLIC_BASE_DOMAIN` |

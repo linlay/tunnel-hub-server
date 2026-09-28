@@ -931,7 +931,7 @@ func runFakeDesktopBroker(t *testing.T, ctx context.Context, relayURL, token str
 		t.Errorf("fake desktop tunnel.open response = %#v", openResponse)
 		return
 	}
-	session, err := yamux.Client(tunnel.NewWebSocketNetConn(ws), yamux.DefaultConfig())
+	session, err := yamux.Client(tunnel.NewWebSocketNetConn(ws))
 	if err != nil {
 		t.Errorf("fake desktop yamux: %v", err)
 		return
@@ -1010,7 +1010,7 @@ func runFakeDesktopBrokerWithHandler(t *testing.T, ctx context.Context, relayURL
 		t.Errorf("fake desktop tunnel.open response = %#v", openResponse)
 		return
 	}
-	session, err := yamux.Client(tunnel.NewWebSocketNetConn(ws), yamux.DefaultConfig())
+	session, err := yamux.Client(tunnel.NewWebSocketNetConn(ws))
 	if err != nil {
 		t.Errorf("fake desktop yamux: %v", err)
 		return
@@ -1064,7 +1064,7 @@ func runFakeWebAppTunnelClient(t *testing.T, ctx context.Context, relayURL, toke
 		t.Errorf("fake webapp desktop tunnel.open response = %#v", openResponse)
 		return
 	}
-	session, err := yamux.Client(tunnel.NewWebSocketNetConn(ws), yamux.DefaultConfig())
+	session, err := yamux.Client(tunnel.NewWebSocketNetConn(ws))
 	if err != nil {
 		t.Errorf("fake webapp desktop yamux: %v", err)
 		return

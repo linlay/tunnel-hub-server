@@ -285,7 +285,7 @@ func runFakeResourceDesktop(t *testing.T, ctx context.Context, relayURL, token s
 		t.Errorf("fake desktop read tunnel.open response: %v", err)
 		return
 	}
-	session, err := yamux.Client(tunnel.NewWebSocketNetConn(ws), yamux.DefaultConfig())
+	session, err := yamux.Client(tunnel.NewWebSocketNetConn(ws))
 	if err != nil {
 		t.Errorf("fake desktop yamux: %v", err)
 		return
