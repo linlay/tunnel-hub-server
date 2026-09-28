@@ -65,10 +65,7 @@ func (a Agent) connectOnce(ctx context.Context) error {
 	defer ws.Close()
 
 	conn := tunnel.NewWebSocketNetConn(ws)
-	yamuxConfig := yamux.DefaultConfig()
-	yamuxConfig.EnableKeepAlive = true
-	yamuxConfig.KeepAliveInterval = 20 * time.Second
-	session, err := yamux.Client(conn, yamuxConfig)
+	session, err := yamux.Client(conn)
 	if err != nil {
 		return err
 	}

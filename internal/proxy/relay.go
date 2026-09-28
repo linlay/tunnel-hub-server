@@ -22,6 +22,11 @@ import (
 	"github.com/hashicorp/yamux"
 )
 
+const (
+	tunnelHeartbeatInterval     = 20 * time.Second
+	tunnelHeartbeatWriteTimeout = 5 * time.Second
+)
+
 type Relay struct {
 	DB                       *store.DB
 	Manager                  *Manager
@@ -231,10 +236,7 @@ func (r *Relay) HandleTunnel(w http.ResponseWriter, req *http.Request) {
 
 func (r *Relay) serveTunnelSession(ws *websocket.Conn, active ActiveTunnel, expiresAt time.Time, finish func()) {
 	conn := tunnel.NewWebSocketNetConn(ws)
-	config := yamux.DefaultConfig()
-	config.EnableKeepAlive = true
-	config.KeepAliveInterval = 20 * time.Second
-	session, err := yamux.Server(conn, config)
+	session, err := yamux.Server(conn)
 	if err != nil {
 		_ = conn.Close()
 		finish()
@@ -258,6 +260,7 @@ func (r *Relay) serveTunnelSession(ws *websocket.Conn, active ActiveTunnel, expi
 	_ = r.DB.AddEvent(context.Background(), eventPrefix+".connected", eventSubject+" connected", active.SessionID)
 	r.Manager.SetActive(&active)
 	r.Logger.Info(eventPrefix+" connected", "session", active.SessionID, "remote", active.RemoteAddr)
+	go r.monitorTunnelHeartbeat(ws, session, active, tunnelHeartbeatInterval, tunnelHeartbeatWriteTimeout)
 
 	<-session.CloseChan()
 
@@ -265,6 +268,33 @@ func (r *Relay) serveTunnelSession(ws *websocket.Conn, active ActiveTunnel, expi
 	finish()
 	_ = r.DB.AddEvent(context.Background(), eventPrefix+".disconnected", eventSubject+" disconnected", active.SessionID)
 	r.Logger.Info(eventPrefix+" disconnected", "session", active.SessionID)
+}
+
+func (r *Relay) monitorTunnelHeartbeat(ws *websocket.Conn, session *yamux.Session, active ActiveTunnel, interval, writeTimeout time.Duration) {
+	if err := runTunnelHeartbeat(ws, session, interval, writeTimeout); err != nil {
+		r.Logger.Warn("tunnel heartbeat failed", "session", active.SessionID, "kind", active.Key.Kind, "error", err)
+		_ = session.Close()
+	}
+}
+
+func runTunnelHeartbeat(ws *websocket.Conn, session *yamux.Session, interval, writeTimeout time.Duration) error {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-session.CloseChan():
+			return nil
+		case <-ticker.C:
+			if err := ws.WriteControl(websocket.PingMessage, nil, time.Now().Add(writeTimeout)); err != nil {
+				select {
+				case <-session.CloseChan():
+					return nil
+				default:
+					return err
+				}
+			}
+		}
+	}
 }
 
 func (r *Relay) HandlePublic(w http.ResponseWriter, req *http.Request) {

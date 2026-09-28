@@ -867,11 +867,11 @@ func withClaims(claims testSSOJWTClaims, mutate func(*testSSOJWTClaims)) testSSO
 func newAdminTestSession(t *testing.T) (*yamux.Session, *yamux.Session) {
 	t.Helper()
 	left, right := net.Pipe()
-	server, err := yamux.Server(left, yamux.DefaultConfig())
+	server, err := yamux.Server(left)
 	if err != nil {
 		t.Fatalf("start yamux server: %v", err)
 	}
-	client, err := yamux.Client(right, yamux.DefaultConfig())
+	client, err := yamux.Client(right)
 	if err != nil {
 		t.Fatalf("start yamux client: %v", err)
 	}

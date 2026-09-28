@@ -18,11 +18,6 @@ const (
 	maxFrameSize = 1 << 20
 )
 
-type Config struct {
-	EnableKeepAlive   bool
-	KeepAliveInterval time.Duration
-}
-
 type Session struct {
 	conn    net.Conn
 	nextID  uint64
@@ -47,15 +42,11 @@ type Stream struct {
 	closed    atomic.Bool
 }
 
-func DefaultConfig() *Config {
-	return &Config{}
-}
-
-func Server(conn net.Conn, _ *Config) (*Session, error) {
+func Server(conn net.Conn) (*Session, error) {
 	return newSession(conn, 2), nil
 }
 
-func Client(conn net.Conn, _ *Config) (*Session, error) {
+func Client(conn net.Conn) (*Session, error) {
 	return newSession(conn, 1), nil
 }
 
