@@ -22,6 +22,17 @@ import (
 	"example.invalid/tunnel-hub-server/internal/store"
 )
 
+func TestConversationShareAttachmentErrorCanRenderInsideSharePage(t *testing.T) {
+	attachment := httptest.NewRecorder()
+	writePublicConversationShareAttachmentError(attachment, http.StatusNotFound)
+	page := httptest.NewRecorder()
+	writePublicConversationShareError(page, http.StatusNotFound)
+	if !strings.Contains(attachment.Header().Get("Content-Security-Policy"), "frame-ancestors 'self'") ||
+		!strings.Contains(page.Header().Get("Content-Security-Policy"), "frame-ancestors 'none'") {
+		t.Fatal("share and attachment error pages must keep separate frame policies")
+	}
+}
+
 func TestConversationShareUploadRequiresEveryFrozenAttachment(t *testing.T) {
 	body := []byte("<html><script>alert(1)</script><p>报告</p></html>")
 	hash := sha256.Sum256(body)
