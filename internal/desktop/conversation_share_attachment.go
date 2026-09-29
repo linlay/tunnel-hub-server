@@ -115,18 +115,22 @@ func sanitizeSharedHTML(source []byte) []byte {
 	return []byte(out.String())
 }
 
+func writePublicConversationShareAttachmentError(w http.ResponseWriter, status int) {
+	writePublicConversationShareErrorWithFrame(w, status, "'self'")
+}
+
 func (s *Server) handleGetPublicConversationShareAttachment(w http.ResponseWriter, r *http.Request) {
 	path := strings.TrimPrefix(r.URL.Path, publicConversationSharePagePath)
 	segments := strings.Split(path, "/")
 	if len(segments) != 4 || segments[1] != "attachments" ||
 		!resourceIDPattern.MatchString(segments[2]) ||
 		(segments[3] != "preview" && segments[3] != "download") {
-		writePublicConversationShareError(w, http.StatusNotFound)
+		writePublicConversationShareAttachmentError(w, http.StatusNotFound)
 		return
 	}
 	shareID, ok := conversationShareIDFromPath(publicConversationSharePagePath+segments[0], publicConversationSharePagePath)
 	if !ok {
-		writePublicConversationShareError(w, http.StatusNotFound)
+		writePublicConversationShareAttachmentError(w, http.StatusNotFound)
 		return
 	}
 	resource, err := s.DB.ReadPublicConversationShareResource(r.Context(), shareID, segments[2], s.now().UTC(), conversationShareSessionHash(r, shareID))
@@ -134,22 +138,22 @@ func (s *Server) handleGetPublicConversationShareAttachment(w http.ResponseWrite
 		if !errors.Is(err, store.ErrNotFound) {
 			s.Logger.Error("read conversation share attachment", "error", err)
 		}
-		writePublicConversationShareError(w, http.StatusNotFound)
+		writePublicConversationShareAttachmentError(w, http.StatusNotFound)
 		return
 	}
 	if s.conversationShareResources == nil || (segments[3] == "preview" && resource.MIMEType != "text/html") {
-		writePublicConversationShareError(w, http.StatusNotFound)
+		writePublicConversationShareAttachmentError(w, http.StatusNotFound)
 		return
 	}
 	file, err := s.conversationShareResources.Open(shareID, resource.ID)
 	if err != nil {
-		writePublicConversationShareError(w, http.StatusNotFound)
+		writePublicConversationShareAttachmentError(w, http.StatusNotFound)
 		return
 	}
 	defer file.Close()
 	info, err := file.Stat()
 	if err != nil || info.Size() != resource.Size {
-		writePublicConversationShareError(w, http.StatusNotFound)
+		writePublicConversationShareAttachmentError(w, http.StatusNotFound)
 		return
 	}
 	header := w.Header()
@@ -160,7 +164,7 @@ func (s *Server) handleGetPublicConversationShareAttachment(w http.ResponseWrite
 		header.Set("Content-Disposition", mime.FormatMediaType("inline", map[string]string{"filename": resource.Name}))
 		source, err := io.ReadAll(io.LimitReader(file, resource.Size+1))
 		if err != nil || int64(len(source)) != resource.Size {
-			writePublicConversationShareError(w, http.StatusNotFound)
+			writePublicConversationShareAttachmentError(w, http.StatusNotFound)
 			return
 		}
 		body := sanitizeSharedHTML(source)

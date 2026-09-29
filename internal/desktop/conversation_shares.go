@@ -345,9 +345,13 @@ func conversationShareSessionHash(r *http.Request, id string) []byte {
 }
 
 func writePublicConversationShareError(w http.ResponseWriter, status int) {
+	writePublicConversationShareErrorWithFrame(w, status, "'none'")
+}
+
+func writePublicConversationShareErrorWithFrame(w http.ResponseWriter, status int, frameAncestors string) {
 	body := publicConversationShareErrorDocument(status)
 	setPublicConversationShareHeaders(w.Header())
-	w.Header().Set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'")
+	w.Header().Set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-ancestors "+frameAncestors)
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Content-Language", "zh-CN")
 	w.Header().Set("Content-Length", strconv.Itoa(len(body)))
