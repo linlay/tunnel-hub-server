@@ -466,10 +466,25 @@ func (db *DB) GetDesktopDeviceByOwnerAndID(ctx context.Context, ownerUserID, dev
 }
 
 func (db *DB) ListDesktopDevices(ctx context.Context) ([]DesktopDevice, error) {
-	rows, err := db.sql.QueryContext(ctx, `
-		SELECT device_id, display_device_id, device_name, owner_user_id, owner_email, owner_name, public_host, created_at, updated_at
-		FROM desktop_devices ORDER BY updated_at DESC
-	`)
+	return db.listDesktopDevices(ctx, "")
+}
+
+func (db *DB) ListDesktopDevicesByOwner(ctx context.Context, ownerID string) ([]DesktopDevice, error) {
+	if strings.TrimSpace(ownerID) == "" {
+		return nil, errors.New("owner is required")
+	}
+	return db.listDesktopDevices(ctx, ownerID)
+}
+
+func (db *DB) listDesktopDevices(ctx context.Context, ownerID string) ([]DesktopDevice, error) {
+	query := `SELECT device_id, display_device_id, device_name, owner_user_id, owner_email, owner_name, public_host, created_at, updated_at FROM desktop_devices`
+	args := []any{}
+	if ownerID != "" {
+		query += " WHERE owner_user_id = ?"
+		args = append(args, ownerID)
+	}
+	query += " ORDER BY updated_at DESC"
+	rows, err := db.sql.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}

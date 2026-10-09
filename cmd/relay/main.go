@@ -94,6 +94,7 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("configure desktop server: %w", err)
 	}
+	desktopServer.SetPresenceManager(manager)
 	cleanupContext, stopCleanup := context.WithCancel(context.Background())
 	defer stopCleanup()
 	go desktopServer.RunConversationShareCleanup(cleanupContext)

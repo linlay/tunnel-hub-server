@@ -420,3 +420,7 @@ make test-all
 测试账号应仅在独立测试实例使用，不得授予应用生产账号全局建库/删库权限。测试异常中断后可检查并清理本次测试创建的 `tunnel_test_*` 库；归属不明的库不要删除。
 
 提交前至少运行 `make test-all` 和 `make verify-neutral`。协议、转发、鉴权、配置、存储相关改动需要补充或更新对应 `*_test.go`。
+
+### Account mobile routes
+
+Set `IDENTITY_API_BASE_URL` explicitly to enable account Desktop registration and compensation validation. The API base must be HTTPS (HTTP is permitted only for loopback tests), without URL credentials, query or fragment. Identity owns device membership and signing; Hub owns live presence. Account App JWTs use the `app` audience and stable `account_id`, while canonical Desktop OAuth sessions retain their configured audience. Missing Identity/Manager state fails closed. No new signing key or relay credential is introduced.

@@ -15,6 +15,7 @@ import (
 
 	"example.invalid/tunnel-hub-server/internal/auth"
 	"example.invalid/tunnel-hub-server/internal/config"
+	"example.invalid/tunnel-hub-server/internal/proxy"
 	"example.invalid/tunnel-hub-server/internal/sharefiles"
 	"example.invalid/tunnel-hub-server/internal/store"
 	"example.invalid/tunnel-hub-server/internal/tunnel"
@@ -31,6 +32,7 @@ type Server struct {
 	Config                        config.RelayConfig
 	Logger                        *slog.Logger
 	ssoJWT                        *auth.SSOJWTVerifier
+	manager                       *proxy.Manager
 	now                           func() time.Time
 	recordConversationShareAccess func(context.Context, string, time.Time) error
 	conversationShareRenderer     conversationShareRenderer
@@ -40,6 +42,8 @@ type Server struct {
 type conversationShareRenderer interface {
 	Render(snapshot []byte, assetOrigin, brandID, productName, productDownloadPageURL string) ([]byte, error)
 }
+
+func (s *Server) SetPresenceManager(manager *proxy.Manager) { s.manager = manager }
 
 func (s *Server) SetConversationShareRenderer(renderer conversationShareRenderer) {
 	s.conversationShareRenderer = renderer
@@ -90,6 +94,14 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	switch {
+	case r.URL.Path == "/api/desktop/account-presence":
+		s.handleAccountPresence(w, r)
+	case r.URL.Path == "/api/desktop/route-credentials":
+		s.handleRouteCredential(w, r)
+	case r.URL.Path == "/api/desktop/route-credentials/validate":
+		s.handleRouteValidation(w, r)
+	case r.URL.Path == "/api/desktop/account-device/revoke":
+		s.handleAccountDeviceRevoke(w, r)
 	case r.URL.Path == conversationSharesPath:
 		switch r.Method {
 		case http.MethodPost:
@@ -148,6 +160,22 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if strings.TrimSpace(s.Config.IdentityAPIBaseURL) != "" {
+		var device struct {
+			AccountID     string `json:"accountId"`
+			DeviceID      string `json:"deviceId"`
+			SchemaVersion int    `json:"schemaVersion"`
+		}
+		if !s.identityRequest(w, r, "/api/auth/desktop-account-device", payload, &device) {
+			return
+		}
+		if device.SchemaVersion != 1 || device.AccountID != principal.UserID || device.DeviceID == "" {
+			writeError(w, http.StatusBadGateway, "Identity Desktop registration mismatch")
+			return
+		}
+		payload.DeviceID = device.DeviceID
+	}
+
 	result, err := s.registerDesktopDevice(r, principal, payload)
 	if errors.Is(err, store.ErrDesktopDeviceHostConflict) {
 		writeError(w, http.StatusConflict, "desktop public host already exists")
@@ -158,7 +186,11 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.addRegistrationEvent(result)
-	writeJSON(w, http.StatusOK, s.registrationResponse(result))
+	response := s.registrationResponse(result)
+	if strings.TrimSpace(s.Config.IdentityAPIBaseURL) != "" {
+		response.AccountID = principal.UserID
+	}
+	writeJSON(w, http.StatusOK, response)
 }
 
 func (s *Server) handleRegisterWebApp(w http.ResponseWriter, r *http.Request, deviceID, name string) {
@@ -378,6 +410,7 @@ func (p registerPayload) Validate() error {
 }
 
 type registerResponse struct {
+	AccountID    string `json:"accountId,omitempty"`
 	DeviceID     string `json:"deviceId"`
 	PublicHost   string `json:"publicHost"`
 	PublicURL    string `json:"publicUrl"`

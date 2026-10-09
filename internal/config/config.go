@@ -31,6 +31,7 @@ type RelayConfig struct {
 	AdminSessionTTL              time.Duration
 	CookieSecure                 bool
 	MobileWebAppCookieSecure     bool
+	IdentityAPIBaseURL           string
 	SSOJWTIssuer                 string
 	SSOJWTPublicKeyFile          string
 	SSOJWTPublicKeyPEM           string
@@ -115,6 +116,7 @@ func LoadRelayConfigStrict() (RelayConfig, error) {
 		AdminSessionTTL:              envDuration("ADMIN_SESSION_TTL", 24*time.Hour),
 		CookieSecure:                 envBool("COOKIE_SECURE", false),
 		MobileWebAppCookieSecure:     envBool("MOBILE_WEBAPP_COOKIE_SECURE", true),
+		IdentityAPIBaseURL:           env("IDENTITY_API_BASE_URL", ""),
 		SSOJWTIssuer:                 issuer,
 		SSOJWTPublicKeyFile:          publicKeyFile,
 		SSOJWTPublicKeyPEM:           publicKeyPEM,

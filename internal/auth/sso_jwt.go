@@ -29,12 +29,14 @@ type SSOJWTConfig struct {
 }
 
 type SSOJWTPrincipal struct {
-	UserID    string
-	Email     string
-	Name      string
-	Role      string
-	Scope     string
-	ExpiresAt time.Time
+	UserID     string
+	DeviceID   string
+	DeviceKind string
+	Email      string
+	Name       string
+	Role       string
+	Scope      string
+	ExpiresAt  time.Time
 }
 
 type SSOJWTVerifier struct {
@@ -139,6 +141,14 @@ func (v *SSOJWTVerifier) VerifyBearerHeader(header string) (SSOJWTPrincipal, err
 }
 
 func (v *SSOJWTVerifier) Verify(token string, now time.Time) (SSOJWTPrincipal, error) {
+	return v.verify(token, now, v.audience, v.allowAnyAudience)
+}
+
+func (v *SSOJWTVerifier) VerifyAccountApp(token string, now time.Time) (SSOJWTPrincipal, error) {
+	return v.verify(token, now, "app", false)
+}
+
+func (v *SSOJWTVerifier) verify(token string, now time.Time, audience string, allowAnyAudience bool) (SSOJWTPrincipal, error) {
 	parts := strings.Split(token, ".")
 	if len(parts) != 3 {
 		return SSOJWTPrincipal{}, errors.New("invalid JWT")
@@ -174,7 +184,7 @@ func (v *SSOJWTVerifier) Verify(token string, now time.Time) (SSOJWTPrincipal, e
 	if readStringClaim(claims, "iss") != v.issuer {
 		return SSOJWTPrincipal{}, errors.New("issuer mismatch")
 	}
-	if !v.allowAnyAudience && !claimHasAudience(claims["aud"], v.audience) {
+	if !allowAnyAudience && !claimHasAudience(claims["aud"], audience) {
 		return SSOJWTPrincipal{}, errors.New("audience mismatch")
 	}
 	exp := readNumberClaim(claims, "exp")
@@ -189,16 +199,21 @@ func (v *SSOJWTVerifier) Verify(token string, now time.Time) (SSOJWTPrincipal, e
 		return SSOJWTPrincipal{}, errors.New("token issued in the future")
 	}
 	userID := readStringClaim(claims, v.userIDClaim)
+	if accountID := readStringClaim(claims, "account_id"); accountID != "" {
+		userID = accountID
+	}
 	if userID == "" {
 		return SSOJWTPrincipal{}, errors.New("missing user id claim")
 	}
 	return SSOJWTPrincipal{
-		UserID:    userID,
-		Email:     readStringClaim(claims, "email"),
-		Name:      readStringClaim(claims, "name"),
-		Role:      strings.ToLower(readStringClaim(claims, "role")),
-		Scope:     readStringClaim(claims, "scope"),
-		ExpiresAt: time.Unix(exp, 0).UTC(),
+		UserID:     userID,
+		DeviceID:   readStringClaim(claims, "device_id"),
+		DeviceKind: readStringClaim(claims, "device_kind"),
+		Email:      readStringClaim(claims, "email"),
+		Name:       readStringClaim(claims, "name"),
+		Role:       strings.ToLower(readStringClaim(claims, "role")),
+		Scope:      readStringClaim(claims, "scope"),
+		ExpiresAt:  time.Unix(exp, 0).UTC(),
 	}, nil
 }
 
