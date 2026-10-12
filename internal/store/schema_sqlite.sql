@@ -49,6 +49,7 @@ CREATE TABLE IF NOT EXISTS desktop_devices (
 	public_host TEXT NOT NULL UNIQUE,
 	created_at TIMESTAMP NOT NULL,
 	updated_at TIMESTAMP NOT NULL,
+	revoked_at TIMESTAMP,
 	UNIQUE(owner_user_id, display_device_id)
 );
 

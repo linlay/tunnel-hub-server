@@ -63,13 +63,13 @@ func TestAccountPresenceUsesLiveManagerAndStableAccountID(t *testing.T) {
 	previous := identityHTTP
 	t.Cleanup(func() { identityHTTP = previous })
 	identityHTTP = &http.Client{Transport: identityTestTransport(func(r *http.Request) (*http.Response, error) {
-		if r.URL.Path != "/api/auth/account-devices/validate" || r.Header.Get("Authorization") != "Bearer "+token {
+		if r.Method != "GET" || r.URL.Path != "/api/auth/me" || r.Header.Get("Authorization") != "Bearer "+token {
 			t.Fatal("incorrect validation boundary")
 		}
-		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(`{"schemaVersion":1,"accountId":"42","sourceDeviceId":"11111111-1111-4111-8111-111111111111"}`)), Header: make(http.Header)}, nil
+		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(`{"schemaVersion":1,"accountId":"42","deviceId":"11111111-1111-4111-8111-111111111111"}`)), Header: make(http.Header)}, nil
 	})}
 	read := func() bool {
-		rr := accountAPI(t, s, "GET", "/api/desktop/account-presence", token, "")
+		rr := accountAPI(t, s, "GET", "/api/desktop/account-devices", token, "")
 		if rr.Code != 200 {
 			t.Fatalf("status=%d %s", rr.Code, rr.Body.String())
 		}
@@ -118,11 +118,12 @@ func TestAccountRoutesFailClosedForOfflineUnknownAndAuthorityFailure(t *testing.
 	token := accountMobileJWT(t, defaultDesktopPrivateKey)
 	s.Config.IdentityAPIBaseURL = "https://identity.example.test"
 	s.SetPresenceManager(proxy.NewManager())
+	mockAccountSession(t, s, token)
 	rr := accountAPI(t, s, "POST", "/api/desktop/route-credentials", token, `{"targetDesktopId":"desktop-a","requestId":"22222222-2222-4222-8222-222222222222"}`)
 	if rr.Code != 409 {
 		t.Fatalf("offline status=%d", rr.Code)
 	}
-	rr = accountAPI(t, s, "POST", "/api/desktop/route-credentials", token, `{"targetDesktopId":"other-account-device"}`)
+	rr = accountAPI(t, s, "POST", "/api/desktop/route-credentials", token, `{"targetDesktopId":"other-account-device","requestId":"22222222-2222-4222-8222-222222222222"}`)
 	if rr.Code != 403 {
 		t.Fatalf("cross-account status=%d", rr.Code)
 	}
@@ -131,28 +132,26 @@ func TestAccountRoutesFailClosedForOfflineUnknownAndAuthorityFailure(t *testing.
 	identityHTTP = &http.Client{Transport: identityTestTransport(func(*http.Request) (*http.Response, error) {
 		return &http.Response{StatusCode: 403, Body: io.NopCloser(strings.NewReader("refused")), Header: make(http.Header)}, nil
 	})}
-	rr = accountAPI(t, s, "GET", "/api/desktop/account-presence", token, "")
+	rr = accountAPI(t, s, "GET", "/api/desktop/account-devices", token, "")
 	if rr.Code != 403 {
 		t.Fatal("revoked phone still received presence")
 	}
 	s.Config.IdentityAPIBaseURL = ""
-	rr = accountAPI(t, s, "GET", "/api/desktop/account-presence", token, "")
+	rr = accountAPI(t, s, "GET", "/api/desktop/account-devices", token, "")
 	if rr.Code != 503 {
 		t.Fatal("unknown Identity state appeared offline")
 	}
 }
 
-func TestAccountRegistrationReturnsOnlyAuthorityConfirmedAccountMetadata(t *testing.T) {
+func TestAccountRegistrationUsesHubOwnerAndExistingDeviceID(t *testing.T) {
 	s, db := newDesktopTestServer(t)
 	s.Config.IdentityAPIBaseURL = "https://identity.example.test"
 	previous := identityHTTP
 	t.Cleanup(func() { identityHTTP = previous })
-	target := "22222222-2222-4222-8222-222222222222"
+	target := "initial-desktop"
 	identityHTTP = &http.Client{Transport: identityTestTransport(func(r *http.Request) (*http.Response, error) {
-		if r.URL.Path != "/api/auth/desktop-account-device" {
-			t.Fatal("unexpected registration authority")
-		}
-		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(`{"schemaVersion":1,"accountId":"42","deviceId":"` + target + `"}`)), Header: make(http.Header)}, nil
+		t.Fatal("Desktop registration must not call Identity")
+		return nil, nil
 	})}
 	rr := performRegister(t, s, desktopRegisterBody("initial-desktop", "", false), defaultDesktopJWT)
 	if rr.Code != 200 {
@@ -174,7 +173,7 @@ func TestAccountRegistrationReturnsOnlyAuthorityConfirmedAccountMetadata(t *test
 	if err := json.Unmarshal(rr.Body.Bytes(), &response); err != nil {
 		t.Fatal(err)
 	}
-	if response.AccountID != "" {
-		t.Fatal("legacy registration falsely advertised account authority")
+	if response.AccountID != "42" || response.DeviceID != "legacy-desktop" {
+		t.Fatal("registration did not preserve Hub ownership and device identity")
 	}
 }

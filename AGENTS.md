@@ -176,7 +176,7 @@ npm run dev
 
 - `DATABASE_TYPE` 缺省为 `mysql`；MySQL 连接只来自 `MYSQL_*`，SQLite 路径只来自 `RELAY_DB_PATH`。`MYSQL_PASSWORD` 不裁剪，不输出 DSN 或完整配置。
 - 使用 `database/sql` 和具体 `store.DB`，数据库差异只允许出现在连接、schema 和必要 SQL/事务分支；不引入 ORM、通用方言框架或 Repository。
-- 全新 MySQL 库由应用逐表建表；全新 SQLite 库在事务中建表并写入版本。两者都不导入历史数据或自动修补已有表。
+- 全新 MySQL 库由应用逐表建表；全新 SQLite 库在事务中建表并写入版本。两者采用现有显式迁移；Desktop 撤销字段升级必须保留设备、公网地址、分享及资源。
 - 使用 InnoDB、utf8mb4、区分大小写的标识符、UTC DATETIME(6)；`max_allowed_packet` 至少 64 MiB。
 - 一次性分享提交成功后才返回正文；设备/WebApp 注册和最后管理员保护必须通过数据库约束和事务保证并发语义。
 - MySQL 测试使用 `internal/testutil/mysqltest` 创建独立随机库，不得读取生产账号或静默跳过；SQLite 测试只使用 `t.TempDir()` 下的文件。清理失败必须明确报告。

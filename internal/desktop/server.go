@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"example.invalid/tunnel-hub-server/internal/auth"
@@ -28,6 +29,8 @@ const publicHostRetryLimit = 8
 const publicLabelRandomBytes = 8
 
 type Server struct {
+	routeTicketsMu                sync.Mutex
+	routeTickets                  map[[32]byte]routeTicket
 	DB                            *store.DB
 	Config                        config.RelayConfig
 	Logger                        *slog.Logger
@@ -94,8 +97,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	switch {
-	case r.URL.Path == "/api/desktop/account-presence":
-		s.handleAccountPresence(w, r)
+	case r.URL.Path == "/api/desktop/account-devices":
+		s.handleAccountDevices(w, r)
+	case strings.HasPrefix(r.URL.Path, "/api/desktop/account-devices/"):
+		s.handleAccountDevice(w, r)
 	case r.URL.Path == "/api/desktop/route-credentials":
 		s.handleRouteCredential(w, r)
 	case r.URL.Path == "/api/desktop/route-credentials/validate":
@@ -160,23 +165,11 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if strings.TrimSpace(s.Config.IdentityAPIBaseURL) != "" {
-		var device struct {
-			AccountID     string `json:"accountId"`
-			DeviceID      string `json:"deviceId"`
-			SchemaVersion int    `json:"schemaVersion"`
-		}
-		if !s.identityRequest(w, r, "/api/auth/desktop-account-device", payload, &device) {
-			return
-		}
-		if device.SchemaVersion != 1 || device.AccountID != principal.UserID || device.DeviceID == "" {
-			writeError(w, http.StatusBadGateway, "Identity Desktop registration mismatch")
-			return
-		}
-		payload.DeviceID = device.DeviceID
-	}
-
 	result, err := s.registerDesktopDevice(r, principal, payload)
+	if errors.Is(err, store.ErrDesktopDeviceRevoked) {
+		writeError(w, http.StatusForbidden, "Desktop registration is revoked")
+		return
+	}
 	if errors.Is(err, store.ErrDesktopDeviceHostConflict) {
 		writeError(w, http.StatusConflict, "desktop public host already exists")
 		return
@@ -187,9 +180,7 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 	}
 	s.addRegistrationEvent(result)
 	response := s.registrationResponse(result)
-	if strings.TrimSpace(s.Config.IdentityAPIBaseURL) != "" {
-		response.AccountID = principal.UserID
-	}
+	response.AccountID = principal.UserID
 	writeJSON(w, http.StatusOK, response)
 }
 
@@ -302,6 +293,10 @@ func (s *Server) authorizeRegistration(w http.ResponseWriter, r *http.Request) (
 			return auth.SSOJWTPrincipal{}, false
 		}
 		writeError(w, http.StatusUnauthorized, "invalid bearer token")
+		return auth.SSOJWTPrincipal{}, false
+	}
+	if principal.DeviceID != "" {
+		writeError(w, http.StatusUnauthorized, "Desktop OAuth session required")
 		return auth.SSOJWTPrincipal{}, false
 	}
 	if !s.Config.SSOJWTAllowMissingScope && !principal.HasScope("tunnel") {

@@ -29,14 +29,13 @@ type SSOJWTConfig struct {
 }
 
 type SSOJWTPrincipal struct {
-	UserID     string
-	DeviceID   string
-	DeviceKind string
-	Email      string
-	Name       string
-	Role       string
-	Scope      string
-	ExpiresAt  time.Time
+	UserID    string
+	DeviceID  string
+	Email     string
+	Name      string
+	Role      string
+	Scope     string
+	ExpiresAt time.Time
 }
 
 type SSOJWTVerifier struct {
@@ -206,14 +205,13 @@ func (v *SSOJWTVerifier) verify(token string, now time.Time, audience string, al
 		return SSOJWTPrincipal{}, errors.New("missing user id claim")
 	}
 	return SSOJWTPrincipal{
-		UserID:     userID,
-		DeviceID:   readStringClaim(claims, "device_id"),
-		DeviceKind: readStringClaim(claims, "device_kind"),
-		Email:      readStringClaim(claims, "email"),
-		Name:       readStringClaim(claims, "name"),
-		Role:       strings.ToLower(readStringClaim(claims, "role")),
-		Scope:      readStringClaim(claims, "scope"),
-		ExpiresAt:  time.Unix(exp, 0).UTC(),
+		UserID:    userID,
+		DeviceID:  readStringClaim(claims, "device_id"),
+		Email:     readStringClaim(claims, "email"),
+		Name:      readStringClaim(claims, "name"),
+		Role:      strings.ToLower(readStringClaim(claims, "role")),
+		Scope:     readStringClaim(claims, "scope"),
+		ExpiresAt: time.Unix(exp, 0).UTC(),
 	}, nil
 }
 

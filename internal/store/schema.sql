@@ -49,6 +49,7 @@ CREATE TABLE IF NOT EXISTS desktop_devices (
 	public_host VARCHAR(255) NOT NULL UNIQUE,
 	created_at DATETIME(6) NOT NULL,
 	updated_at DATETIME(6) NOT NULL,
+	revoked_at DATETIME(6),
 	UNIQUE(owner_user_id, display_device_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
 

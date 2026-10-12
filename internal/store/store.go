@@ -16,6 +16,7 @@ import (
 
 var (
 	ErrNotFound                  = errors.New("not found")
+	ErrDesktopDeviceRevoked      = errors.New("desktop device is revoked")
 	ErrDesktopDeviceHostConflict = errors.New("desktop device host already exists")
 )
 
@@ -52,15 +53,16 @@ type TunnelToken struct {
 }
 
 type DesktopDevice struct {
-	DeviceKey   string    `json:"-"`
-	DeviceID    string    `json:"deviceId"`
-	DeviceName  string    `json:"deviceName,omitempty"`
-	OwnerUserID string    `json:"ownerUserId,omitempty"`
-	OwnerEmail  string    `json:"ownerEmail,omitempty"`
-	OwnerName   string    `json:"ownerName,omitempty"`
-	PublicHost  string    `json:"publicHost"`
-	CreatedAt   time.Time `json:"createdAt"`
-	UpdatedAt   time.Time `json:"updatedAt"`
+	RevokedAt   *time.Time `json:"revokedAt,omitempty"`
+	DeviceKey   string     `json:"-"`
+	DeviceID    string     `json:"deviceId"`
+	DeviceName  string     `json:"deviceName,omitempty"`
+	OwnerUserID string     `json:"ownerUserId,omitempty"`
+	OwnerEmail  string     `json:"ownerEmail,omitempty"`
+	OwnerName   string     `json:"ownerName,omitempty"`
+	PublicHost  string     `json:"publicHost"`
+	CreatedAt   time.Time  `json:"createdAt"`
+	UpdatedAt   time.Time  `json:"updatedAt"`
 }
 
 type DesktopWebApp struct {
@@ -435,6 +437,13 @@ func (db *DB) RegisterDesktopDevice(ctx context.Context, input RegisterDesktopDe
 	if err != nil {
 		return RegisterDesktopDeviceResult{}, err
 	}
+	if device.RevokedAt != nil {
+		return RegisterDesktopDeviceResult{}, ErrDesktopDeviceRevoked
+	}
+	// Registration refreshes transport metadata; reconnects must not undo a Hub rename.
+	if device.DeviceName != "" {
+		input.DeviceName = device.DeviceName
+	}
 	device, err = updateDesktopDeviceTx(ctx, tx, device.DeviceKey, input.DeviceID, input.DeviceName, input.OwnerUserID, input.OwnerEmail, input.OwnerName, device.PublicHost)
 	if err != nil {
 		return RegisterDesktopDeviceResult{}, err
@@ -450,17 +459,17 @@ func (db *DB) RegisterDesktopDevice(ctx context.Context, input RegisterDesktopDe
 
 func (db *DB) GetDesktopDeviceByPublicHost(ctx context.Context, host string) (DesktopDevice, error) {
 	row := db.sql.QueryRowContext(ctx, `
-		SELECT device_id, display_device_id, device_name, owner_user_id, owner_email, owner_name, public_host, created_at, updated_at
-		FROM desktop_devices WHERE public_host = ?
+		SELECT device_id, display_device_id, device_name, owner_user_id, owner_email, owner_name, public_host, created_at, updated_at, revoked_at
+		FROM desktop_devices WHERE public_host = ? AND revoked_at IS NULL
 	`, tunnel.NormalizeHost(host))
 	return scanDesktopDevice(row)
 }
 
 func (db *DB) GetDesktopDeviceByOwnerAndID(ctx context.Context, ownerUserID, deviceID string) (DesktopDevice, error) {
 	row := db.sql.QueryRowContext(ctx, `
-		SELECT device_id, display_device_id, device_name, owner_user_id, owner_email, owner_name, public_host, created_at, updated_at
+		SELECT device_id, display_device_id, device_name, owner_user_id, owner_email, owner_name, public_host, created_at, updated_at, revoked_at
 		FROM desktop_devices
-		WHERE owner_user_id = ? AND display_device_id = ?
+		WHERE owner_user_id = ? AND display_device_id = ? AND revoked_at IS NULL
 	`, strings.TrimSpace(ownerUserID), strings.TrimSpace(deviceID))
 	return scanDesktopDevice(row)
 }
@@ -477,10 +486,10 @@ func (db *DB) ListDesktopDevicesByOwner(ctx context.Context, ownerID string) ([]
 }
 
 func (db *DB) listDesktopDevices(ctx context.Context, ownerID string) ([]DesktopDevice, error) {
-	query := `SELECT device_id, display_device_id, device_name, owner_user_id, owner_email, owner_name, public_host, created_at, updated_at FROM desktop_devices`
+	query := `SELECT device_id, display_device_id, device_name, owner_user_id, owner_email, owner_name, public_host, created_at, updated_at, revoked_at FROM desktop_devices`
 	args := []any{}
 	if ownerID != "" {
-		query += " WHERE owner_user_id = ?"
+		query += " WHERE owner_user_id = ? AND revoked_at IS NULL"
 		args = append(args, ownerID)
 	}
 	query += " ORDER BY updated_at DESC"
@@ -542,6 +551,9 @@ func (db *DB) RegisterDesktopWebApp(ctx context.Context, input RegisterDesktopWe
 	device, err := db.lockDesktopDeviceByOwnerAndDisplayTx(ctx, tx, input.OwnerUserID, input.DeviceID)
 	if err != nil {
 		return RegisterDesktopWebAppResult{}, err
+	}
+	if device.RevokedAt != nil {
+		return RegisterDesktopWebAppResult{}, ErrDesktopDeviceRevoked
 	}
 	webApp, err := getDesktopWebAppByDeviceAndNameTx(ctx, tx, device.DeviceKey, input.Name)
 	if errors.Is(err, ErrNotFound) {
@@ -610,7 +622,7 @@ func (db *DB) GetActiveDesktopWebAppRouteByHost(ctx context.Context, host string
 		FROM desktop_webapps w
 		JOIN desktop_devices d ON d.device_id = w.device_id
 		JOIN routes r ON r.id = w.route_id
-		WHERE w.public_host = ? AND w.active = 1 AND r.active = 1
+		WHERE w.public_host = ? AND w.active = 1 AND r.active = 1 AND d.revoked_at IS NULL
 	`, tunnel.NormalizeHost(host))
 	var result DesktopWebAppRoute
 	var deviceName, ownerEmail, ownerName sql.NullString
@@ -1029,7 +1041,7 @@ func getRouteByHostTx(ctx context.Context, tx *sql.Tx, host string) (Route, erro
 
 func (db *DB) lockDesktopDeviceByOwnerAndDisplayTx(ctx context.Context, tx *sql.Tx, ownerUserID, deviceID string) (DesktopDevice, error) {
 	row := tx.QueryRowContext(ctx, `
-		SELECT device_id, display_device_id, device_name, owner_user_id, owner_email, owner_name, public_host, created_at, updated_at
+		SELECT device_id, display_device_id, device_name, owner_user_id, owner_email, owner_name, public_host, created_at, updated_at, revoked_at
 		FROM desktop_devices
 		WHERE owner_user_id = ? AND display_device_id = ?`+db.forUpdateClause()+`
 	`, strings.TrimSpace(ownerUserID), strings.TrimSpace(deviceID))
@@ -1038,16 +1050,16 @@ func (db *DB) lockDesktopDeviceByOwnerAndDisplayTx(ctx context.Context, tx *sql.
 
 func getDesktopDeviceByKeyTx(ctx context.Context, tx *sql.Tx, deviceKey string) (DesktopDevice, error) {
 	row := tx.QueryRowContext(ctx, `
-		SELECT device_id, display_device_id, device_name, owner_user_id, owner_email, owner_name, public_host, created_at, updated_at
-		FROM desktop_devices WHERE device_id = ?
+		SELECT device_id, display_device_id, device_name, owner_user_id, owner_email, owner_name, public_host, created_at, updated_at, revoked_at
+		FROM desktop_devices WHERE device_id = ? AND revoked_at IS NULL
 	`, strings.TrimSpace(deviceKey))
 	return scanDesktopDevice(row)
 }
 
 func getDesktopDeviceByPublicHostTx(ctx context.Context, tx *sql.Tx, publicHost string) (DesktopDevice, error) {
 	row := tx.QueryRowContext(ctx, `
-		SELECT device_id, display_device_id, device_name, owner_user_id, owner_email, owner_name, public_host, created_at, updated_at
-		FROM desktop_devices WHERE public_host = ?
+		SELECT device_id, display_device_id, device_name, owner_user_id, owner_email, owner_name, public_host, created_at, updated_at, revoked_at
+		FROM desktop_devices WHERE public_host = ? AND revoked_at IS NULL
 	`, tunnel.NormalizeHost(publicHost))
 	return scanDesktopDevice(row)
 }
@@ -1146,6 +1158,7 @@ func scanRoute(row rowScanner) (Route, error) {
 
 func scanDesktopDevice(row rowScanner) (DesktopDevice, error) {
 	var device DesktopDevice
+	var revokedAt sql.NullTime
 	var deviceName sql.NullString
 	var ownerEmail sql.NullString
 	var ownerName sql.NullString
@@ -1159,6 +1172,7 @@ func scanDesktopDevice(row rowScanner) (DesktopDevice, error) {
 		&device.PublicHost,
 		&device.CreatedAt,
 		&device.UpdatedAt,
+		&revokedAt,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return DesktopDevice{}, ErrNotFound
@@ -1174,6 +1188,9 @@ func scanDesktopDevice(row rowScanner) (DesktopDevice, error) {
 	}
 	if ownerName.Valid {
 		device.OwnerName = ownerName.String
+	}
+	if revokedAt.Valid {
+		device.RevokedAt = &revokedAt.Time
 	}
 	return device, nil
 }

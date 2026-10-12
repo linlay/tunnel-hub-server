@@ -194,6 +194,10 @@ func (r *Relay) HandleTunnel(w http.ResponseWriter, req *http.Request) {
 		_ = ws.WriteJSON(tunnel.NewErrorResponse(tunnel.NamespaceDesktop, tunnel.TypeTunnelOpen, open.ID, http.StatusUnauthorized, "invalid identity token"))
 		return
 	}
+	if principal.DeviceID != "" {
+		_ = ws.WriteJSON(tunnel.NewErrorResponse(tunnel.NamespaceDesktop, tunnel.TypeTunnelOpen, open.ID, http.StatusUnauthorized, "Desktop OAuth session required"))
+		return
+	}
 	if !r.allowMissingTunnelScope && !principal.HasScope("tunnel") {
 		_ = ws.WriteJSON(tunnel.NewErrorResponse(tunnel.NamespaceDesktop, tunnel.TypeTunnelOpen, open.ID, http.StatusForbidden, "tunnel scope required"))
 		return
@@ -259,6 +263,13 @@ func (r *Relay) serveTunnelSession(ws *websocket.Conn, active ActiveTunnel, expi
 	}
 	_ = r.DB.AddEvent(context.Background(), eventPrefix+".connected", eventSubject+" connected", active.SessionID)
 	r.Manager.SetActive(&active)
+	if active.Key.Kind == ConnectionKindDesktop {
+		// Close a handshake that raced with revocation before Manager registration.
+		valid, err := r.DB.IsDesktopDeviceActive(context.Background(), active.Key.ID)
+		if err != nil || !valid {
+			_ = session.Close()
+		}
+	}
 	r.Logger.Info(eventPrefix+" connected", "session", active.SessionID, "remote", active.RemoteAddr)
 	go r.monitorTunnelHeartbeat(ws, session, active, tunnelHeartbeatInterval, tunnelHeartbeatWriteTimeout)
 

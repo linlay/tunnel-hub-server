@@ -19,7 +19,7 @@ import (
 //go:embed schema_sqlite.sql
 var sqliteSchema string
 
-const sqliteSchemaVersion = 3
+const sqliteSchemaVersion = 4
 
 func OpenSQLite(ctx context.Context, path string) (*DB, error) {
 	path = strings.TrimSpace(path)
@@ -91,7 +91,7 @@ func (db *DB) migrateSQLite(ctx context.Context, resourceDir string) error {
 				return fmt.Errorf("initialize SQLite schema: %w", err)
 			}
 		}
-		if _, err := tx.ExecContext(ctx, `PRAGMA user_version = 3`); err != nil {
+		if _, err := tx.ExecContext(ctx, `PRAGMA user_version = 4`); err != nil {
 			return fmt.Errorf("write SQLite schema version: %w", err)
 		}
 	case 1:
@@ -112,6 +112,9 @@ func (db *DB) migrateSQLite(ctx context.Context, resourceDir string) error {
 		if _, err := tx.ExecContext(ctx, `PRAGMA user_version = 3`); err != nil {
 			return fmt.Errorf("write SQLite schema version: %w", err)
 		}
+		if err := migrateSQLiteDesktopRevocation(ctx, tx); err != nil {
+			return err
+		}
 		if err := verifySQLiteSchema(ctx, tx); err != nil {
 			return err
 		}
@@ -130,7 +133,14 @@ func (db *DB) migrateSQLite(ctx context.Context, resourceDir string) error {
 		if err := db.migrateLegacyConversationShareAttachments(ctx, resourceDir); err != nil {
 			return fmt.Errorf("migrate SQLite conversation share resources: %w", err)
 		}
-		return nil
+		return db.migrateSQLite(ctx, resourceDir)
+	case 3:
+		if err := migrateSQLiteDesktopRevocation(ctx, tx); err != nil {
+			return err
+		}
+		if err := verifySQLiteSchema(ctx, tx); err != nil {
+			return err
+		}
 	case sqliteSchemaVersion:
 		if err := verifySQLiteSchema(ctx, tx); err != nil {
 			return err
@@ -140,6 +150,16 @@ func (db *DB) migrateSQLite(ctx context.Context, resourceDir string) error {
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit SQLite schema: %w", err)
+	}
+	return nil
+}
+
+func migrateSQLiteDesktopRevocation(ctx context.Context, tx *sql.Tx) error {
+	if _, err := tx.ExecContext(ctx, `ALTER TABLE desktop_devices ADD COLUMN revoked_at TIMESTAMP`); err != nil {
+		return fmt.Errorf("add SQLite Desktop revocation: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `PRAGMA user_version = 4`); err != nil {
+		return fmt.Errorf("write SQLite schema version: %w", err)
 	}
 	return nil
 }
@@ -161,6 +181,13 @@ func verifySQLiteSchema(ctx context.Context, tx *sql.Tx) error {
 	}
 	if tables != expectedTables {
 		return errors.New("SQLite schema is incomplete")
+	}
+	var columns int
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM pragma_table_info('desktop_devices') WHERE name = 'revoked_at'`).Scan(&columns); err != nil {
+		return fmt.Errorf("verify Desktop revocation schema: %w", err)
+	}
+	if columns != 1 {
+		return errors.New("SQLite schema is missing Desktop revocation")
 	}
 	return nil
 }

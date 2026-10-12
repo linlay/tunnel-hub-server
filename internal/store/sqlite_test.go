@@ -26,6 +26,7 @@ func TestSQLiteMigratesLegacyConversationShareBlobsToFiles(t *testing.T) {
 	digest := sha256.Sum256(body)
 	for _, statement := range []string{
 		`CREATE TABLE conversation_shares (id TEXT PRIMARY KEY)`,
+		`CREATE TABLE conversation_share_resources (share_id TEXT NOT NULL, resource_id TEXT NOT NULL, name TEXT NOT NULL, mime_type TEXT NOT NULL, size_bytes INTEGER NOT NULL, sha256 TEXT NOT NULL, PRIMARY KEY (share_id, resource_id), FOREIGN KEY (share_id) REFERENCES conversation_shares(id) ON DELETE CASCADE)`,
 		`CREATE TABLE conversation_share_attachments (share_id TEXT NOT NULL, attachment_id TEXT NOT NULL, name TEXT NOT NULL, mime_type TEXT NOT NULL, size_bytes INTEGER NOT NULL, sha256 TEXT NOT NULL, body BLOB NOT NULL, PRIMARY KEY (share_id, attachment_id), FOREIGN KEY (share_id) REFERENCES conversation_shares(id) ON DELETE CASCADE)`,
 		`INSERT INTO conversation_shares (id) VALUES ('share_legacy')`,
 	} {
@@ -51,7 +52,7 @@ func TestSQLiteMigratesLegacyConversationShareBlobsToFiles(t *testing.T) {
 	if err := os.WriteFile(preexisting, body, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.Migrate(ctx, resourceDir); err != nil {
+	if err := db.migrateLegacyConversationShareAttachments(ctx, resourceDir); err != nil {
 		t.Fatal(err)
 	}
 	if err := db.migrateLegacyConversationShareAttachments(ctx, resourceDir); err != nil {
@@ -87,7 +88,7 @@ func TestSQLiteSchemaLifecycleAndConnectionSettings(t *testing.T) {
 		`PRAGMA foreign_keys`: "1",
 		`PRAGMA journal_mode`: "wal",
 		`PRAGMA busy_timeout`: "5000",
-		`PRAGMA user_version`: "3",
+		`PRAGMA user_version`: "4",
 	} {
 		var got string
 		if err := db.sql.QueryRow(query).Scan(&got); err != nil || !strings.EqualFold(got, want) {
@@ -139,10 +140,10 @@ func TestSQLiteRejectsUnsupportedSchemas(t *testing.T) {
 			t.Fatal(err)
 		}
 		t.Cleanup(func() { _ = db.Close() })
-		if _, err := db.sql.Exec(`PRAGMA user_version = 4`); err != nil {
+		if _, err := db.sql.Exec(`PRAGMA user_version = 5`); err != nil {
 			t.Fatal(err)
 		}
-		if err := db.Migrate(context.Background()); err == nil || !strings.Contains(err.Error(), "version 4") {
+		if err := db.Migrate(context.Background()); err == nil || !strings.Contains(err.Error(), "version 5") {
 			t.Fatalf("error = %v", err)
 		}
 	})

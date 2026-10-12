@@ -114,6 +114,15 @@ func (db *DB) migrateMySQL(ctx context.Context, resourceDir string) error {
 			return fmt.Errorf("initialize MySQL schema: %w", err)
 		}
 	}
+	var columns int
+	if err := db.sql.QueryRowContext(ctx, `SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = 'desktop_devices' AND column_name = 'revoked_at'`).Scan(&columns); err != nil {
+		return fmt.Errorf("inspect Desktop revocation schema: %w", err)
+	}
+	if columns == 0 {
+		if _, err := db.sql.ExecContext(ctx, `ALTER TABLE desktop_devices ADD COLUMN revoked_at DATETIME(6) NULL`); err != nil {
+			return fmt.Errorf("add MySQL Desktop revocation: %w", err)
+		}
+	}
 	return db.migrateLegacyConversationShareAttachments(ctx, resourceDir)
 }
 

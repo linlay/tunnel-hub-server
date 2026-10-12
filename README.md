@@ -330,7 +330,7 @@ curl -X DELETE https://hub.example.test/api/desktop/shares/share_xxx \
 
 `GET/HEAD /assets/conversation-export/{sha256}/{file}` 提供随 Relay 编译且通过内容 Hash 校验的资源集；当前 manifest 决定新分享页使用的资源集，历史资源集继续服务已有 HTML。分享渲染包由 WebClient 显式同步后随 Relay 原子发布，普通 WebClient 发布不修改它。
 
-本版本使用全新 MySQL 数据库或全新、带版本标记的 SQLite 库，不导入旧数据，不包含历史数据库迁移工具或双库回退逻辑。原账号、Token、设备映射和分享链接不会自动恢复，需重新初始化或注册。
+数据库升级采用明确的增量迁移：保留既有账号、设备映射、公网地址和分享；数据库类型切换不会自动复制数据，不提供双库回退逻辑。升级前先备份并在副本验证。
 
 注册 Desktop WebApp：
 
@@ -423,4 +423,10 @@ make test-all
 
 ### Account mobile routes
 
-Set `IDENTITY_API_BASE_URL` explicitly to enable account Desktop registration and compensation validation. The API base must be HTTPS (HTTP is permitted only for loopback tests), without URL credentials, query or fragment. Identity owns device membership and signing; Hub owns live presence. Account App JWTs use the `app` audience and stable `account_id`, while canonical Desktop OAuth sessions retain their configured audience. Missing Identity/Manager state fails closed. No new signing key or relay credential is introduced.
+Hub owns Desktop membership, names, revocation and live Tunnel presence. GET `/api/desktop/account-devices` returns the current account's valid Desktops with online state; PATCH/DELETE `/api/desktop/account-devices/{deviceId}` rename/unbind them. Desktop registration reuses its persisted device ID and canonical OAuth SSO identity, without calling Identity for a second device registration.
+
+`IDENTITY_API_BASE_URL` is used only to check phone login sessions with GET `/api/auth/me`; configure HTTPS (HTTP only for loopback tests), without URL credentials, query or fragment. Phone JWTs use the `app` audience, app/tunnel scopes, stable account_id and login-session device_id. Desktop OAuth uses its configured audience and cannot be replaced by a phone session.
+
+POST `/api/desktop/route-credentials` issues a two-minute-or-shorter `tr_` random ticket bound to account, phone session, target, request and JTI. The Hub keeps at most 4096 entries in memory by digest; Desktop uses POST `/api/desktop/route-credentials/validate` to check current membership and the originating Identity session. Validation does not consume WS JTI; Desktop consumes it on WS authentication. Hub restart invalidates tickets and clients fetch fresh ones. There is no route JWT, new signing key, ticket table or Redis.
+
+SQLite v3 -> v4 and existing MySQL databases add only desktop_devices.revoked_at for this change. Revocation retains device/session/share history and public addresses, closes the Tunnel and invalidates tickets; automatic registration cannot restore the record. Missing Identity/Manager state fails closed. Historical shares, snapshots and attachment files are unchanged.
