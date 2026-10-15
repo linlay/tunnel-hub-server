@@ -127,7 +127,7 @@ Relay 入口在 `cmd/relay/main.go`，启动顺序是：
 - `proxy.Manager` 以 `{kind,id}` 维护在线连接：普通 Agent 使用 tokenId，Desktop 使用 deviceKey；同一 key 的新连接会原子替换旧连接。
 - HTTP 请求体当前在 Relay 侧完整缓冲，限制由 `MAX_REQUEST_BODY_BYTES` 控制。涉及大文件、流式上传或 backpressure 的改动要重点测试。
 - Desktop public Host 不使用 `deviceId`，由随机 label 加 `domains.desktopPublicBase` 生成；WebApp Host 由随机 label 加 `domains.webAppPublicBase` 生成。
-- Desktop/platform auth token 由 Desktop 侧校验，Relay 只负责把 query token 或 `bearer.<token>` subprotocol 透传给 Desktop。
+- Desktop/Platform 原票据由 Desktop 侧校验签名；移动公网 WS/上传/资源同时要求独立官网证明并检查目标归属。WS 使用 `bearer.<token>` subprotocol，禁止 URL Token；官网证明不得透传 Platform。Hub 仅在现有在线 Manager 中持有 Desktop 上传的票据，WebApp 通过受控 bootstrap 取得绑定连接的不透明 Cookie。
 - 附件 API 的 Desktop 身份只来自 `<desktop>.m.example.test` Host；不得从 body、query 或其他客户端字段接受 `publicHost` 覆盖。
 - 管理 token 手动创建当前禁用；Desktop 注册不创建 tunnel token、device secret 或轮换凭据。
 - 对话显示资产必须由 Agent WebClient 同一次构建同步，路径中的 64 位 hash 是不可变集合身份；handler 只接受白名单路径并返回长期 immutable、CORS/CORP 与 `nosniff` 响应头。永久分享存在时不得清理历史集合。

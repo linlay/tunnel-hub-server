@@ -30,7 +30,6 @@ type SSOJWTConfig struct {
 
 type SSOJWTPrincipal struct {
 	UserID    string
-	DeviceID  string
 	Email     string
 	Name      string
 	Role      string
@@ -143,10 +142,6 @@ func (v *SSOJWTVerifier) Verify(token string, now time.Time) (SSOJWTPrincipal, e
 	return v.verify(token, now, v.audience, v.allowAnyAudience)
 }
 
-func (v *SSOJWTVerifier) VerifyAccountApp(token string, now time.Time) (SSOJWTPrincipal, error) {
-	return v.verify(token, now, "app", false)
-}
-
 func (v *SSOJWTVerifier) verify(token string, now time.Time, audience string, allowAnyAudience bool) (SSOJWTPrincipal, error) {
 	parts := strings.Split(token, ".")
 	if len(parts) != 3 {
@@ -198,15 +193,11 @@ func (v *SSOJWTVerifier) verify(token string, now time.Time, audience string, al
 		return SSOJWTPrincipal{}, errors.New("token issued in the future")
 	}
 	userID := readStringClaim(claims, v.userIDClaim)
-	if accountID := readStringClaim(claims, "account_id"); accountID != "" {
-		userID = accountID
-	}
 	if userID == "" {
 		return SSOJWTPrincipal{}, errors.New("missing user id claim")
 	}
 	return SSOJWTPrincipal{
 		UserID:    userID,
-		DeviceID:  readStringClaim(claims, "device_id"),
 		Email:     readStringClaim(claims, "email"),
 		Name:      readStringClaim(claims, "name"),
 		Role:      strings.ToLower(readStringClaim(claims, "role")),

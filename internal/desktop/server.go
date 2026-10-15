@@ -11,7 +11,6 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
-	"sync"
 	"time"
 
 	"example.invalid/tunnel-hub-server/internal/auth"
@@ -29,8 +28,6 @@ const publicHostRetryLimit = 8
 const publicLabelRandomBytes = 8
 
 type Server struct {
-	routeTicketsMu                sync.Mutex
-	routeTickets                  map[[32]byte]routeTicket
 	DB                            *store.DB
 	Config                        config.RelayConfig
 	Logger                        *slog.Logger
@@ -103,8 +100,6 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.handleAccountDevice(w, r)
 	case r.URL.Path == "/api/desktop/route-credentials":
 		s.handleRouteCredential(w, r)
-	case r.URL.Path == "/api/desktop/route-credentials/validate":
-		s.handleRouteValidation(w, r)
 	case r.URL.Path == "/api/desktop/account-device/revoke":
 		s.handleAccountDeviceRevoke(w, r)
 	case r.URL.Path == conversationSharesPath:
@@ -165,6 +160,35 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if payload.PlatformCredential != nil || payload.TunnelSessionID != "" {
+		if payload.PlatformCredential == nil || payload.TunnelSessionID == "" || payload.PlatformCredential.Validate(s.now()) != nil {
+			writeError(w, 400, "invalid credential update")
+			return
+		}
+		device, err := s.DB.GetDesktopDeviceByOwnerAndID(r.Context(), principal.UserID, payload.DeviceID)
+		if errors.Is(err, store.ErrNotFound) {
+			writeError(w, 403, "Desktop is inactive")
+			return
+		}
+		if err != nil {
+			s.writeInternal(w, "resolve Desktop", err)
+			return
+		}
+		if s.manager == nil || s.manager.UpdatePlatformCredential(proxy.DesktopConnectionKey(device.DeviceKey), principal.UserID, device.DeviceID, payload.TunnelSessionID, *payload.PlatformCredential) != nil {
+			writeError(w, 409, "Desktop connection changed")
+			return
+		}
+		// Revocation may race the in-memory replacement; never revive the DB record.
+		if active, err := s.DB.IsDesktopDeviceActive(r.Context(), device.DeviceKey); err != nil || !active {
+			_ = s.manager.CloseSession(payload.TunnelSessionID)
+			writeError(w, 403, "Desktop is inactive")
+			return
+		}
+		response := s.registrationResponse(store.RegisterDesktopDeviceResult{Device: device})
+		response.AccountID = principal.UserID
+		writeJSON(w, 200, response)
+		return
+	}
 	result, err := s.registerDesktopDevice(r, principal, payload)
 	if errors.Is(err, store.ErrDesktopDeviceRevoked) {
 		writeError(w, http.StatusForbidden, "Desktop registration is revoked")
@@ -295,10 +319,6 @@ func (s *Server) authorizeRegistration(w http.ResponseWriter, r *http.Request) (
 		writeError(w, http.StatusUnauthorized, "invalid bearer token")
 		return auth.SSOJWTPrincipal{}, false
 	}
-	if principal.DeviceID != "" {
-		writeError(w, http.StatusUnauthorized, "Desktop OAuth session required")
-		return auth.SSOJWTPrincipal{}, false
-	}
 	if !s.Config.SSOJWTAllowMissingScope && !principal.HasScope("tunnel") {
 		writeError(w, http.StatusForbidden, "tunnel scope required")
 		return auth.SSOJWTPrincipal{}, false
@@ -396,8 +416,10 @@ func (s *Server) writeInternal(w http.ResponseWriter, message string, err error)
 }
 
 type registerPayload struct {
-	DeviceID   string `json:"deviceId"`
-	DeviceName string `json:"deviceName"`
+	PlatformCredential *tunnel.PlatformCredential `json:"platformCredential,omitempty"`
+	TunnelSessionID    string                     `json:"tunnelSessionId,omitempty"`
+	DeviceID           string                     `json:"deviceId"`
+	DeviceName         string                     `json:"deviceName"`
 }
 
 func (p registerPayload) Validate() error {

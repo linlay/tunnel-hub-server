@@ -104,3 +104,23 @@ func signJWTClaims(t *testing.T, privateKey *rsa.PrivateKey, claims map[string]a
 	}
 	return signed + "." + base64.RawURLEncoding.EncodeToString(signature)
 }
+
+func TestConfiguredUserClaimCannotBeOverriddenByAccountID(t *testing.T) {
+	key, pem := testJWTKey(t)
+	now := time.Now()
+	for _, claim := range []string{"sub", "user_id"} {
+		v, err := NewSSOJWTVerifier(SSOJWTConfig{Issuer: "https://issuer.example.test", Audience: "tunnel", UserIDClaim: claim, PublicKeyPEM: pem})
+		if err != nil {
+			t.Fatal(err)
+		}
+		claims := map[string]any{"iss": "https://issuer.example.test", "aud": "tunnel", claim: "configured-owner", "account_id": "wrong-owner", "exp": now.Add(time.Hour).Unix()}
+		principal, err := v.Verify(signJWTClaims(t, key, claims), now)
+		if err != nil || principal.UserID != "configured-owner" {
+			t.Fatal("configured claim overridden")
+		}
+		delete(claims, claim)
+		if _, err = v.Verify(signJWTClaims(t, key, claims), now); err == nil {
+			t.Fatal("missing configured claim fell back")
+		}
+	}
+}

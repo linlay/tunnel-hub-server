@@ -172,6 +172,20 @@ func (r *Relay) HandleUpload(w http.ResponseWriter, req *http.Request) {
 		writeUploadError(w, http.StatusUnauthorized, "desktop token required")
 		return
 	}
+	device, err := r.DB.GetDesktopDeviceByPublicHost(req.Context(), tunnel.NormalizeHost(req.Host))
+	if errors.Is(err, store.ErrNotFound) {
+		writeUploadError(w, http.StatusNotFound, "desktop not found")
+		return
+	}
+	if err != nil {
+		r.writeGatewayError(w, "desktop lookup failed", err)
+		return
+	}
+	if _, ok := r.authorizeMobileAccount(w, req, device); !ok {
+		return
+	}
+	req.Header.Del("X-Account-Authorization")
+
 	parsed, status, message := r.parseUploadMultipart(w, req)
 	registered := false
 	defer func() {
@@ -181,16 +195,6 @@ func (r *Relay) HandleUpload(w http.ResponseWriter, req *http.Request) {
 	}()
 	if status != http.StatusOK {
 		writeUploadError(w, status, message)
-		return
-	}
-
-	device, err := r.DB.GetDesktopDeviceByPublicHost(req.Context(), tunnel.NormalizeHost(req.Host))
-	if errors.Is(err, store.ErrNotFound) {
-		writeUploadError(w, http.StatusNotFound, "desktop not found")
-		return
-	}
-	if err != nil {
-		r.writeGatewayError(w, "desktop lookup failed", err)
 		return
 	}
 

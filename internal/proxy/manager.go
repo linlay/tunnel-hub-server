@@ -3,6 +3,7 @@ package proxy
 import (
 	"context"
 	"errors"
+	"example.invalid/tunnel-hub-server/internal/tunnel"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -44,11 +45,48 @@ type Manager struct {
 }
 
 type ActiveTunnel struct {
-	SessionID   string
-	Key         ConnectionKey
-	RemoteAddr  string
-	ConnectedAt time.Time
-	Yamux       *yamux.Session
+	mobileWebAppSessions map[string]mobileWebAppSession
+	OwnerUserID          string
+	DesktopID            string
+	PlatformCredential   *tunnel.PlatformCredential
+	SessionID            string
+	Key                  ConnectionKey
+	RemoteAddr           string
+	ConnectedAt          time.Time
+	Yamux                *yamux.Session
+}
+
+// Both reads and replacements use the existing connection lock and session binding.
+func (m *Manager) UpdatePlatformCredential(key ConnectionKey, owner, desktopID, sessionID string, credential tunnel.PlatformCredential) error {
+	if err := credential.Validate(time.Now()); err != nil {
+		return err
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	a := m.active[key]
+	if a == nil || a.Yamux == nil || a.Yamux.IsClosed() || a.SessionID != sessionID || a.OwnerUserID != owner || a.DesktopID != desktopID {
+		return ErrNoTunnel
+	}
+	if a.PlatformCredential != nil {
+		if a.PlatformCredential.PlatformDeviceID != credential.PlatformDeviceID {
+			return errors.New("Platform device changed")
+		}
+		if credential.ExpiresAt.Before(a.PlatformCredential.ExpiresAt) {
+			return errors.New("stale Platform credential")
+		}
+	}
+	a.PlatformCredential = &credential
+	return nil
+}
+
+func (m *Manager) PlatformCredentialFor(key ConnectionKey, owner, desktopID string, now time.Time) (tunnel.PlatformCredential, bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	a := m.active[key]
+	if a == nil || a.Yamux == nil || a.Yamux.IsClosed() || a.OwnerUserID != owner || a.DesktopID != desktopID || a.PlatformCredential == nil || !a.PlatformCredential.ExpiresAt.After(now) {
+		return tunnel.PlatformCredential{}, false
+	}
+	return *a.PlatformCredential, true
 }
 
 type ActiveTunnelMetric struct {

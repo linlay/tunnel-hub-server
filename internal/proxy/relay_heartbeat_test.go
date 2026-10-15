@@ -157,10 +157,7 @@ func TestTunnelHeartbeatFailureLogsOnceAndClosesSession(t *testing.T) {
 	session, _ := newManagerTestSession(t)
 	var logs bytes.Buffer
 	relay := &Relay{Logger: slog.New(slog.NewJSONHandler(&logs, nil))}
-	relay.monitorTunnelHeartbeat(ws, session, ActiveTunnel{
-		SessionID: "desktop_session_heartbeat_failure",
-		Key:       DesktopConnectionKey("device_test"),
-	}, time.Millisecond, 10*time.Millisecond)
+	relay.monitorTunnelHeartbeat(ws, session, "desktop_session_heartbeat_failure", ConnectionKindDesktop, time.Millisecond, 10*time.Millisecond)
 	if !session.IsClosed() {
 		t.Fatal("yamux session remains open after heartbeat write failure")
 	}

@@ -32,8 +32,9 @@ import (
 )
 
 var (
-	defaultDesktopJWT        string
-	defaultDesktopPrivateKey *rsa.PrivateKey
+	defaultPlatformCredential = platformFixture("local-test-device")
+	defaultDesktopJWT         string
+	defaultDesktopPrivateKey  *rsa.PrivateKey
 )
 
 func TestRegisterRequiresOfficialJWT(t *testing.T) {
@@ -320,6 +321,7 @@ func TestDesktopPublicWebSocketOfflineReturnsGatewayError(t *testing.T) {
 	registration := decodeRegisterResponse(t, performRegister(t, server, desktopRegisterBody("mac-mini", "", false), defaultDesktopJWT).Body)
 
 	relay := proxy.NewRelay(db, proxy.NewManager(), nil, "example", "m.example.test", "example.test", 64<<20)
+	relay.SetDesktopIdentityVerifier(server.ssoJWT, false)
 	publicServer := httptest.NewServer(http.HandlerFunc(relay.HandlePublic))
 	defer publicServer.Close()
 
@@ -331,12 +333,12 @@ func TestDesktopPublicWebSocketOfflineReturnsGatewayError(t *testing.T) {
 	dialer := websocket.Dialer{NetDialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
 		return (&net.Dialer{}).DialContext(ctx, network, serverURL.Host)
 	}}
-	client, resp, err := dialer.Dial(publicWSURL, nil)
+	client, resp, err := dialer.Dial(publicWSURL, http.Header{"X-Account-Authorization": []string{"Bearer " + defaultDesktopJWT}})
 	if err == nil {
 		_ = client.Close()
 		t.Fatal("expected offline desktop dial to fail")
 	}
-	if resp == nil || resp.StatusCode != http.StatusBadGateway {
+	if resp == nil || resp.StatusCode != http.StatusConflict {
 		t.Fatalf("offline status = %#v, err = %v", resp, err)
 	}
 }
@@ -378,8 +380,9 @@ func TestDesktopRegistrationTunnelWebSocketIntegration(t *testing.T) {
 	dialer := websocket.Dialer{NetDialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
 		return (&net.Dialer{}).DialContext(ctx, network, serverURL.Host)
 	}}
-	client, resp, err := dialer.DialContext(ctx, publicWSURL+"?token=desktop-token", http.Header{
-		"Sec-WebSocket-Protocol": []string{"bearer.desktop-token"},
+	client, resp, err := dialer.DialContext(ctx, publicWSURL, http.Header{
+		"X-Account-Authorization": []string{"Bearer " + defaultDesktopJWT},
+		"Sec-WebSocket-Protocol":  []string{"bearer.desktop-token"},
 	})
 	if err != nil {
 		t.Fatalf("dial public desktop ws: %v", err)
@@ -400,35 +403,16 @@ func TestDesktopRegistrationTunnelWebSocketIntegration(t *testing.T) {
 	}
 }
 
-func TestDesktopPublicWebSocketQueryTokenMetadata(t *testing.T) {
-	manager, server, registration := newDesktopRelayIntegrationServer(t)
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go runFakeDesktopBrokerWithHandler(t, ctx, server.URL, defaultDesktopJWT, func(t *testing.T, stream *yamux.Stream, request tunnel.StreamRequest) {
-		t.Helper()
-		if request.Payload == nil || request.Payload.AuthToken != "query-token" || request.Payload.Subprotocol != "" {
-			t.Errorf("desktop auth metadata = %#v", request.Payload)
-			return
-		}
-		if request.Payload.Public == nil || request.Payload.Public.Path != "/ws?room=1" {
-			t.Errorf("desktop public metadata = %#v", request.Payload.Public)
-			return
-		}
-		if request.Payload.Public.Headers.Get("Sec-WebSocket-Protocol") != "" {
-			t.Errorf("subprotocol header should be stripped: %q", request.Payload.Public.Headers.Get("Sec-WebSocket-Protocol"))
-			return
-		}
-		_ = tunnel.WriteJSON(stream, tunnel.NewSuccessResponse(tunnel.NamespaceDesktop, tunnel.TypeDesktopWebSocketOpen, request.ID, &tunnel.StreamResponseData{
-			StatusCode: http.StatusSwitchingProtocols,
-		}))
-	})
-	waitForDesktopDevice(t, manager, registration.DeviceID)
-
-	client, _, err := dialDesktopPublicWebSocket(t, ctx, server.URL, registration.PublicHost, "/ws?room=1&token=query-token", nil)
-	if err != nil {
-		t.Fatalf("dial query-token desktop ws: %v", err)
+func TestDesktopPublicWebSocketRejectsURLCredentials(t *testing.T) {
+	_, server, registration := newDesktopRelayIntegrationServer(t)
+	client, response, err := dialDesktopPublicWebSocket(t, t.Context(), server.URL, registration.PublicHost, "/ws?token=secret", nil)
+	if err == nil {
+		client.Close()
+		t.Fatal("URL credential accepted")
 	}
-	defer client.Close()
+	if response == nil || response.StatusCode != 400 {
+		t.Fatalf("URL credential status: %#v", response)
+	}
 }
 
 func TestDesktopPublicWebSocketBearerSubprotocolMetadata(t *testing.T) {
@@ -496,6 +480,30 @@ func mobileWebAppPublicHost(devicePublicHost string, port int) string {
 	return fmt.Sprintf("%s-%d.%s", label, port, suffix)
 }
 
+func openMobileGatewayCookie(t *testing.T, baseURL, publicHost string) []*http.Cookie {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodPost, baseURL+"/api/mobile-session", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Host = publicHost
+	req.Header.Set("Authorization", "Bearer "+defaultPlatformCredential.Token)
+	req.Header.Set("X-Account-Authorization", "Bearer "+defaultDesktopJWT)
+	response, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != 200 {
+		t.Fatalf("gateway bootstrap status=%d", response.StatusCode)
+	}
+	cookies := response.Cookies()
+	if len(cookies) != 1 || !cookies[0].HttpOnly || !cookies[0].Secure || cookies[0].Value == defaultPlatformCredential.Token {
+		t.Fatal("invalid opaque gateway cookie")
+	}
+	return cookies
+}
+
 func TestDesktopMobileWebAppHTTPIntegration(t *testing.T) {
 	manager, server, registration := newDesktopRelayIntegrationServer(t)
 	publicHost := mobileWebAppPublicHost(registration.PublicHost, 43210)
@@ -513,7 +521,7 @@ func TestDesktopMobileWebAppHTTPIntegration(t *testing.T) {
 			t.Errorf("mobile webapp request metadata = %#v", request)
 			return
 		}
-		if payload.Source != "mobile" || payload.AuthToken != "paired-token" {
+		if payload.Source != "mobile" || payload.AuthToken != defaultPlatformCredential.Token {
 			t.Errorf("mobile auth metadata = %#v", payload)
 			return
 		}
@@ -553,28 +561,8 @@ func TestDesktopMobileWebAppHTTPIntegration(t *testing.T) {
 	})
 	waitForDesktopDevice(t, manager, registration.DeviceID)
 
-	req, err := http.NewRequest(http.MethodGet, server.URL+"/hello?source=m&token=paired-token", nil)
-	if err != nil {
-		t.Fatalf("new mobile webapp request: %v", err)
-	}
-	req.Host = publicHost
-	client := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error {
-		return http.ErrUseLastResponse
-	}}
-	loginResponse, err := client.Do(req)
-	if err != nil {
-		t.Fatalf("start mobile webapp session: %v", err)
-	}
-	defer loginResponse.Body.Close()
-	if loginResponse.StatusCode != http.StatusSeeOther || loginResponse.Header.Get("Location") != "/hello?source=m" {
-		t.Fatalf("mobile login response: status=%d location=%q", loginResponse.StatusCode, loginResponse.Header.Get("Location"))
-	}
-	cookies := loginResponse.Cookies()
-	if len(cookies) != 1 || !cookies[0].HttpOnly || !cookies[0].Secure {
-		t.Fatalf("mobile session cookie = %#v", cookies)
-	}
-
-	req, err = http.NewRequest(http.MethodGet, server.URL+"/hello?source=m", nil)
+	cookies := openMobileGatewayCookie(t, server.URL, publicHost)
+	req, err := http.NewRequest(http.MethodGet, server.URL+"/hello?source=m", nil)
 	if err != nil {
 		t.Fatalf("new authenticated mobile webapp request: %v", err)
 	}
@@ -645,7 +633,7 @@ func TestDesktopMobileWebAppUnknownLengthAndResponseHeaders(t *testing.T) {
 		t.Fatalf("new mobile webapp request: %v", err)
 	}
 	req.Host = publicHost
-	req.Header.Set("Authorization", "Bearer paired-token")
+	req.AddCookie(openMobileGatewayCookie(t, server.URL, publicHost)[0])
 	client := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error {
 		return http.ErrUseLastResponse
 	}}
@@ -682,7 +670,7 @@ func TestDesktopMobileWebAppWebSocketIntegration(t *testing.T) {
 			return
 		}
 		payload := request.Payload
-		if request.Type != tunnel.TypeWebSocketConnect || payload == nil || payload.Source != "mobile" || payload.AuthToken != "paired-token" {
+		if request.Type != tunnel.TypeWebSocketConnect || payload == nil || payload.Source != "mobile" || payload.AuthToken != defaultPlatformCredential.Token {
 			t.Errorf("mobile websocket metadata = %#v", request)
 			return
 		}
@@ -711,7 +699,7 @@ func TestDesktopMobileWebAppWebSocketIntegration(t *testing.T) {
 	})
 	waitForDesktopDevice(t, manager, registration.DeviceID)
 
-	client, _, err := dialDesktopPublicWebSocket(t, ctx, server.URL, publicHost, "/socket?room=1&token=paired-token", nil)
+	client, _, err := dialDesktopPublicWebSocket(t, ctx, server.URL, publicHost, "/socket?room=1", http.Header{"Cookie": []string{openMobileGatewayCookie(t, server.URL, publicHost)[0].String()}})
 	if err != nil {
 		t.Fatalf("dial mobile webapp websocket: %v", err)
 	}
@@ -1043,9 +1031,10 @@ func runFakeWebAppTunnelClient(t *testing.T, ctx context.Context, relayURL, toke
 	}
 	defer ws.Close()
 	open := tunnel.NewStreamRequest(tunnel.NamespaceDesktop, tunnel.FrameRequest, tunnel.TypeTunnelOpen, "tun_test", &tunnel.StreamPayload{
-		IdentityToken: token,
-		DeviceID:      "mac-mini",
-		Client:        "example-desktop",
+		IdentityToken:      token,
+		PlatformCredential: &defaultPlatformCredential,
+		DeviceID:           "mac-mini",
+		Client:             "example-desktop",
 		Capabilities: []string{
 			"webapp.http",
 			"webapp.websocket",
@@ -1238,6 +1227,12 @@ func dialDesktopPublicWebSocket(t *testing.T, ctx context.Context, relayURL, pub
 	dialer := websocket.Dialer{NetDialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
 		return (&net.Dialer{}).DialContext(ctx, network, serverURL.Host)
 	}}
+	if header == nil {
+		header = make(http.Header)
+	}
+	if _, present := header["X-Account-Authorization"]; !present {
+		header.Set("X-Account-Authorization", "Bearer "+defaultDesktopJWT)
+	}
 	return dialer.DialContext(ctx, publicWSURL, header)
 }
 
