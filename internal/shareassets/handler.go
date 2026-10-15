@@ -2,7 +2,9 @@ package shareassets
 
 import (
 	"bytes"
+	"crypto/rand"
 	"embed"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"html"
@@ -21,6 +23,7 @@ const TemplatePublicPath = PublicPathPrefix + "conversation.template.html"
 const snapshotMarker = "__CONVERSATION_EXPORT_SNAPSHOT_JSON_V1__"
 const assetOriginMarker = "__CONVERSATION_EXPORT_ASSET_ORIGIN__"
 const localBrandIDMarker = "__CONVERSATION_EXPORT_LOCAL_BRAND_ID__"
+const styleNonceMarker = "__CONVERSATION_EXPORT_STYLE_NONCE__"
 const publicBrandMeta = `<meta name="conversation-export-public-brand" content="" />`
 
 var relativeAssetPath = regexp.MustCompile(`^(?:[A-Za-z0-9._-]+/)*[A-Za-z0-9._-]+$`)
@@ -60,7 +63,8 @@ func NewBundle() *Bundle {
 	template, err := embeddedFiles.ReadFile("conversation.template.html")
 	if err != nil || bytes.Count(template, []byte(snapshotMarker)) != 1 ||
 		bytes.Count(template, []byte(assetOriginMarker)) == 0 ||
-		bytes.Count(template, []byte(localBrandIDMarker)) != 1 {
+		bytes.Count(template, []byte(localBrandIDMarker)) != 1 ||
+		bytes.Count(template, []byte(styleNonceMarker)) != 2 {
 		panic("conversation export template is invalid")
 	}
 	files, err := fs.Sub(embeddedFiles, "files")
@@ -107,7 +111,11 @@ func (b *Bundle) Render(snapshot []byte, assetOrigin, brandID, productName, prod
 	}
 	var escaped bytes.Buffer
 	json.HTMLEscape(&escaped, snapshot)
-	htmlBytes := bytes.Replace(b.template, []byte(snapshotMarker), escaped.Bytes(), 1)
+	template, err := templateWithStyleNonce(b.template)
+	if err != nil {
+		return nil, err
+	}
+	htmlBytes := bytes.Replace(template, []byte(snapshotMarker), escaped.Bytes(), 1)
 	htmlBytes = bytes.ReplaceAll(htmlBytes, []byte(assetOriginMarker), []byte(origin))
 	if !brandScheme.MatchString(brandID) || reservedSchemes[brandID] || strings.TrimSpace(productName) == "" {
 		return nil, errors.New("public share brand is invalid")
@@ -185,6 +193,11 @@ func (b *Bundle) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func serveTemplate(w http.ResponseWriter, r *http.Request, template []byte) {
+	template, err := templateWithStyleNonce(template)
+	if err != nil {
+		http.Error(w, "conversation export template is unavailable", http.StatusInternalServerError)
+		return
+	}
 	header := w.Header()
 	header.Set("Cache-Control", "no-store")
 	header.Set("Access-Control-Allow-Origin", "*")
@@ -196,6 +209,18 @@ func serveTemplate(w http.ResponseWriter, r *http.Request, template []byte) {
 	if r.Method == http.MethodGet {
 		_, _ = w.Write(template)
 	}
+}
+
+func templateWithStyleNonce(template []byte) ([]byte, error) {
+	if bytes.Count(template, []byte(styleNonceMarker)) != 2 {
+		return nil, errors.New("conversation export style nonce placeholders are invalid")
+	}
+	var random [32]byte
+	if _, err := rand.Read(random[:]); err != nil {
+		return nil, err
+	}
+	nonce := base64.RawURLEncoding.EncodeToString(random[:])
+	return bytes.ReplaceAll(template, []byte(styleNonceMarker), []byte(nonce)), nil
 }
 
 func normalizedOrigin(value string) (string, error) {

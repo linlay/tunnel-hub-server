@@ -330,6 +330,8 @@ curl -X DELETE https://hub.example.test/api/desktop/shares/share_xxx \
 
 `GET/HEAD /assets/conversation-export/{sha256}/{file}` 提供随 Relay 编译且通过内容 Hash 校验的资源集；当前 manifest 决定新分享页使用的资源集，历史资源集继续服务已有 HTML。分享渲染包由 WebClient 显式同步后随 Relay 原子发布，普通 WebClient 发布不修改它。
 
+公开分享页和可下载模板均在每次响应时生成独立的 32 字节随机样式 nonce，并同时填入 CSP 与 `conversation-export-style-nonce` 元数据。分享运行时将 nonce 传给组件动态样式，`style-src-elem` 不放开任意内联样式；可下载模板保留原有 Snapshot、资产 origin 和本地品牌占位符，旧版 Desktop 组装流程无需更改。
+
 数据库升级采用明确的增量迁移：保留既有账号、设备映射、公网地址和分享；数据库类型切换不会自动复制数据，不提供双库回退逻辑。升级前先备份并在副本验证。
 
 注册 Desktop WebApp：
