@@ -84,6 +84,41 @@ func testJWTKey(t *testing.T) (*rsa.PrivateKey, string) {
 	return privateKey, string(pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: publicDER}))
 }
 
+func TestSSOJWTVerifierValidatesLoginSessionTime(t *testing.T) {
+	key, public := testJWTKey(t)
+	v, err := NewSSOJWTVerifier(SSOJWTConfig{Issuer: "https://issuer.example.test", Audience: "tunnel", PublicKeyPEM: public})
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	for _, tc := range []struct {
+		name  string
+		value any
+		valid bool
+	}{
+		{"missing", nil, true}, {"valid", now.Add(-time.Hour).UnixMilli(), true},
+		{"zero", 0, false}, {"negative", -1, false}, {"string", "123", false},
+		{"fraction", 1.5, false}, {"future", now.Add(2 * time.Minute).UnixMilli(), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			claims := map[string]any{"iss": "https://issuer.example.test", "aud": "tunnel", "sub": "42", "exp": now.Add(time.Hour).Unix()}
+			if tc.value != nil {
+				claims["session_started_at_ms"] = tc.value
+			}
+			principal, err := v.Verify(signJWTClaims(t, key, claims), now)
+			if (err == nil) != tc.valid {
+				t.Fatalf("valid=%v err=%v", tc.valid, err)
+			}
+			if tc.name == "valid" && !principal.SessionStartedAt.Equal(now.Add(-time.Hour)) {
+				t.Fatal("login time changed")
+			}
+			if tc.name == "missing" && !principal.SessionStartedAt.IsZero() {
+				t.Fatal("issuance time substituted for login time")
+			}
+		})
+	}
+}
+
 func signJWTClaims(t *testing.T, privateKey *rsa.PrivateKey, claims map[string]any) string {
 	t.Helper()
 	headerJSON, err := json.Marshal(map[string]any{"alg": "RS256", "typ": "JWT"})
@@ -103,4 +138,24 @@ func signJWTClaims(t *testing.T, privateKey *rsa.PrivateKey, claims map[string]a
 		t.Fatalf("sign JWT: %v", err)
 	}
 	return signed + "." + base64.RawURLEncoding.EncodeToString(signature)
+}
+
+func TestConfiguredUserClaimCannotBeOverriddenByAccountID(t *testing.T) {
+	key, pem := testJWTKey(t)
+	now := time.Now()
+	for _, claim := range []string{"sub", "user_id"} {
+		v, err := NewSSOJWTVerifier(SSOJWTConfig{Issuer: "https://issuer.example.test", Audience: "tunnel", UserIDClaim: claim, PublicKeyPEM: pem})
+		if err != nil {
+			t.Fatal(err)
+		}
+		claims := map[string]any{"iss": "https://issuer.example.test", "aud": "tunnel", claim: "configured-owner", "account_id": "wrong-owner", "exp": now.Add(time.Hour).Unix()}
+		principal, err := v.Verify(signJWTClaims(t, key, claims), now)
+		if err != nil || principal.UserID != "configured-owner" {
+			t.Fatal("configured claim overridden")
+		}
+		delete(claims, claim)
+		if _, err = v.Verify(signJWTClaims(t, key, claims), now); err == nil {
+			t.Fatal("missing configured claim fell back")
+		}
+	}
 }

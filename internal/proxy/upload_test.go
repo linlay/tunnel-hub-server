@@ -66,6 +66,7 @@ func TestRelayUploadForwardsToDesktopAndServesPull(t *testing.T) {
 	}
 	req.Host = registration.Device.PublicHost
 	req.Header.Set("Content-Type", contentType)
+	req.Header.Set("X-Account-Authorization", "Bearer "+identityToken)
 	req.Header.Set("Authorization", "Bearer desktop-app-token")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -123,7 +124,11 @@ func TestRelayUploadRequiresFieldsAndDesktopOnline(t *testing.T) {
 	relay := NewRelay(db, manager, nil, "example", "m.example.test", "example.test", 64<<20)
 	server := newUploadRelayTestServer(t, relay)
 	defer server.Close()
+	identityToken := configureProxyDesktopIdentity(t, relay, "user_1")
 	registration := registerUploadDesktop(t, db, "desk.m.example.test")
+
+	session, _ := newManagerTestSession(t)
+	manager.SetActive(&ActiveTunnel{SessionID: "body-validation", Key: DesktopConnectionKey(registration.Device.DeviceKey), OwnerUserID: "user_1", DesktopID: registration.Device.DeviceID, Yamux: session})
 
 	tests := []struct {
 		name       string
@@ -163,11 +168,15 @@ func TestRelayUploadRequiresFieldsAndDesktopOnline(t *testing.T) {
 			auth:       "desktop-token",
 			fields:     map[string]string{"chatId": "chat_1"},
 			fileName:   "a.txt",
-			wantStatus: http.StatusBadGateway,
+			wantStatus: http.StatusConflict,
 		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
+			if tc.name == "desktop offline" {
+				manager.Clear("body-validation")
+			}
+
 			body, contentType := uploadMultipartBody(t, tc.fields, tc.fileName, "text/plain", []byte("body"))
 			req, err := http.NewRequest(http.MethodPost, server.URL+"/api/upload", body)
 			if err != nil {
@@ -176,6 +185,7 @@ func TestRelayUploadRequiresFieldsAndDesktopOnline(t *testing.T) {
 			req.Host = registration.Device.PublicHost
 			req.Header.Set("Content-Type", contentType)
 			if tc.auth != "" {
+				req.Header.Set("X-Account-Authorization", "Bearer "+identityToken)
 				req.Header.Set("Authorization", "Bearer "+tc.auth)
 			}
 			resp, err := http.DefaultClient.Do(req)
@@ -258,6 +268,7 @@ func TestRelayUploadCleansPendingFileAfterDesktopError(t *testing.T) {
 	}
 	req.Host = registration.Device.PublicHost
 	req.Header.Set("Content-Type", contentType)
+	req.Header.Set("X-Account-Authorization", "Bearer "+identityToken)
 	req.Header.Set("Authorization", "Bearer desktop-app-token")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {

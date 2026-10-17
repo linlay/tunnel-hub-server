@@ -127,9 +127,10 @@ Relay 入口在 `cmd/relay/main.go`，启动顺序是：
 - `proxy.Manager` 以 `{kind,id}` 维护在线连接：普通 Agent 使用 tokenId，Desktop 使用 deviceKey；同一 key 的新连接会原子替换旧连接。
 - HTTP 请求体当前在 Relay 侧完整缓冲，限制由 `MAX_REQUEST_BODY_BYTES` 控制。涉及大文件、流式上传或 backpressure 的改动要重点测试。
 - Desktop public Host 不使用 `deviceId`，由随机 label 加 `domains.desktopPublicBase` 生成；WebApp Host 由随机 label 加 `domains.webAppPublicBase` 生成。
-- Desktop/platform auth token 由 Desktop 侧校验，Relay 只负责把 query token 或 `bearer.<token>` subprotocol 透传给 Desktop。
+- Desktop/Platform 原票据由 Desktop 侧校验签名；移动公网 WS/上传/资源同时要求独立官网证明并检查目标归属。WS 使用 `bearer.<token>` subprotocol，禁止 URL Token；官网证明不得透传 Platform。Hub 仅在现有在线 Manager 中持有 Desktop 上传的票据，WebApp 通过受控 bootstrap 取得绑定连接的不透明 Cookie。
 - 附件 API 的 Desktop 身份只来自 `<desktop>.m.example.test` Host；不得从 body、query 或其他客户端字段接受 `publicHost` 覆盖。
 - 管理 token 手动创建当前禁用；Desktop 注册不创建 tunnel token、device secret 或轮换凭据。
+- 普通退出不撤销设备。主动移除后的重新注册只能用官网验签后的固定会话创建时间恢复原记录，比较和恢复必须在现有注册事务中完成；保留设备主键、名称和公网地址，不以 JWT 签发时间代替登录时间。
 - 对话显示资产必须由 Agent WebClient 同一次构建同步，路径中的 64 位 hash 是不可变集合身份；handler 只接受白名单路径并返回长期 immutable、CORS/CORP 与 `nosniff` 响应头。永久分享存在时不得清理历史集合。
 - Go 改动提交前运行 `gofmt -w` 和相关 `go test`。
 - React/Vite 改动同时运行 `tunnel-hub-public` 的 `npm test` 和 `npm run build`。Public 镜像构建不得注入运行时标题；容器启动时必须通过 `PUBLIC_SITE_TITLE` 生成纯文本 runtime 配置。
@@ -176,7 +177,7 @@ npm run dev
 
 - `DATABASE_TYPE` 缺省为 `mysql`；MySQL 连接只来自 `MYSQL_*`，SQLite 路径只来自 `RELAY_DB_PATH`。`MYSQL_PASSWORD` 不裁剪，不输出 DSN 或完整配置。
 - 使用 `database/sql` 和具体 `store.DB`，数据库差异只允许出现在连接、schema 和必要 SQL/事务分支；不引入 ORM、通用方言框架或 Repository。
-- 全新 MySQL 库由应用逐表建表；全新 SQLite 库在事务中建表并写入版本。两者都不导入历史数据或自动修补已有表。
+- 全新 MySQL 库由应用逐表建表；全新 SQLite 库在事务中建表并写入版本。两者采用现有显式迁移；Desktop 撤销字段升级必须保留设备、公网地址、分享及资源。
 - 使用 InnoDB、utf8mb4、区分大小写的标识符、UTC DATETIME(6)；`max_allowed_packet` 至少 64 MiB。
 - 一次性分享提交成功后才返回正文；设备/WebApp 注册和最后管理员保护必须通过数据库约束和事务保证并发语义。
 - MySQL 测试使用 `internal/testutil/mysqltest` 创建独立随机库，不得读取生产账号或静默跳过；SQLite 测试只使用 `t.TempDir()` 下的文件。清理失败必须明确报告。

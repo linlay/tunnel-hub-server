@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"errors"
+	"math"
 	"os"
 	"strings"
 	"time"
@@ -29,12 +30,13 @@ type SSOJWTConfig struct {
 }
 
 type SSOJWTPrincipal struct {
-	UserID    string
-	Email     string
-	Name      string
-	Role      string
-	Scope     string
-	ExpiresAt time.Time
+	SessionStartedAt time.Time
+	UserID           string
+	Email            string
+	Name             string
+	Role             string
+	Scope            string
+	ExpiresAt        time.Time
 }
 
 type SSOJWTVerifier struct {
@@ -139,6 +141,10 @@ func (v *SSOJWTVerifier) VerifyBearerHeader(header string) (SSOJWTPrincipal, err
 }
 
 func (v *SSOJWTVerifier) Verify(token string, now time.Time) (SSOJWTPrincipal, error) {
+	return v.verify(token, now, v.audience, v.allowAnyAudience)
+}
+
+func (v *SSOJWTVerifier) verify(token string, now time.Time, audience string, allowAnyAudience bool) (SSOJWTPrincipal, error) {
 	parts := strings.Split(token, ".")
 	if len(parts) != 3 {
 		return SSOJWTPrincipal{}, errors.New("invalid JWT")
@@ -174,7 +180,7 @@ func (v *SSOJWTVerifier) Verify(token string, now time.Time) (SSOJWTPrincipal, e
 	if readStringClaim(claims, "iss") != v.issuer {
 		return SSOJWTPrincipal{}, errors.New("issuer mismatch")
 	}
-	if !v.allowAnyAudience && !claimHasAudience(claims["aud"], v.audience) {
+	if !allowAnyAudience && !claimHasAudience(claims["aud"], audience) {
 		return SSOJWTPrincipal{}, errors.New("audience mismatch")
 	}
 	exp := readNumberClaim(claims, "exp")
@@ -188,17 +194,26 @@ func (v *SSOJWTVerifier) Verify(token string, now time.Time) (SSOJWTPrincipal, e
 	if iat := readNumberClaim(claims, "iat"); iat > 0 && iat > now.Unix()+clockSkewSeconds {
 		return SSOJWTPrincipal{}, errors.New("token issued in the future")
 	}
+	var sessionStartedAt time.Time
+	if raw, exists := claims["session_started_at_ms"]; exists {
+		value, ok := raw.(float64)
+		if !ok || value <= 0 || math.Trunc(value) != value || value > float64(now.Add(time.Duration(clockSkewSeconds)*time.Second).UnixMilli()) {
+			return SSOJWTPrincipal{}, errors.New("invalid login session start time")
+		}
+		sessionStartedAt = time.UnixMilli(int64(value)).UTC()
+	}
 	userID := readStringClaim(claims, v.userIDClaim)
 	if userID == "" {
 		return SSOJWTPrincipal{}, errors.New("missing user id claim")
 	}
 	return SSOJWTPrincipal{
-		UserID:    userID,
-		Email:     readStringClaim(claims, "email"),
-		Name:      readStringClaim(claims, "name"),
-		Role:      strings.ToLower(readStringClaim(claims, "role")),
-		Scope:     readStringClaim(claims, "scope"),
-		ExpiresAt: time.Unix(exp, 0).UTC(),
+		SessionStartedAt: sessionStartedAt,
+		UserID:           userID,
+		Email:            readStringClaim(claims, "email"),
+		Name:             readStringClaim(claims, "name"),
+		Role:             strings.ToLower(readStringClaim(claims, "role")),
+		Scope:            readStringClaim(claims, "scope"),
+		ExpiresAt:        time.Unix(exp, 0).UTC(),
 	}, nil
 }
 

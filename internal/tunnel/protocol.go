@@ -97,18 +97,19 @@ type RouteMetadata struct {
 }
 
 type StreamPayload struct {
-	IdentityToken  string          `json:"identityToken,omitempty"`
-	DeviceID       string          `json:"deviceId,omitempty"`
-	Client         string          `json:"client,omitempty"`
-	Capabilities   []string        `json:"capabilities,omitempty"`
-	AuthToken      string          `json:"authToken,omitempty"`
-	Subprotocol    string          `json:"subprotocol,omitempty"`
-	Source         string          `json:"source,omitempty"`
-	ClientDeviceID string          `json:"clientDeviceId,omitempty"`
-	Public         *PublicRequest  `json:"public,omitempty"`
-	Upstream       *UpstreamTarget `json:"upstream,omitempty"`
-	Route          *RouteMetadata  `json:"route,omitempty"`
-	BodyLength     *int64          `json:"bodyLength,omitempty"`
+	IdentityToken      string              `json:"identityToken,omitempty"`
+	PlatformCredential *PlatformCredential `json:"platformCredential,omitempty"`
+	DeviceID           string              `json:"deviceId,omitempty"`
+	Client             string              `json:"client,omitempty"`
+	Capabilities       []string            `json:"capabilities,omitempty"`
+	AuthToken          string              `json:"authToken,omitempty"`
+	Subprotocol        string              `json:"subprotocol,omitempty"`
+	Source             string              `json:"source,omitempty"`
+	ClientDeviceID     string              `json:"clientDeviceId,omitempty"`
+	Public             *PublicRequest      `json:"public,omitempty"`
+	Upstream           *UpstreamTarget     `json:"upstream,omitempty"`
+	Route              *RouteMetadata      `json:"route,omitempty"`
+	BodyLength         *int64              `json:"bodyLength,omitempty"`
 }
 
 type StreamResponseData struct {

@@ -47,6 +47,7 @@ func TestRelayResourceRequestsDesktopAndReturnsPushedFile(t *testing.T) {
 		t.Fatalf("new resource request: %v", err)
 	}
 	req.Host = registration.Device.PublicHost
+	req.Header.Set("X-Account-Authorization", "Bearer "+identityToken)
 	req.Header.Set("Authorization", "Bearer desktop-app-token")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -101,6 +102,7 @@ func TestRelayResourceEnforcesDesktopHostAuthAndSafeFile(t *testing.T) {
 	db := openProxyTestDB(t)
 	manager := NewManager()
 	relay := NewRelay(db, manager, nil, "example", "m.example.test", "example.test", 64<<20)
+	identityToken := configureProxyDesktopIdentity(t, relay, "user_1")
 	registration := registerUploadDesktop(t, db, "desk.m.example.test")
 
 	tests := []struct {
@@ -116,7 +118,7 @@ func TestRelayResourceEnforcesDesktopHostAuthAndSafeFile(t *testing.T) {
 		{name: "absolute file", host: registration.Device.PublicHost, auth: "desktop-token", target: "/api/resource?file=%2Ftmp%2Fa.txt", status: http.StatusBadRequest},
 		{name: "parent traversal", host: registration.Device.PublicHost, auth: "desktop-token", target: "/api/resource?file=chat%2F..%2Fa.txt", status: http.StatusBadRequest},
 		{name: "not chat relative", host: registration.Device.PublicHost, auth: "desktop-token", target: "/api/resource?file=a.txt", status: http.StatusBadRequest},
-		{name: "desktop offline", host: registration.Device.PublicHost, auth: "desktop-token", target: "/api/resource?file=chat%2Fa.txt", status: http.StatusBadGateway},
+		{name: "desktop offline", host: registration.Device.PublicHost, auth: "desktop-token", target: "/api/resource?file=chat%2Fa.txt", status: http.StatusConflict},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -124,6 +126,7 @@ func TestRelayResourceEnforcesDesktopHostAuthAndSafeFile(t *testing.T) {
 			req := httptest.NewRequest(http.MethodGet, tc.target, nil)
 			req.Host = tc.host
 			if tc.auth != "" {
+				req.Header.Set("X-Account-Authorization", "Bearer "+identityToken)
 				req.Header.Set("Authorization", "Bearer "+tc.auth)
 			}
 			relay.HandleResource(rec, req)
@@ -149,6 +152,7 @@ func TestRelayResourcePropagatesDesktopTokenRejection(t *testing.T) {
 
 	req, _ := http.NewRequest(http.MethodGet, server.URL+"/api/resource?file=chat%2Fa.txt", nil)
 	req.Host = registration.Device.PublicHost
+	req.Header.Set("X-Account-Authorization", "Bearer "+identityToken)
 	req.Header.Set("Authorization", "Bearer token-for-a-different-desktop")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -226,6 +230,7 @@ func TestRelayResourceCleansPendingStateAfterDesktopError(t *testing.T) {
 
 	req, _ := http.NewRequest(http.MethodGet, server.URL+"/api/resource?file=chat%2Fmissing.txt", nil)
 	req.Host = registration.Device.PublicHost
+	req.Header.Set("X-Account-Authorization", "Bearer "+identityToken)
 	req.Header.Set("Authorization", "Bearer desktop-app-token")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {

@@ -330,7 +330,9 @@ curl -X DELETE https://hub.example.test/api/desktop/shares/share_xxx \
 
 `GET/HEAD /assets/conversation-export/{sha256}/{file}` 提供随 Relay 编译且通过内容 Hash 校验的资源集；当前 manifest 决定新分享页使用的资源集，历史资源集继续服务已有 HTML。分享渲染包由 WebClient 显式同步后随 Relay 原子发布，普通 WebClient 发布不修改它。
 
-本版本使用全新 MySQL 数据库或全新、带版本标记的 SQLite 库，不导入旧数据，不包含历史数据库迁移工具或双库回退逻辑。原账号、Token、设备映射和分享链接不会自动恢复，需重新初始化或注册。
+公开分享页和可下载模板均在每次响应时生成独立的 32 字节随机样式 nonce，并同时填入 CSP 与 `conversation-export-style-nonce` 元数据。分享运行时将 nonce 传给组件动态样式，`style-src-elem` 不放开任意内联样式；可下载模板保留原有 Snapshot、资产 origin 和本地品牌占位符，旧版 Desktop 组装流程无需更改。
+
+数据库升级采用明确的增量迁移：保留既有账号、设备映射、公网地址和分享；数据库类型切换不会自动复制数据，不提供双库回退逻辑。升级前先备份并在副本验证。
 
 注册 Desktop WebApp：
 
@@ -420,3 +422,21 @@ make test-all
 测试账号应仅在独立测试实例使用，不得授予应用生产账号全局建库/删库权限。测试异常中断后可检查并清理本次测试创建的 `tunnel_test_*` 库；归属不明的库不要删除。
 
 提交前至少运行 `make test-all` 和 `make verify-neutral`。协议、转发、鉴权、配置、存储相关改动需要补充或更新对应 `*_test.go`。
+
+### Account mobile routes
+
+Hub owns Desktop membership, names, revocation and live Tunnel presence. GET `/api/desktop/account-devices` returns the current account's valid Desktops with online state; PATCH/DELETE `/api/desktop/account-devices/{deviceId}` rename/unbind them. Desktop registration reuses its persisted device ID and canonical OAuth SSO identity, without calling Identity for a second device registration.
+
+POST `/api/desktop/route-credentials` accepts only `targetDesktopId` with the official SSO bearer proof. The configured `SSO_JWT_USER_ID_CLAIM` determines the owner; `account_id` never overrides it. The response returns that live Desktop's uploaded original Platform credential, local `platformDeviceId`, expiry and exact WebSocket endpoint with `subprotocol` transport. Offline returns 409; a missing/expired uploaded credential returns 503; other owners are denied. Responses use `Cache-Control: no-store`.
+
+Desktop uploads optional `platformCredential: {token, platformDeviceId, expiresAt}` in `tunnel.open`. It refreshes the same live connection with POST `/api/desktop/devices/register` using `{deviceId, tunnelSessionId, platformCredential}` and its current official bearer proof. An update cannot register a computer, replace another session, change the local Identity device or overwrite a newer expiry. The existing Manager lock owns credentials; disconnect/replacement/revocation removes their accessibility. The Hub validates structural fields; Desktop/Platform validates the original Identity signature. No business credential is stored in the database or minted by the Hub.
+
+Mobile Desktop WS, `/api/upload` and `/api/resource` require separate `X-Account-Authorization: Bearer <official-proof>` and the original business bearer token/subprotocol. Target ownership is checked before forwarding and before buffering uploads; the official proof is removed before downstream delivery. URL token authentication is rejected. Ordinary Agent and published WebApp routes retain their original contracts.
+
+Controlled mobile WebApp hosts reserve POST `/api/mobile-session` and POST `/api/mobile-session/logout`. Bootstrap validates both headers and returns an opaque, host-only, Secure, HttpOnly, SameSite=Strict Cookie plus `{expiresAt}`. Its server-side memory entry is tied to the live Desktop and bounded by both proof and business token expiries. Page, subresource and WebSocket requests use that Cookie; the gateway removes it before forwarding the original business token internally. Logout expires it and removes the entry; a foreign Origin is refused. Raw business tokens never enter WebApp URLs or page headers. Native Cookie sharing must be accepted on real iOS/Android devices. The old `tr_` issuer, validation endpoint and Identity `/me` dependency have been removed.
+
+SQLite v3 -> v4 and existing MySQL databases add only desktop_devices.revoked_at for this change. Revocation retains device/session/share history and public addresses, closes the Tunnel and discards in-memory credentials/Cookie sessions; registration using the old login session cannot restore the record; only a session created after revocation can restore the existing record. Missing official verifier/Manager state fails closed. Historical shares, snapshots and attachment files are unchanged.
+
+### 账号设备生命周期
+
+Desktop 的设备 ID 属于本地安装，普通退出和重连不撤销注册或改变 ID；同账号登录复用原设备、自定义名称和公网地址。手机主动移除使用设备 DELETE 接口，撤销并关闭在线连接。只有官网签名的 `session_started_at_ms` 严格晚于 `revoked_at`，注册事务才恢复原记录；缺少有效登录时间或仅刷新旧会话令牌均不能恢复。官网提供原始会话创建时间，Hub 验证身份并决定设备访问权限，Desktop 不解析该字段。发布顺序为官网、Hub、Desktop；不按设备名称合并或删除历史记录。

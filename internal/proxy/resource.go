@@ -165,6 +165,10 @@ func (r *Relay) HandleResource(w http.ResponseWriter, req *http.Request) {
 		r.writeGatewayError(w, "desktop lookup failed", err)
 		return
 	}
+	if _, ok := r.authorizeMobileAccount(w, req, device); !ok {
+		return
+	}
+	req.Header.Del("X-Account-Authorization")
 
 	resourceID, err := randomUploadToken("hub_resource_")
 	if err != nil {

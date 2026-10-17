@@ -9,10 +9,78 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path"
+	"regexp"
 	"sort"
 	"strings"
 	"testing"
 )
+
+func responseStyleNonce(t *testing.T, body string) string {
+	t.Helper()
+	match := regexp.MustCompile(`name="conversation-export-style-nonce" content="([A-Za-z0-9_-]{43})"`).FindStringSubmatch(body)
+	if len(match) != 2 || !strings.Contains(body, "'nonce-"+match[1]+"'") {
+		t.Fatal("style nonce is missing or does not match the CSP")
+	}
+	if regexp.MustCompile(`style-src-elem[^;]*'unsafe-inline'`).MatchString(body) {
+		t.Fatal("arbitrary inline style elements must remain blocked")
+	}
+	return match[1]
+}
+
+func TestStyleNonceIsUniquePerRenderAndDoesNotRewriteSnapshot(t *testing.T) {
+	bundle := NewBundle()
+	snapshot := []byte(`{"version":1,"title":"` + styleNonceMarker + `"}`)
+	first, err := bundle.Render(snapshot, "https://share.example.test", "example", "Example", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := bundle.Render(snapshot, "https://share.example.test", "example", "Example", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if responseStyleNonce(t, string(first)) == responseStyleNonce(t, string(second)) {
+		t.Fatal("style nonce was reused across responses")
+	}
+	if !strings.Contains(string(first), `"title":"`+styleNonceMarker+`"`) {
+		t.Fatal("nonce replacement must not modify user snapshot content")
+	}
+	if strings.Count(string(bundle.template), styleNonceMarker) != 2 {
+		t.Fatal("rendering mutated the shared template")
+	}
+}
+
+func TestDownloadedTemplateHasFreshNonceForExistingLocalExportClients(t *testing.T) {
+	handler := NewHandler()
+	nonces := make(map[string]bool)
+	for range 2 {
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, TemplatePublicPath, nil))
+		body := response.Body.String()
+		if response.Code != http.StatusOK || strings.Contains(body, styleNonceMarker) ||
+			!strings.Contains(body, snapshotMarker) || !strings.Contains(body, assetOriginMarker) ||
+			!strings.Contains(body, localBrandIDMarker) {
+			t.Fatal("downloaded template must resolve the nonce and preserve existing assembly markers")
+		}
+		nonce := responseStyleNonce(t, body)
+		if nonces[nonce] {
+			t.Fatal("downloaded templates reused a nonce")
+		}
+		nonces[nonce] = true
+	}
+}
+
+func TestStyleNonceFailsClosedForMissingOrExtraPlaceholders(t *testing.T) {
+	for _, count := range []int{0, 1, 3} {
+		if _, err := templateWithStyleNonce([]byte(strings.Repeat(styleNonceMarker, count))); err == nil {
+			t.Fatalf("accepted %d nonce placeholders", count)
+		}
+	}
+	response := httptest.NewRecorder()
+	serveTemplate(response, httptest.NewRequest(http.MethodGet, TemplatePublicPath, nil), nil)
+	if response.Code != http.StatusInternalServerError {
+		t.Fatal("invalid template was served without a nonce")
+	}
+}
 
 func TestEmbeddedAssetSetDirectoryMatchesContentHash(t *testing.T) {
 	sets, err := fs.ReadDir(embeddedFiles, "files")

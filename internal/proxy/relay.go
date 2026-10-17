@@ -62,10 +62,11 @@ type desktopTunnelOpenFrame struct {
 }
 
 type desktopTunnelOpenPayload struct {
-	IdentityToken string   `json:"identityToken"`
-	DeviceID      string   `json:"deviceId"`
-	Client        string   `json:"client"`
-	Capabilities  []string `json:"capabilities"`
+	PlatformCredential *tunnel.PlatformCredential `json:"platformCredential,omitempty"`
+	IdentityToken      string                     `json:"identityToken"`
+	DeviceID           string                     `json:"deviceId"`
+	Client             string                     `json:"client"`
+	Capabilities       []string                   `json:"capabilities"`
 }
 
 func NewRelay(db *store.DB, manager *Manager, logger *slog.Logger, brandID, desktopBaseDomain, webAppBaseDomain string, maxRequestBodyBytes int64) *Relay {
@@ -206,6 +207,10 @@ func (r *Relay) HandleTunnel(w http.ResponseWriter, req *http.Request) {
 		_ = ws.WriteJSON(tunnel.NewErrorResponse(tunnel.NamespaceDesktop, tunnel.TypeTunnelOpen, open.ID, http.StatusForbidden, "desktop device is not registered for this identity"))
 		return
 	}
+	if open.Payload.PlatformCredential != nil && open.Payload.PlatformCredential.Validate(time.Now()) != nil {
+		_ = ws.WriteJSON(tunnel.NewErrorResponse(tunnel.NamespaceDesktop, tunnel.TypeTunnelOpen, open.ID, http.StatusBadRequest, "invalid Platform credential"))
+		return
+	}
 	if err := ws.SetReadDeadline(time.Time{}); err != nil {
 		r.Logger.Warn("clear desktop tunnel handshake deadline", "error", err)
 	}
@@ -227,6 +232,7 @@ func (r *Relay) HandleTunnel(w http.ResponseWriter, req *http.Request) {
 	r.serveTunnelSession(ws, ActiveTunnel{
 		SessionID:   dbSession.ID,
 		Key:         DesktopConnectionKey(device.DeviceKey),
+		OwnerUserID: principal.UserID, DesktopID: device.DeviceID, PlatformCredential: open.Payload.PlatformCredential,
 		RemoteAddr:  clientRemoteAddr,
 		ConnectedAt: dbSession.ConnectedAt,
 	}, principal.ExpiresAt, func() {
@@ -259,8 +265,15 @@ func (r *Relay) serveTunnelSession(ws *websocket.Conn, active ActiveTunnel, expi
 	}
 	_ = r.DB.AddEvent(context.Background(), eventPrefix+".connected", eventSubject+" connected", active.SessionID)
 	r.Manager.SetActive(&active)
+	if active.Key.Kind == ConnectionKindDesktop {
+		// Close a handshake that raced with revocation before Manager registration.
+		valid, err := r.DB.IsDesktopDeviceActive(context.Background(), active.Key.ID)
+		if err != nil || !valid {
+			_ = session.Close()
+		}
+	}
 	r.Logger.Info(eventPrefix+" connected", "session", active.SessionID, "remote", active.RemoteAddr)
-	go r.monitorTunnelHeartbeat(ws, session, active, tunnelHeartbeatInterval, tunnelHeartbeatWriteTimeout)
+	go r.monitorTunnelHeartbeat(ws, session, active.SessionID, active.Key.Kind, tunnelHeartbeatInterval, tunnelHeartbeatWriteTimeout)
 
 	<-session.CloseChan()
 
@@ -270,9 +283,9 @@ func (r *Relay) serveTunnelSession(ws *websocket.Conn, active ActiveTunnel, expi
 	r.Logger.Info(eventPrefix+" disconnected", "session", active.SessionID)
 }
 
-func (r *Relay) monitorTunnelHeartbeat(ws *websocket.Conn, session *yamux.Session, active ActiveTunnel, interval, writeTimeout time.Duration) {
+func (r *Relay) monitorTunnelHeartbeat(ws *websocket.Conn, session *yamux.Session, sessionID string, kind ConnectionKind, interval, writeTimeout time.Duration) {
 	if err := runTunnelHeartbeat(ws, session, interval, writeTimeout); err != nil {
-		r.Logger.Warn("tunnel heartbeat failed", "session", active.SessionID, "kind", active.Key.Kind, "error", err)
+		r.Logger.Warn("tunnel heartbeat failed", "session", sessionID, "kind", kind, "error", err)
 		_ = session.Close()
 	}
 }
@@ -359,30 +372,62 @@ func (r *Relay) handleMobileWebAppPublic(w http.ResponseWriter, req *http.Reques
 		return
 	}
 	sessionCookieName := r.mobileWebAppSessionCookieName()
-	if req.URL != nil && !isWebSocketRequest(req) {
-		queryToken := strings.TrimSpace(req.URL.Query().Get("token"))
-		if queryToken != "" && (req.Method == http.MethodGet || req.Method == http.MethodHead) {
-			http.SetCookie(w, &http.Cookie{
-				Name:     sessionCookieName,
-				Value:    queryToken,
-				Path:     "/",
-				Secure:   r.MobileWebAppCookieSecure,
-				HttpOnly: true,
-				SameSite: http.SameSiteLaxMode,
-			})
-			nextURL := *req.URL
-			query := nextURL.Query()
-			query.Del("token")
-			nextURL.RawQuery = query.Encode()
-			http.Redirect(w, req, nextURL.RequestURI(), http.StatusSeeOther)
-			return
-		}
-	}
-	authToken, subprotocol := mobileWebAppAuth(req, sessionCookieName)
+	authToken, subprotocol := desktopWebSocketAuth(req)
 	if authToken == "" {
-		http.Error(w, "mobile authentication token is required", http.StatusUnauthorized)
+		authToken = bearerToken(req.Header.Get("Authorization"))
+	}
+	if req.URL.Query().Get("token") != "" {
+		http.Error(w, "URL credentials are not supported", 400)
 		return
 	}
+	if req.URL.Path == "/api/mobile-session/logout" {
+		if req.Method != http.MethodPost {
+			http.Error(w, "method not allowed", 405)
+			return
+		}
+		if origin := req.Header.Get("Origin"); origin != "" && origin != "https://"+tunnel.NormalizeHost(req.Host) {
+			http.Error(w, "invalid session origin", 403)
+			return
+		}
+		if cookie, err := req.Cookie(sessionCookieName); err == nil {
+			r.Manager.revokeMobileWebAppSession(DesktopConnectionKey(device.DeviceKey), cookie.Value)
+		}
+		http.SetCookie(w, &http.Cookie{Name: sessionCookieName, Value: "", Path: "/", Secure: r.MobileWebAppCookieSecure, HttpOnly: true, SameSite: http.SameSiteStrictMode, MaxAge: -1})
+		w.Header().Set("Cache-Control", "no-store")
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	if req.URL.Path == "/api/mobile-session" {
+		if req.Method != http.MethodPost {
+			http.Error(w, "method not allowed", 405)
+			return
+		}
+		principal, ok := r.authorizeMobileAccount(w, req, device)
+		if !ok {
+			return
+		}
+		secret, expires, ok := r.Manager.createMobileWebAppSession(DesktopConnectionKey(device.DeviceKey), principal, authToken)
+		if !ok {
+			http.Error(w, "Platform credential unavailable", 503)
+			return
+		}
+		http.SetCookie(w, &http.Cookie{Name: sessionCookieName, Value: secret, Path: "/", Secure: r.MobileWebAppCookieSecure, HttpOnly: true, SameSite: http.SameSiteStrictMode, Expires: expires})
+		w.Header().Set("Cache-Control", "no-store")
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"expiresAt": expires})
+		return
+	}
+	cookie, cookieErr := req.Cookie(sessionCookieName)
+	if cookieErr != nil {
+		http.Error(w, "mobile session required", 401)
+		return
+	}
+	authToken, ok = r.Manager.mobileWebAppSessionFor(DesktopConnectionKey(device.DeviceKey), device.OwnerUserID, cookie.Value)
+	if !ok {
+		http.Error(w, "mobile session expired", 401)
+		return
+	}
+
 	next := req.Clone(req.Context())
 	nextURL := *req.URL
 	next.URL = &nextURL
@@ -392,6 +437,7 @@ func (r *Relay) handleMobileWebAppPublic(w http.ResponseWriter, req *http.Reques
 	next.RequestURI = next.URL.RequestURI()
 	next.Header = req.Header.Clone()
 	next.Header.Del("Authorization")
+	next.Header.Del("X-Account-Authorization")
 	removeCookie(next.Header, sessionCookieName)
 	next.Header.Set("X-Forwarded-Host", tunnel.NormalizeHost(req.Host))
 	next.Header.Set("X-Forwarded-Proto", "https")
@@ -432,6 +478,14 @@ func (r *Relay) handleDesktopPublic(w http.ResponseWriter, req *http.Request) {
 		r.writeGatewayError(w, "desktop lookup failed", err)
 		return
 	}
+	if req.URL.Query().Get("token") != "" {
+		http.Error(w, "URL credentials are not supported", 400)
+		return
+	}
+	if _, ok := r.authorizeMobileAccount(w, req, device); !ok {
+		return
+	}
+	req.Header.Del("X-Account-Authorization")
 	connection := DesktopConnectionKey(device.DeviceKey)
 	stream, err := r.Manager.OpenStream(req.Context(), connection)
 	if errors.Is(err, ErrNoTunnel) {
@@ -993,26 +1047,6 @@ func desktopWebSocketAuth(req *http.Request) (string, string) {
 	authToken := ""
 	if req.URL != nil {
 		authToken = strings.TrimSpace(req.URL.Query().Get("token"))
-	}
-	subprotocol := bearerSubprotocol(req.Header)
-	if authToken == "" && subprotocol != "" {
-		authToken = strings.TrimSpace(subprotocol[len("bearer."):])
-	}
-	return authToken, subprotocol
-}
-
-func mobileWebAppAuth(req *http.Request, sessionCookieName string) (string, string) {
-	authToken := ""
-	if req.URL != nil {
-		authToken = strings.TrimSpace(req.URL.Query().Get("token"))
-	}
-	if authToken == "" {
-		authToken = bearerToken(req.Header.Get("Authorization"))
-	}
-	if authToken == "" {
-		if cookie, err := req.Cookie(sessionCookieName); err == nil {
-			authToken = strings.TrimSpace(cookie.Value)
-		}
 	}
 	subprotocol := bearerSubprotocol(req.Header)
 	if authToken == "" && subprotocol != "" {
