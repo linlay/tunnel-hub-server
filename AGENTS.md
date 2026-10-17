@@ -130,6 +130,7 @@ Relay 入口在 `cmd/relay/main.go`，启动顺序是：
 - Desktop/Platform 原票据由 Desktop 侧校验签名；移动公网 WS/上传/资源同时要求独立官网证明并检查目标归属。WS 使用 `bearer.<token>` subprotocol，禁止 URL Token；官网证明不得透传 Platform。Hub 仅在现有在线 Manager 中持有 Desktop 上传的票据，WebApp 通过受控 bootstrap 取得绑定连接的不透明 Cookie。
 - 附件 API 的 Desktop 身份只来自 `<desktop>.m.example.test` Host；不得从 body、query 或其他客户端字段接受 `publicHost` 覆盖。
 - 管理 token 手动创建当前禁用；Desktop 注册不创建 tunnel token、device secret 或轮换凭据。
+- 普通退出不撤销设备。主动移除后的重新注册只能用官网验签后的固定会话创建时间恢复原记录，比较和恢复必须在现有注册事务中完成；保留设备主键、名称和公网地址，不以 JWT 签发时间代替登录时间。
 - 对话显示资产必须由 Agent WebClient 同一次构建同步，路径中的 64 位 hash 是不可变集合身份；handler 只接受白名单路径并返回长期 immutable、CORS/CORP 与 `nosniff` 响应头。永久分享存在时不得清理历史集合。
 - Go 改动提交前运行 `gofmt -w` 和相关 `go test`。
 - React/Vite 改动同时运行 `tunnel-hub-public` 的 `npm test` 和 `npm run build`。Public 镜像构建不得注入运行时标题；容器启动时必须通过 `PUBLIC_SITE_TITLE` 生成纯文本 runtime 配置。

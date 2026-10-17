@@ -74,6 +74,53 @@ func TestAccountCredentialUsesUploadedIdentityAndIsolatesDesktops(t *testing.T) 
 		t.Fatal("unknown owner target accepted")
 	}
 }
+
+func TestAccountDesktopRejoinsOnlyAfterNewLogin(t *testing.T) {
+	s, db := newDesktopTestServer(t)
+	s.SetPresenceManager(proxy.NewManager())
+	if rec := performRegister(t, s, desktopRegisterBody("same-desktop", "", false), defaultDesktopJWT); rec.Code != 200 {
+		t.Fatal(rec.Body.String())
+	}
+	if err := db.RenameAccountDesktop(t.Context(), "42", "same-desktop", "My Computer"); err != nil {
+		t.Fatal(err)
+	}
+	original, err := db.GetDesktopDeviceByOwnerAndID(t.Context(), "42", "same-desktop")
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldLogin := time.Now().Add(-time.Hour).UnixMilli()
+	if rec := accountAPI(t, s, "DELETE", "/api/desktop/account-devices/same-desktop", defaultDesktopJWT, ""); rec.Code != 204 {
+		t.Fatal(rec.Body.String())
+	}
+	for _, started := range []int64{0, oldLogin} {
+		// Renewing iat must not turn the original login into a new session.
+		for _, issued := range []time.Time{time.Now().Add(-10 * time.Minute), time.Now()} {
+			token := signTestSSOJWT(t, defaultDesktopPrivateKey, testSSOJWTClaims{Issuer: "https://official.example.test", Audience: "tunnel-hub-server", UserID: "42", Scope: "tunnel", Issued: issued, Expires: time.Now().Add(time.Hour), SessionStartedAtMS: started})
+			if rec := performRegister(t, s, desktopRegisterBody("same-desktop", "", false), token); rec.Code != 403 {
+				t.Fatalf("old login restored device: %d %s", rec.Code, rec.Body.String())
+			}
+		}
+	}
+	// A completed subsequent login has a creation time strictly after revocation.
+	newLogin := time.Now().Add(time.Millisecond).UnixMilli()
+	token := signTestSSOJWT(t, defaultDesktopPrivateKey, testSSOJWTClaims{Issuer: "https://official.example.test", Audience: "tunnel-hub-server", UserID: "42", Scope: "tunnel", Expires: time.Now().Add(time.Hour), SessionStartedAtMS: newLogin})
+	for range 10 {
+		if rec := performRegister(t, s, desktopRegisterBody("same-desktop", "", false), token); rec.Code != 200 {
+			t.Fatal(rec.Code, rec.Body.String())
+		}
+	}
+	restored, err := db.GetDesktopDeviceByOwnerAndID(t.Context(), "42", "same-desktop")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if restored.DeviceKey != original.DeviceKey || restored.PublicHost != original.PublicHost || restored.DeviceName != "My Computer" || restored.RevokedAt != nil {
+		t.Fatal("restoration replaced the device identity or metadata")
+	}
+	devices, err := db.ListDesktopDevicesByOwner(t.Context(), "42")
+	if err != nil || len(devices) != 1 {
+		t.Fatal("duplicate account devices", err)
+	}
+}
 func TestAccountCredentialDistinguishesOfflineMissingAndExpired(t *testing.T) {
 	s, _ := newDesktopTestServer(t)
 	s.SetPresenceManager(proxy.NewManager())

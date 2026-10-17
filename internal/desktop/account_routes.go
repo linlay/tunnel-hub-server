@@ -159,22 +159,3 @@ func (s *Server) revokeAccountDesktop(w http.ResponseWriter, r *http.Request, ac
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
-
-func (s *Server) handleAccountDeviceRevoke(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		writeError(w, 405, "method not allowed")
-		return
-	}
-	principal, ok := s.authorizeRegistration(w, r)
-	if !ok {
-		return
-	}
-	var input struct {
-		TargetDesktopID string `json:"targetDesktopId"`
-	}
-	if decodeJSON(r, &input) != nil || tunnel.ValidateDesktopDeviceID(input.TargetDesktopID) != nil {
-		writeError(w, 400, "invalid device id")
-		return
-	}
-	s.revokeAccountDesktop(w, r, principal.UserID, input.TargetDesktopID)
-}

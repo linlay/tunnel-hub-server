@@ -100,8 +100,6 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.handleAccountDevice(w, r)
 	case r.URL.Path == "/api/desktop/route-credentials":
 		s.handleRouteCredential(w, r)
-	case r.URL.Path == "/api/desktop/account-device/revoke":
-		s.handleAccountDeviceRevoke(w, r)
 	case r.URL.Path == conversationSharesPath:
 		switch r.Method {
 		case http.MethodPost:
@@ -256,12 +254,13 @@ func (s *Server) registerDesktopDevice(r *http.Request, principal auth.SSOJWTPri
 			return store.RegisterDesktopDeviceResult{}, err
 		}
 		result, err := s.DB.RegisterDesktopDevice(r.Context(), store.RegisterDesktopDeviceInput{
-			DeviceID:    payload.DeviceID,
-			DeviceName:  payload.DeviceName,
-			OwnerUserID: principal.UserID,
-			OwnerEmail:  principal.Email,
-			OwnerName:   principal.Name,
-			PublicHost:  publicHost,
+			SessionStartedAt: principal.SessionStartedAt,
+			DeviceID:         payload.DeviceID,
+			DeviceName:       payload.DeviceName,
+			OwnerUserID:      principal.UserID,
+			OwnerEmail:       principal.Email,
+			OwnerName:        principal.Name,
+			PublicHost:       publicHost,
 		})
 		if !errors.Is(err, store.ErrDesktopDeviceHostConflict) {
 			return result, err

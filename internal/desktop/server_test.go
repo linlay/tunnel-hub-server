@@ -1385,13 +1385,15 @@ func performRegisterWebApp(t *testing.T, server *Server, deviceID, name, body st
 }
 
 type testSSOJWTClaims struct {
-	Issuer   string
-	Audience string
-	UserID   string
-	Email    string
-	Role     string
-	Scope    string
-	Expires  time.Time
+	SessionStartedAtMS int64
+	Issuer             string
+	Audience           string
+	UserID             string
+	Email              string
+	Role               string
+	Scope              string
+	Issued             time.Time
+	Expires            time.Time
 }
 
 func testSSOJWTKey(t *testing.T) (*rsa.PrivateKey, string) {
@@ -1413,20 +1415,28 @@ func testSSOJWTKey(t *testing.T) (*rsa.PrivateKey, string) {
 
 func signTestSSOJWT(t *testing.T, privateKey *rsa.PrivateKey, claims testSSOJWTClaims) string {
 	t.Helper()
+	if claims.Issued.IsZero() {
+		claims.Issued = time.Now()
+	}
 	headerJSON, _ := json.Marshal(map[string]any{"alg": "RS256", "typ": "JWT", "kid": "test-key"})
-	claimsJSON, _ := json.Marshal(map[string]any{
-		"iss":     claims.Issuer,
-		"sub":     claims.UserID,
-		"aud":     claims.Audience,
-		"iat":     time.Now().Unix(),
-		"exp":     claims.Expires.Unix(),
-		"jti":     "test-jti",
-		"user_id": claims.UserID,
-		"email":   claims.Email,
-		"name":    "Desktop User",
-		"role":    claims.Role,
-		"scope":   claims.Scope,
-	})
+	payload := map[string]any{
+		"session_started_at_ms": claims.SessionStartedAtMS,
+		"iss":                   claims.Issuer,
+		"sub":                   claims.UserID,
+		"aud":                   claims.Audience,
+		"iat":                   claims.Issued.Unix(),
+		"exp":                   claims.Expires.Unix(),
+		"jti":                   "test-jti",
+		"user_id":               claims.UserID,
+		"email":                 claims.Email,
+		"name":                  "Desktop User",
+		"role":                  claims.Role,
+		"scope":                 claims.Scope,
+	}
+	if claims.SessionStartedAtMS == 0 {
+		delete(payload, "session_started_at_ms")
+	}
+	claimsJSON, _ := json.Marshal(payload)
 	headerPart := base64.RawURLEncoding.EncodeToString(headerJSON)
 	payloadPart := base64.RawURLEncoding.EncodeToString(claimsJSON)
 	signedValue := headerPart + "." + payloadPart

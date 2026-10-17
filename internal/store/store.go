@@ -103,12 +103,13 @@ type TrafficStats struct {
 }
 
 type RegisterDesktopDeviceInput struct {
-	DeviceID    string
-	DeviceName  string
-	OwnerUserID string
-	OwnerEmail  string
-	OwnerName   string
-	PublicHost  string
+	SessionStartedAt time.Time
+	DeviceID         string
+	DeviceName       string
+	OwnerUserID      string
+	OwnerEmail       string
+	OwnerName        string
+	PublicHost       string
 }
 
 type RegisterDesktopDeviceResult struct {
@@ -438,7 +439,12 @@ func (db *DB) RegisterDesktopDevice(ctx context.Context, input RegisterDesktopDe
 		return RegisterDesktopDeviceResult{}, err
 	}
 	if device.RevokedAt != nil {
-		return RegisterDesktopDeviceResult{}, ErrDesktopDeviceRevoked
+		if !input.SessionStartedAt.After(*device.RevokedAt) {
+			return RegisterDesktopDeviceResult{}, ErrDesktopDeviceRevoked
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE desktop_devices SET revoked_at = NULL WHERE device_id = ?`, device.DeviceKey); err != nil {
+			return RegisterDesktopDeviceResult{}, err
+		}
 	}
 	// Registration refreshes transport metadata; reconnects must not undo a Hub rename.
 	if device.DeviceName != "" {
