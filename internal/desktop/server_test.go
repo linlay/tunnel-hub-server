@@ -1254,7 +1254,7 @@ func newDesktopTestServerWithConfig(t *testing.T, cfg config.RelayConfig) (*Serv
 
 type testConversationShareRenderer struct{}
 
-func (testConversationShareRenderer) Render(snapshot []byte, _, _, _, _ string) ([]byte, error) {
+func (testConversationShareRenderer) Render(snapshot []byte, _, _, _, _ string, _ bool) ([]byte, error) {
 	return append([]byte(nil), snapshot...), nil
 }
 

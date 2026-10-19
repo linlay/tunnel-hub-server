@@ -25,6 +25,7 @@ const assetOriginMarker = "__CONVERSATION_EXPORT_ASSET_ORIGIN__"
 const localBrandIDMarker = "__CONVERSATION_EXPORT_LOCAL_BRAND_ID__"
 const styleNonceMarker = "__CONVERSATION_EXPORT_STYLE_NONCE__"
 const publicBrandMeta = `<meta name="conversation-export-public-brand" content="" />`
+const canReshareMeta = `<meta name="conversation-export-can-reshare" content="" />`
 
 var relativeAssetPath = regexp.MustCompile(`^(?:[A-Za-z0-9._-]+/)*[A-Za-z0-9._-]+$`)
 var brandScheme = regexp.MustCompile(`^[a-z][a-z0-9-]*$`)
@@ -64,6 +65,7 @@ func NewBundle() *Bundle {
 	if err != nil || bytes.Count(template, []byte(snapshotMarker)) != 1 ||
 		bytes.Count(template, []byte(assetOriginMarker)) == 0 ||
 		bytes.Count(template, []byte(localBrandIDMarker)) != 1 ||
+		bytes.Count(template, []byte(canReshareMeta)) != 1 ||
 		bytes.Count(template, []byte(styleNonceMarker)) != 2 {
 		panic("conversation export template is invalid")
 	}
@@ -92,7 +94,7 @@ func NewHandler() http.Handler {
 	return NewBundle()
 }
 
-func (b *Bundle) Render(snapshot []byte, assetOrigin, brandID, productName, productDownloadPageURL string) ([]byte, error) {
+func (b *Bundle) Render(snapshot []byte, assetOrigin, brandID, productName, productDownloadPageURL string, canReshare bool) ([]byte, error) {
 	if !json.Valid(snapshot) {
 		return nil, errors.New("conversation snapshot is invalid")
 	}
@@ -116,6 +118,8 @@ func (b *Bundle) Render(snapshot []byte, assetOrigin, brandID, productName, prod
 		return nil, err
 	}
 	htmlBytes := bytes.Replace(template, []byte(snapshotMarker), escaped.Bytes(), 1)
+	htmlBytes = bytes.Replace(htmlBytes, []byte(canReshareMeta),
+		[]byte(`<meta name="conversation-export-can-reshare" content="`+strconv.FormatBool(canReshare)+`" />`), 1)
 	htmlBytes = bytes.ReplaceAll(htmlBytes, []byte(assetOriginMarker), []byte(origin))
 	if !brandScheme.MatchString(brandID) || reservedSchemes[brandID] || strings.TrimSpace(productName) == "" {
 		return nil, errors.New("public share brand is invalid")
