@@ -85,15 +85,16 @@ func TestMySQLInvalidCA(t *testing.T) {
 
 func TestMySQLServerRequirements(t *testing.T) {
 	for _, tc := range []struct {
-		version string
-		packet  int64
-		valid   bool
+		version         string
+		packet, minimum int64
+		valid           bool
 	}{
-		{"8.0.16", 64 << 20, true}, {"8.0.45-commercial", 64 << 20, true}, {"8.4.0", 64 << 20, true},
-		{"8.0.15", 64 << 20, false}, {"5.7.44", 64 << 20, false}, {"10.11.0-MariaDB", 64 << 20, false},
-		{"bad", 64 << 20, false}, {"8.0.45", 32 << 20, false},
+		{"8.0.16", 64 << 20, 64 << 20, true}, {"8.0.45-commercial", 64 << 20, 64 << 20, true}, {"8.4.0", 64 << 20, 64 << 20, true},
+		{"8.0.15", 64 << 20, 64 << 20, false}, {"5.7.44", 64 << 20, 64 << 20, false}, {"10.11.0-MariaDB", 64 << 20, 64 << 20, false},
+		{"bad", 64 << 20, 64 << 20, false}, {"8.0.45", 32 << 20, 64 << 20, false},
+		{"8.0.45", 64 << 20, 96 << 20, false}, {"8.0.45", 96 << 20, 96 << 20, true},
 	} {
-		if err := validateMySQLServer(tc.version, tc.packet); (err == nil) != tc.valid {
+		if err := validateMySQLServer(tc.version, tc.packet, tc.minimum); (err == nil) != tc.valid {
 			t.Fatalf("version %s packet %d: %v", tc.version, tc.packet, err)
 		}
 	}

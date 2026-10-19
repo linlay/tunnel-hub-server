@@ -13,6 +13,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"example.invalid/tunnel-hub-server/internal/config"
 	"example.invalid/tunnel-hub-server/internal/sharefiles"
 	"example.invalid/tunnel-hub-server/internal/store"
 )
@@ -33,17 +34,22 @@ type conversationSnapshotResource struct {
 
 // decodeConversationShare keeps only the bounded JSON snapshot in memory.
 // Resource bodies are streamed into a request-scoped staging directory.
-func decodeConversationShare(w http.ResponseWriter, r *http.Request, stage *sharefiles.Stage) ([]byte, []store.ConversationShareResource, error) {
+func decodeConversationShare(w http.ResponseWriter, r *http.Request, stage *sharefiles.Stage, limits config.ConversationShareLimits) (snapshot []byte, resources []store.ConversationShareResource, err error) {
 	mediaType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
 	if err != nil || mediaType != "multipart/form-data" || stage == nil {
 		return nil, nil, errors.New("Content-Type must be multipart/form-data")
 	}
-	r.Body = http.MaxBytesReader(w, r.Body, store.MaxConversationSnapshotBytes+store.MaxConversationResourceBytes+(1<<20))
+	r.Body = http.MaxBytesReader(w, r.Body, limits.RequestBodyBytes())
+	defer func() {
+		var maximum *http.MaxBytesError
+		if errors.As(err, &maximum) {
+			err = &conversationShareSizeError{"request_body_too_large", limits.RequestBodyBytes()}
+		}
+	}()
 	reader, err := r.MultipartReader()
 	if err != nil {
-		return nil, nil, errors.New("invalid conversation share multipart request")
+		return nil, nil, fmt.Errorf("invalid conversation share multipart request: %w", err)
 	}
-	var snapshot []byte
 	descriptors := make(map[string]conversationSnapshotResource)
 	uploaded := make(map[string]store.ConversationShareResource)
 	var total int64
@@ -53,18 +59,19 @@ func decodeConversationShare(w http.ResponseWriter, r *http.Request, stage *shar
 			break
 		}
 		if err != nil {
-			return nil, nil, errors.New("invalid conversation share multipart request")
+			return nil, nil, fmt.Errorf("invalid conversation share multipart request: %w", err)
 		}
 		name := part.FormName()
 		if name == "snapshot" {
 			if snapshot != nil || len(uploaded) != 0 {
-				part.Close()
 				return nil, nil, errors.New("snapshot must be the first and only snapshot part")
 			}
-			snapshot, err = io.ReadAll(io.LimitReader(part, store.MaxConversationSnapshotBytes+1))
-			part.Close()
-			if err != nil || len(snapshot) > store.MaxConversationSnapshotBytes {
-				return nil, nil, newConversationShareSizeError(int64(len(snapshot)))
+			snapshot, err = io.ReadAll(io.LimitReader(part, limits.MaxSnapshotBytes+1))
+			if err != nil {
+				return nil, nil, err
+			}
+			if int64(len(snapshot)) > limits.MaxSnapshotBytes {
+				return nil, nil, &conversationShareSizeError{"snapshot_too_large", limits.MaxSnapshotBytes}
 			}
 			descriptors, err = parseConversationSnapshotResources(snapshot)
 			if err != nil {
@@ -73,26 +80,26 @@ func decodeConversationShare(w http.ResponseWriter, r *http.Request, stage *shar
 			continue
 		}
 		if !strings.HasPrefix(name, "attachment:") || snapshot == nil {
-			part.Close()
 			return nil, nil, errors.New("unknown conversation share part")
 		}
 		id := strings.TrimPrefix(name, "attachment:")
 		descriptor, ok := descriptors[id]
 		if !ok || uploaded[id].ID != "" || part.FileName() != descriptor.Name {
-			part.Close()
 			return nil, nil, errors.New("invalid conversation resource part")
 		}
 		partMIME, _, mimeErr := mime.ParseMediaType(part.Header.Get("Content-Type"))
 		if mimeErr != nil || !strings.EqualFold(partMIME, descriptor.MIMEType) {
-			part.Close()
 			return nil, nil, errors.New("conversation resource MIME type mismatch")
 		}
-		remaining := int64(store.MaxConversationResourceBytes) - total
-		written, writeErr := stage.Write(id, part, remaining)
-		part.Close()
+		remaining := limits.MaxResourceBytes - total
+		source := &conversationPartReader{Reader: part}
+		written, writeErr := stage.Write(id, source, remaining)
 		if writeErr != nil {
 			if errors.Is(writeErr, sharefiles.ErrTooLarge) {
-				return nil, nil, fmt.Errorf("conversation share resources are too large: %w", errConversationShareTooLarge)
+				return nil, nil, &conversationShareSizeError{"resources_too_large", limits.MaxResourceBytes}
+			}
+			if source.err != nil {
+				return nil, nil, source.err
 			}
 			return nil, nil, fmt.Errorf("%w: %v", errConversationShareResourceStorage, writeErr)
 		}
@@ -105,10 +112,14 @@ func decodeConversationShare(w http.ResponseWriter, r *http.Request, stage *shar
 			Size: written.Size, SHA256: strings.ToLower(written.SHA256),
 		}
 	}
+	// Apply the same request bound to any multipart epilogue.
+	if _, err := io.Copy(io.Discard, r.Body); err != nil {
+		return nil, nil, err
+	}
 	if len(snapshot) == 0 || len(uploaded) != len(descriptors) {
 		return nil, nil, errors.New("missing conversation resource")
 	}
-	resources := make([]store.ConversationShareResource, 0, len(descriptors))
+	resources = make([]store.ConversationShareResource, 0, len(descriptors))
 	var envelope struct {
 		Attachments []conversationSnapshotResource `json:"attachments"`
 	}
@@ -172,4 +183,18 @@ func canonicalArtifactSourceRef(value string) bool {
 		}
 	}
 	return true
+}
+
+// Distinguish upload read failures from staging disk failures.
+type conversationPartReader struct {
+	io.Reader
+	err error
+}
+
+func (r *conversationPartReader) Read(p []byte) (int, error) {
+	n, err := r.Reader.Read(p)
+	if err != nil && err != io.EOF {
+		r.err = err
+	}
+	return n, err
 }

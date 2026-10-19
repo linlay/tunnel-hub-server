@@ -18,6 +18,8 @@ import (
 	"example.invalid/tunnel-hub-server/internal/config"
 )
 
+const maxConversationSnapshotBytes = 1024
+
 const validConversationSnapshot = `{"version":1,"title":"发布计划","createdAt":1786928523000,"capturedAt":1786928523000,"turns":[]}`
 
 type capturingConversationShareRenderer struct {
@@ -60,6 +62,14 @@ func TestConversationShareAPICreateReadExpireAndRevoke(t *testing.T) {
 	cfg := desktopTestConfig(t)
 	cfg.SharePublicBaseURL = "https://share.example.test"
 	server, _ := newDesktopTestServerWithConfig(t, cfg)
+	limits := performConversationShareRequest(server, http.MethodGet, conversationSharesPath+"/limits", nil, defaultDesktopJWT)
+	var got config.ConversationShareLimits
+	if err := json.Unmarshal(limits.Body.Bytes(), &got); err != nil || limits.Code != http.StatusOK || got != cfg.ShareLimits || limits.Header().Get("Cache-Control") != "no-store" {
+		t.Fatalf("limits response: status=%d body=%s", limits.Code, limits.Body.String())
+	}
+	if response := performConversationShareRequest(server, http.MethodGet, conversationSharesPath+"/limits", nil, ""); response.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthorized limits status=%d", response.Code)
+	}
 	now := time.Date(2026, time.August, 17, 1, 2, 3, 0, time.UTC)
 	server.now = func() time.Time { return now }
 	unauthorized := performConversationShareRequest(server, http.MethodPost, conversationSharesPath, []byte(validConversationSnapshot), "")
@@ -411,9 +421,10 @@ func TestConversationShareSingleUseReadAndRevokeRaceEndsRevoked(t *testing.T) {
 
 func TestConversationShareSingleUseSupportsMaximumSnapshotSize(t *testing.T) {
 	cfg := desktopTestConfig(t)
+	cfg.ShareLimits.MaxSnapshotBytes = 21 << 20
 	cfg.SharePublicBaseURL = "https://share.example.test"
 	server, _ := newDesktopTestServerWithConfig(t, cfg)
-	body := conversationSnapshotOfSize(t, int(maxConversationSnapshotBytes))
+	body := conversationSnapshotOfSize(t, int(cfg.ShareLimits.MaxSnapshotBytes))
 	created := performConversationShareRequestWithExpiration(server, "once", body)
 	if created.Code != http.StatusCreated {
 		t.Fatalf("create status=%d body=%s", created.Code, created.Body.String())
@@ -422,6 +433,7 @@ func TestConversationShareSingleUseSupportsMaximumSnapshotSize(t *testing.T) {
 	if err := json.Unmarshal(created.Body.Bytes(), &result); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
+	server.Config.ShareLimits.MaxSnapshotBytes = 1024
 	public := performConversationShareRequest(server, http.MethodGet, publicConversationSharePagePath+result.ID, nil, "")
 	if public.Code != http.StatusOK || public.Body.Len() != len(body) {
 		t.Fatalf("public status=%d bytes=%d", public.Code, public.Body.Len())

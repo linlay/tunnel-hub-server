@@ -15,32 +15,18 @@ import (
 	"example.invalid/tunnel-hub-server/internal/store"
 )
 
-const maxConversationSnapshotBytes int64 = store.MaxConversationSnapshotBytes
 const conversationSnapshotVersion = "1"
 const conversationSnapshotVersionHeader = "X-Conversation-Snapshot-Version"
 const conversationShareExpirationHeader = "X-Conversation-Share-Expiration"
 const conversationShareConversationIDHeader = "X-Conversation-ID"
 
-var errConversationShareTooLarge = errors.New("conversation snapshot is too large")
-
 type conversationShareSizeError struct {
-	actual int64
+	Code       string `json:"code"`
+	LimitBytes int64  `json:"limitBytes"`
 }
 
 func (e *conversationShareSizeError) Error() string {
-	return fmt.Sprintf(
-		"conversation snapshot is %d bytes; limit is %d bytes (20 MiB)",
-		e.actual,
-		maxConversationSnapshotBytes,
-	)
-}
-
-func (e *conversationShareSizeError) Unwrap() error {
-	return errConversationShareTooLarge
-}
-
-func newConversationShareSizeError(actual int64) error {
-	return &conversationShareSizeError{actual: actual}
+	return fmt.Sprintf("%s: limit is %d bytes", e.Code, e.LimitBytes)
 }
 
 type conversationShareRecordResponse struct {
@@ -96,17 +82,18 @@ func (s *Server) handleCreateConversationShare(w http.ResponseWriter, r *http.Re
 		return
 	}
 	defer stage.Abort()
-	snapshot, resources, err := decodeConversationShare(w, r, stage)
+	snapshot, resources, err := decodeConversationShare(w, r, stage, s.Config.ShareLimits)
 	if err != nil {
 		if errors.Is(err, errConversationShareResourceStorage) {
 			s.writeInternal(w, "write conversation share resources", err)
 			return
 		}
-		status := http.StatusBadRequest
-		if errors.Is(err, errConversationShareTooLarge) {
-			status = http.StatusRequestEntityTooLarge
+		var sizeError *conversationShareSizeError
+		if errors.As(err, &sizeError) {
+			writeJSON(w, http.StatusRequestEntityTooLarge, sizeError)
+		} else {
+			writeError(w, http.StatusBadRequest, err.Error())
 		}
-		writeError(w, status, err.Error())
 		return
 	}
 	if err := stage.Commit(shareID); err != nil {

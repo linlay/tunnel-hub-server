@@ -174,7 +174,7 @@ GRANT CREATE, REFERENCES, SELECT, INSERT, UPDATE, DELETE
   ON tunnel_hub.* TO 'tunnel_hub'@'<relay-host>';
 ```
 
-服务端须配置 `max_allowed_packet=64M` 或更高。应用启动校验版本、连接与传输上限，不满足时在监听前失败。连接超时 5 秒、读写超时各 30 秒，连接最大生命周期 3 分钟。时间统一使用 UTC `DATETIME(6)`，精度为微秒；标识符按大小写区分，文本使用 `utf8mb4`。Snapshot JSON 保存在数据库中，单份上限为 20 MiB；资源正文仅保存在 `CONVERSATION_SHARE_RESOURCE_DIR`，每个分享的资源累计上限为 20 MiB，数据库只保存资源元数据。旧版 `conversation_share_attachments` BLOB 表由可重跑的 schema 迁移写入文件目录并删除；升级期间数据库账号还需临时具备 `DROP` 权限。
+服务端须配置 `max_allowed_packet=64M` 或更高。应用启动校验版本、连接与传输上限，不满足时在监听前失败。连接超时 5 秒、读写超时各 30 秒，连接最大生命周期 3 分钟。时间统一使用 UTC `DATETIME(6)`，精度为微秒；标识符按大小写区分，文本使用 `utf8mb4`。Snapshot JSON 保存在数据库中，新建额度由 `CONVERSATION_SHARE_MAX_SNAPSHOT_MIB` 配置（默认 50 MiB）；资源正文仅保存在 `CONVERSATION_SHARE_RESOURCE_DIR`，每个新分享的资源累计额度由 `CONVERSATION_SHARE_MAX_RESOURCES_MIB` 配置（默认 50 MiB），数据库只保存资源元数据。旧版 `conversation_share_attachments` BLOB 表由可重跑的 schema 迁移写入文件目录并删除；升级期间数据库账号还需临时具备 `DROP` 权限。
 
 MySQL 启动逐表执行幂等建表；中途失败可以修复原因后重启，已有成功创建的表保留。MySQL DDL 不保证整套 schema 事务回滚，现有连接池、TLS、字符集和并发事务语义保持不变。
 
@@ -304,7 +304,7 @@ curl -X POST https://hub.example.test/api/desktop/devices/register \
 
 创建、读取和撤销对话分享：
 
-Relay 保存 Desktop 上传的 `ConversationSnapshotV1` JSON 和冻结的 HTML 附件，匿名访问时安全注入当前唯一分享模板。Snapshot 与附件分别最多 20 MiB。创建请求必须提供 `multipart/form-data`、`X-Conversation-Snapshot-Version: 1`、非空 `X-Conversation-ID` 和 `X-Conversation-Share-Expiration`；时效只接受 `once`、`3h`、`1d`、`7d`、`30d`、`permanent`。multipart 中 `snapshot` part 必填，每个附件使用 `attachment:<id>` part 并与 Snapshot 声明严格匹配。Desktop 不下载模板或生成分享 HTML；本地 HTML 导出仍是独立功能。下面命令只用于服务端联调。
+Relay 保存 Desktop 上传的 `ConversationSnapshotV1` JSON 和冻结的 HTML 附件，匿名访问时安全注入当前唯一分享模板。Snapshot 与附件累计分别默认 50 MiB，环境配置只接受正整数 MiB，重启生效。创建前通过同一鉴权读取 `GET /api/desktop/shares/limits` 的 `maxSnapshotBytes`、`maxResourceBytes`（字节，`no-store`）。请求体额度由两者加 1 MiB 推导，Go 上传入口执行限制，独立于通用请求额度；MySQL packet 至少 64 MiB 且容纳快照加 1 MiB。store 和历史读取不重复执行新建额度。创建请求必须提供 `multipart/form-data`、`X-Conversation-Snapshot-Version: 1`、非空 `X-Conversation-ID` 和 `X-Conversation-Share-Expiration`；时效只接受 `once`、`3h`、`1d`、`7d`、`30d`、`permanent`。multipart 中 `snapshot` part 必填，每个附件使用 `attachment:<id>` part 并与 Snapshot 声明严格匹配。Desktop 不下载模板或生成分享 HTML；本地 HTML 导出仍是独立功能。下面命令只用于服务端联调。
 
 ```bash
 curl -X POST https://hub.example.test/api/desktop/shares \

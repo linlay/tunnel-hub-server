@@ -52,16 +52,11 @@ func (db *DB) migrateLegacyConversationShareAttachments(ctx context.Context, res
 			return err
 		}
 		byShare := make(map[string][]legacyConversationShareResource)
-		shareBytes := make(map[string]int64)
 		for _, resource := range resources {
 			digest := sha256.Sum256(resource.Body)
 			actualHash := hex.EncodeToString(digest[:])
 			if resource.Size != int64(len(resource.Body)) || !strings.EqualFold(resource.SHA256, actualHash) {
 				return fmt.Errorf("legacy conversation share resource %s/%s failed integrity validation", resource.ShareID, resource.ID)
-			}
-			shareBytes[resource.ShareID] += resource.Size
-			if shareBytes[resource.ShareID] > MaxConversationResourceBytes {
-				return fmt.Errorf("legacy conversation share %s resources exceed size limit", resource.ShareID)
 			}
 			byShare[resource.ShareID] = append(byShare[resource.ShareID], resource)
 		}
@@ -95,7 +90,7 @@ func (db *DB) migrateLegacyConversationShareAttachments(ctx context.Context, res
 				}
 			}()
 			for _, resource := range byShare[shareID] {
-				written, err := stage.Write(resource.ID, bytes.NewReader(resource.Body), MaxConversationResourceBytes)
+				written, err := stage.Write(resource.ID, bytes.NewReader(resource.Body), int64(len(resource.Body)))
 				if err != nil || written.Size != resource.Size || !strings.EqualFold(written.SHA256, resource.SHA256) {
 					return fmt.Errorf("write legacy conversation share resource %s/%s", shareID, resource.ID)
 				}
