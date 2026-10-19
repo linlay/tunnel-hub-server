@@ -5,6 +5,25 @@ import (
 	"testing"
 )
 
+func TestConversationShareConfiguredLimits(t *testing.T) {
+	for value, want := range map[string]int{"50": 50 << 20, "2": 2 << 20, "0": 0, "-1": 0, "1.5": 0, "": 0, "bad": 0, "8589934592": 0} {
+		t.Run(value, func(t *testing.T) {
+			t.Setenv("CONVERSATION_SHARE_MAX_SNAPSHOT_MIB", value)
+			t.Setenv("CONVERSATION_SHARE_MAX_RESOURCES_MIB", "3")
+			limits, err := loadConversationShareLimits()
+			if want == 0 {
+				if err == nil {
+					t.Fatal("invalid quota accepted")
+				}
+				return
+			}
+			if err != nil || limits.MaxSnapshotBytes != int64(want) || limits.MaxResourceBytes != 3<<20 || limits.RequestBodyBytes() != limits.MaxSnapshotBytes+(4<<20) {
+				t.Fatal(limits, err)
+			}
+		})
+	}
+}
+
 func setValidBrandEnv(t *testing.T) {
 	t.Helper()
 	t.Setenv("BRAND_ID", "example")

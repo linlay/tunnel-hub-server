@@ -18,6 +18,7 @@ import (
 	"testing"
 	"time"
 
+	"example.invalid/tunnel-hub-server/internal/config"
 	"example.invalid/tunnel-hub-server/internal/sharefiles"
 	"example.invalid/tunnel-hub-server/internal/store"
 )
@@ -70,7 +71,7 @@ func TestConversationShareUploadRequiresEveryFrozenAttachment(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer stage.Abort()
-	uploaded, attachments, err := decodeConversationShare(httptest.NewRecorder(), makeRequest(true, false), stage)
+	uploaded, attachments, err := decodeConversationShare(httptest.NewRecorder(), makeRequest(true, false), stage, config.ConversationShareLimits{MaxSnapshotBytes: 1024, MaxResourceBytes: 1024})
 	if err != nil || len(uploaded) == 0 || len(attachments) != 1 || attachments[0].Name != "报告.html" {
 		t.Fatalf("upload = %d %+v %v", len(uploaded), attachments, err)
 	}
@@ -79,7 +80,7 @@ func TestConversationShareUploadRequiresEveryFrozenAttachment(t *testing.T) {
 		if beginErr != nil {
 			t.Fatal(beginErr)
 		}
-		if _, _, err := decodeConversationShare(httptest.NewRecorder(), request, stage); err == nil {
+		if _, _, err := decodeConversationShare(httptest.NewRecorder(), request, stage, config.ConversationShareLimits{MaxSnapshotBytes: 1024, MaxResourceBytes: 1024}); err == nil {
 			t.Fatal("incomplete or changed attachment was accepted")
 		}
 		_ = stage.Abort()
@@ -167,7 +168,7 @@ func TestConversationShareUploadRejectsPartsThatDoNotMatchSnapshot(t *testing.T)
 				t.Fatal(err)
 			}
 			defer stage.Abort()
-			if _, _, err := decodeConversationShare(httptest.NewRecorder(), request(tc.descriptors, tc.parts, tc.snapshotFirst), stage); err == nil {
+			if _, _, err := decodeConversationShare(httptest.NewRecorder(), request(tc.descriptors, tc.parts, tc.snapshotFirst), stage, config.ConversationShareLimits{MaxSnapshotBytes: 1024, MaxResourceBytes: 1024}); err == nil {
 				t.Fatal("mismatched multipart request was accepted")
 			}
 		})
@@ -175,7 +176,7 @@ func TestConversationShareUploadRejectsPartsThatDoNotMatchSnapshot(t *testing.T)
 }
 
 func TestConversationShareUploadRejectsAggregateResourceLimit(t *testing.T) {
-	body := bytes.Repeat([]byte("x"), store.MaxConversationResourceBytes/2+1)
+	body := bytes.Repeat([]byte("x"), 1024/2+1)
 	digest := sha256.Sum256(body)
 	descriptors := []conversationSnapshotResource{
 		{ID: "0123456789abcdef01234567", Name: "first.bin", MIMEType: "application/octet-stream",
@@ -212,7 +213,8 @@ func TestConversationShareUploadRejectsAggregateResourceLimit(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer stage.Abort()
-	if _, _, err := decodeConversationShare(httptest.NewRecorder(), request, stage); !errors.Is(err, errConversationShareTooLarge) {
+	var sizeError *conversationShareSizeError
+	if _, _, err := decodeConversationShare(httptest.NewRecorder(), request, stage, config.ConversationShareLimits{MaxSnapshotBytes: 1024, MaxResourceBytes: 1024}); !errors.As(err, &sizeError) || sizeError.Code != "resources_too_large" {
 		t.Fatalf("aggregate limit error=%v", err)
 	}
 }

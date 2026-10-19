@@ -10,7 +10,45 @@ import (
 	"time"
 )
 
+// ConversationShareLimits is the single policy for new public shares.
+type ConversationShareLimits struct {
+	MaxSnapshotBytes int64 `json:"maxSnapshotBytes"`
+	MaxResourceBytes int64 `json:"maxResourceBytes"`
+}
+
+func (l ConversationShareLimits) RequestBodyBytes() int64 {
+	return l.MaxSnapshotBytes + l.MaxResourceBytes + (1 << 20)
+}
+
+func loadConversationShareLimits() (ConversationShareLimits, error) {
+	read := func(key string) (int64, error) {
+		value, exists := os.LookupEnv(key)
+		if !exists {
+			value = "50"
+		}
+		mib, err := strconv.ParseUint(value, 10, 64)
+		if err != nil || mib == 0 || strings.Trim(value, "0123456789") != "" || mib > ((1<<53)-1)/(1<<20) {
+			return 0, fmt.Errorf("%s must be a positive, safely representable integer in MiB", key)
+		}
+		return int64(mib << 20), nil
+	}
+	snapshot, err := read("CONVERSATION_SHARE_MAX_SNAPSHOT_MIB")
+	if err != nil {
+		return ConversationShareLimits{}, err
+	}
+	resources, err := read("CONVERSATION_SHARE_MAX_RESOURCES_MIB")
+	if err != nil {
+		return ConversationShareLimits{}, err
+	}
+	limits := ConversationShareLimits{snapshot, resources}
+	if limits.RequestBodyBytes() > (1<<53)-1 {
+		return ConversationShareLimits{}, fmt.Errorf("conversation share request limit exceeds safe integer range")
+	}
+	return limits, nil
+}
+
 type RelayConfig struct {
+	ShareLimits                  ConversationShareLimits
 	BrandID                      string
 	ProductName                  string
 	PublicSiteTitle              string
@@ -94,7 +132,15 @@ func LoadRelayConfigStrict() (RelayConfig, error) {
 	if publicKeyFile == "" && publicKeyPEM == "" {
 		return RelayConfig{}, fmt.Errorf("SSO_JWT_PUBLIC_KEY_FILE or SSO_JWT_PUBLIC_KEY_PEM is required")
 	}
+	limits, err := loadConversationShareLimits()
+	if err != nil {
+		return RelayConfig{}, err
+	}
+	if databaseType == DatabaseMySQL {
+		mysqlConfig.MinPacketBytes = limits.MaxSnapshotBytes + (1 << 20)
+	}
 	return RelayConfig{
+		ShareLimits:                  limits,
 		BrandID:                      brand.Brand.ID,
 		ProductName:                  brand.Brand.ProductName,
 		PublicSiteTitle:              brand.Brand.PublicSiteTitle,

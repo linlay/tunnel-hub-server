@@ -1299,6 +1299,7 @@ func desktopTestConfig(t *testing.T) config.RelayConfig {
 		Expires:  time.Now().Add(time.Hour),
 	})
 	return config.RelayConfig{
+		ShareLimits:                  config.ConversationShareLimits{MaxSnapshotBytes: maxConversationSnapshotBytes, MaxResourceBytes: 1024},
 		PublicBaseDomain:             "hub.example.test",
 		DesktopPublicBaseDomain:      "m.example.test",
 		WebAppPublicBaseDomain:       "example.test",

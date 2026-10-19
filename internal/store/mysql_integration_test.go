@@ -201,7 +201,7 @@ func TestMySQLLargeSnapshotAndMicrosecondTimes(t *testing.T) {
 	db := openMySQLTestDB(t)
 	ctx := context.Background()
 	prefix, suffix := []byte(`{"version":1,"title":"`), []byte(`"}`)
-	snapshot := append(append(prefix, bytes.Repeat([]byte("x"), MaxConversationSnapshotBytes-len(prefix)-len(suffix))...), suffix...)
+	snapshot := append(append(prefix, bytes.Repeat([]byte("x"), (50<<20)-len(prefix)-len(suffix))...), suffix...)
 	now := time.Date(2026, 9, 16, 12, 0, 0, 123456789, time.FixedZone("offset", 8*60*60))
 	share, err := db.CreateConversationShare(ctx, "owner", "chat", 1, snapshot, now, nil, false)
 	if err != nil {

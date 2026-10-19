@@ -16,8 +16,6 @@ import (
 const ConversationShareSessionDuration = 30 * time.Minute
 
 const ConversationSnapshotVersion = 1
-const MaxConversationSnapshotBytes = 20 << 20
-const MaxConversationResourceBytes = 20 << 20
 const MaxConversationShareConversationIDBytes = 255
 
 type ConversationShare struct {
@@ -88,13 +86,9 @@ func (db *DB) CreateConversationShareWithResources(
 	if snapshotVersion != ConversationSnapshotVersion {
 		return ConversationShare{}, errors.New("unsupported conversation snapshot version")
 	}
-	if len(snapshotJSON) > MaxConversationSnapshotBytes {
-		return ConversationShare{}, errors.New("conversation snapshot is too large")
-	}
 	if len(snapshotJSON) == 0 {
 		return ConversationShare{}, errors.New("conversation snapshot is required")
 	}
-	var resourceBytes int64
 	seenResources := make(map[string]struct{}, len(resources))
 	for _, resource := range resources {
 		if !conversationShareResourceID.MatchString(resource.ID) || resource.Name == "" ||
@@ -108,10 +102,6 @@ func (db *DB) CreateConversationShareWithResources(
 			return ConversationShare{}, errors.New("duplicate conversation share resource")
 		}
 		seenResources[resource.ID] = struct{}{}
-		resourceBytes += resource.Size
-		if resourceBytes > MaxConversationResourceBytes {
-			return ConversationShare{}, errors.New("conversation share resources are too large")
-		}
 	}
 	if expiresAt != nil && !expiresAt.After(createdAt) {
 		return ConversationShare{}, errors.New("expiration must be after creation")

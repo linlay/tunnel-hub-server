@@ -18,6 +18,9 @@ type MySQLConfig struct {
 	TLSCAFile    string
 	MaxOpenConns int
 	MaxIdleConns int
+
+	// Minimum server capacity, derived from Relay quotas.
+	MinPacketBytes int64
 }
 
 func loadMySQLConfig() (MySQLConfig, error) {

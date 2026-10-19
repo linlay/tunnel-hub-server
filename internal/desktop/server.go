@@ -100,6 +100,16 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.handleAccountDevice(w, r)
 	case r.URL.Path == "/api/desktop/route-credentials":
 		s.handleRouteCredential(w, r)
+	case r.URL.Path == conversationSharesPath+"/limits":
+		if r.Method != http.MethodGet {
+			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+		if _, ok := s.authorizeRegistration(w, r); !ok {
+			return
+		}
+		w.Header().Set("Cache-Control", "no-store")
+		writeJSON(w, http.StatusOK, s.Config.ShareLimits)
 	case r.URL.Path == conversationSharesPath:
 		switch r.Method {
 		case http.MethodPost:

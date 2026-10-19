@@ -84,21 +84,21 @@ func Open(ctx context.Context, cfg config.MySQLConfig) (*DB, error) {
 		_ = pool.Close()
 		return nil, fmt.Errorf("check MySQL requirements: %w", err)
 	}
-	if err := validateMySQLServer(version, packet); err != nil {
+	if err := validateMySQLServer(version, packet, cfg.MinPacketBytes); err != nil {
 		_ = pool.Close()
 		return nil, err
 	}
 	return &DB{sql: pool, database: databaseMySQL}, nil
 }
 
-func validateMySQLServer(version string, packet int64) error {
+func validateMySQLServer(version string, packet, minimumPacketBytes int64) error {
 	var major, minor, patch int
 	_, err := fmt.Sscanf(version, "%d.%d.%d", &major, &minor, &patch)
 	if err != nil || strings.Contains(strings.ToLower(version), "mariadb") || major < 8 || (major == 8 && minor == 0 && patch < 16) {
 		return errors.New("MySQL 8.0.16 or later is required")
 	}
-	if packet < 64<<20 {
-		return errors.New("MySQL max_allowed_packet must be at least 67108864 (64 MiB)")
+	if required := max(int64(64<<20), minimumPacketBytes); packet < required {
+		return fmt.Errorf("MySQL max_allowed_packet must be at least %d bytes", required)
 	}
 	return nil
 }
