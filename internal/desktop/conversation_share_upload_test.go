@@ -334,6 +334,26 @@ func TestSanitizeSharedHTMLRemovesActiveContent(t *testing.T) {
 	}
 }
 
+func TestSanitizeSharedHTMLDropsDocumentTitleAndPreservesBody(t *testing.T) {
+	for _, title := range []string{
+		`<title>MCP 服务上线计划 · 会议纪要摘要</title>`,
+		`<TITLE>MCP 服务上线计划 &amp; 会议纪要摘要</TITLE>`,
+	} {
+		t.Run(title, func(t *testing.T) {
+			source := []byte(`<html><head>` + title + `<style>h1{color:blue}</style></head><body><h1>会议正文标题</h1><p title="补充说明">会议内容</p></body></html>`)
+			result := string(sanitizeSharedHTML(source))
+			if strings.Contains(result, "MCP 服务上线计划") || strings.Contains(result, "会议纪要摘要") {
+				t.Fatalf("document title leaked into preview: %s", result)
+			}
+			for _, fragment := range []string{`<style>h1{color:blue}</style>`, `<h1>会议正文标题</h1>`, `<p title="补充说明">会议内容</p>`} {
+				if !strings.Contains(result, fragment) {
+					t.Fatalf("body content or safe styling lost: missing %q in %s", fragment, result)
+				}
+			}
+		})
+	}
+}
+
 func TestConversationShareOnceSessionReadsFrozenAttachment(t *testing.T) {
 	cfg := desktopTestConfig(t)
 	cfg.SharePublicBaseURL = "https://share.example.test"
@@ -342,7 +362,7 @@ func TestConversationShareOnceSessionReadsFrozenAttachment(t *testing.T) {
 	server.now = func() time.Time { return now }
 	const id = "0123456789abcdef01234567"
 	const pdfID = "abcdef0123456789abcdef01"
-	body := []byte("<h1>报告</h1><script>alert(1)</script>")
+	body := []byte("<html><head><title>不应出现在预览正文的元标题</title></head><body><h1>报告</h1><script>alert(1)</script></body></html>")
 	pdf := []byte("%PDF-1.7\nreport")
 	hash := sha256.Sum256(body)
 	pdfHash := sha256.Sum256(pdf)
@@ -404,6 +424,9 @@ func TestConversationShareOnceSessionReadsFrozenAttachment(t *testing.T) {
 	preview := read(attachmentPath)
 	if preview.Code != http.StatusOK || !strings.Contains(preview.Body.String(), "报告") || strings.Contains(preview.Body.String(), "alert(1)") {
 		t.Fatalf("preview status=%d body=%s", preview.Code, preview.Body.String())
+	}
+	if strings.Contains(preview.Body.String(), "不应出现在预览正文的元标题") {
+		t.Fatalf("document title leaked into attachment preview: %s", preview.Body.String())
 	}
 	const otherAttachmentID = "ffffffffffffffffffffffff"
 	otherShareID, err := store.NewConversationShareID()

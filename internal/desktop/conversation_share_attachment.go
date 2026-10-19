@@ -32,7 +32,7 @@ var droppedHTMLTags = map[string]bool{
 	"script": true, "iframe": true, "frame": true, "frameset": true,
 	"form": true, "button": true, "textarea": true, "select": true,
 	"object": true, "video": true, "audio": true, "svg": true,
-	"math": true,
+	"math": true, "title": true,
 }
 
 func sanitizeSharedHTML(source []byte) []byte {

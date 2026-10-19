@@ -22,11 +22,38 @@ const validConversationSnapshot = `{"version":1,"title":"发布计划","createdA
 
 type capturingConversationShareRenderer struct {
 	productDownloadPageURL string
+	canReshare             bool
 }
 
-func (renderer *capturingConversationShareRenderer) Render(snapshot []byte, _, _, _, productDownloadPageURL string) ([]byte, error) {
+func (renderer *capturingConversationShareRenderer) Render(snapshot []byte, _, _, _, productDownloadPageURL string, canReshare bool) ([]byte, error) {
 	renderer.productDownloadPageURL = productDownloadPageURL
+	renderer.canReshare = canReshare
 	return append([]byte(nil), snapshot...), nil
+}
+
+func TestConversationShareDeepLinkInheritsResharePolicy(t *testing.T) {
+	for _, expiration := range []string{"30d", "once"} {
+		t.Run(expiration, func(t *testing.T) {
+			cfg := desktopTestConfig(t)
+			cfg.SharePublicBaseURL = "https://share.example.test"
+			server, _ := newDesktopTestServerWithConfig(t, cfg)
+			renderer := &capturingConversationShareRenderer{}
+			server.SetConversationShareRenderer(renderer)
+			created := performConversationShareRequestWithExpiration(server, expiration, []byte(validConversationSnapshot))
+			if created.Code != http.StatusCreated {
+				t.Fatalf("create status=%d", created.Code)
+			}
+			var share conversationShareRecordResponse
+			if err := json.Unmarshal(created.Body.Bytes(), &share); err != nil {
+				t.Fatal(err)
+			}
+			page := performConversationShareRequest(server, http.MethodGet,
+				publicConversationSharePagePath+share.ID+"?attachment=0123456789abcdef01234567", nil, "")
+			if page.Code != http.StatusOK || renderer.canReshare != (expiration != "once") {
+				t.Fatalf("deep link status=%d canReshare=%t", page.Code, renderer.canReshare)
+			}
+		})
+	}
 }
 
 func TestConversationShareAPICreateReadExpireAndRevoke(t *testing.T) {

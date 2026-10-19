@@ -316,6 +316,7 @@ func (s *Server) handleGetPublicConversationSharePage(w http.ResponseWriter, r *
 		s.Config.BrandID,
 		s.Config.ProductName,
 		s.Config.ProductDownloadPageURL,
+		!share.SingleUse,
 	)
 	if err != nil {
 		s.Logger.Error("render conversation share", "shareId", share.ID, "error", err)

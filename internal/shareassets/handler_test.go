@@ -30,11 +30,11 @@ func responseStyleNonce(t *testing.T, body string) string {
 func TestStyleNonceIsUniquePerRenderAndDoesNotRewriteSnapshot(t *testing.T) {
 	bundle := NewBundle()
 	snapshot := []byte(`{"version":1,"title":"` + styleNonceMarker + `"}`)
-	first, err := bundle.Render(snapshot, "https://share.example.test", "example", "Example", "")
+	first, err := bundle.Render(snapshot, "https://share.example.test", "example", "Example", "", true)
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := bundle.Render(snapshot, "https://share.example.test", "example", "Example", "")
+	second, err := bundle.Render(snapshot, "https://share.example.test", "example", "Example", "", true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -240,7 +240,7 @@ func TestHandlerServesEveryCurrentManifestAsset(t *testing.T) {
 func TestBundleRendersHTMLSafeSnapshotWithCurrentAssets(t *testing.T) {
 	bundle := NewBundle()
 	snapshot := []byte(`{"version":1,"title":"</script>&  "}`)
-	html, err := bundle.Render(snapshot, "https://share.example.test", "zenmind", "ZenMind", "")
+	html, err := bundle.Render(snapshot, "https://share.example.test", "zenmind", "ZenMind", "", true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -258,6 +258,23 @@ func TestBundleRendersHTMLSafeSnapshotWithCurrentAssets(t *testing.T) {
 	}
 }
 
+func TestBundleRendersReshareCapabilityWithoutChangingLocalTemplate(t *testing.T) {
+	bundle := NewBundle()
+	for _, allowed := range []bool{true, false} {
+		page, err := bundle.Render([]byte(`{"version":1}`), "https://share.example.test", "example", "Example", "", allowed)
+		if err != nil {
+			t.Fatal(err)
+		}
+		marker := fmt.Sprintf(`<meta name="conversation-export-can-reshare" content="%t" />`, allowed)
+		if strings.Count(string(page), marker) != 1 {
+			t.Fatalf("reshare capability missing: %t", allowed)
+		}
+	}
+	if bytes := strings.Count(string(bundle.template), canReshareMeta); bytes != 1 {
+		t.Fatal("local template must keep resharing disabled")
+	}
+}
+
 func TestBundleInjectsOnlyValidatedPublicBrand(t *testing.T) {
 	bundle := NewBundle()
 	snapshot := []byte(`{"version":1,"title":"shared"}`)
@@ -265,7 +282,7 @@ func TestBundleInjectsOnlyValidatedPublicBrand(t *testing.T) {
 		{"zenmind", `ZenMind "<&>`},
 		{"cutej", "CuteJ"},
 	} {
-		page, err := bundle.Render(snapshot, "https://share.example.test", brand.id, brand.name, "")
+		page, err := bundle.Render(snapshot, "https://share.example.test", brand.id, brand.name, "", true)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -278,11 +295,11 @@ func TestBundleInjectsOnlyValidatedPublicBrand(t *testing.T) {
 		}
 	}
 	for _, id := range []string{"", "bad:scheme", "UPPER", "a/b", "javascript", "https"} {
-		if _, err := bundle.Render(snapshot, "https://share.example.test", id, "Valid", ""); err == nil {
+		if _, err := bundle.Render(snapshot, "https://share.example.test", id, "Valid", "", true); err == nil {
 			t.Fatalf("accepted unsafe brand scheme %q", id)
 		}
 	}
-	if _, err := bundle.Render(snapshot, "https://share.example.test", "valid", " ", ""); err == nil {
+	if _, err := bundle.Render(snapshot, "https://share.example.test", "valid", " ", "", true); err == nil {
 		t.Fatal("accepted empty product name")
 	}
 	if !strings.Contains(string(bundle.template), publicBrandMeta) {
@@ -302,6 +319,7 @@ func TestBundleInjectsOnlyValidatedProductDownloadPage(t *testing.T) {
 		"zenmind",
 		"ZenMind",
 		"https://download.example.test/product?source=share&campaign=desktop#install",
+		true,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -318,12 +336,12 @@ func TestBundleInjectsOnlyValidatedProductDownloadPage(t *testing.T) {
 		"/relative/download",
 		"https://user:secret@download.example.test/product",
 	} {
-		if _, err := bundle.Render(snapshot, "https://share.example.test", "zenmind", "ZenMind", value); err == nil {
+		if _, err := bundle.Render(snapshot, "https://share.example.test", "zenmind", "ZenMind", value, true); err == nil {
 			t.Fatalf("accepted unsafe product download page %q", value)
 		}
 	}
 
-	page, err = bundle.Render(snapshot, "https://share.example.test", "zenmind", "ZenMind", "")
+	page, err = bundle.Render(snapshot, "https://share.example.test", "zenmind", "ZenMind", "", true)
 	if err != nil {
 		t.Fatal(err)
 	}
