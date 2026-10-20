@@ -1543,3 +1543,7 @@ func waitForTrafficEvent(t *testing.T, db *store.DB, objectType, publicHost, kin
 	t.Fatalf("traffic event objectType=%s publicHost=%s kind=%s not recorded", objectType, publicHost, kind)
 	return store.TrafficEvent{}
 }
+
+func (testConversationShareRenderer) RenderHTMLPreview(_ string) ([]byte, error) {
+	return []byte(`<script src="/html-preview-bootstrap.js"></script>`), nil
+}

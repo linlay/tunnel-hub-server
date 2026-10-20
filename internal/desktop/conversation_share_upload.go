@@ -1,6 +1,7 @@
 package desktop
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -24,12 +25,38 @@ var resourceMIMEPattern = regexp.MustCompile(`^[A-Za-z0-9!#$&^_.+-]+/[A-Za-z0-9!
 var errConversationShareResourceStorage = errors.New("conversation share resource storage failed")
 
 type conversationSnapshotResource struct {
-	ID        string `json:"id"`
+	ID        string            `json:"id"`
+	Name      string            `json:"name"`
+	MIMEType  string            `json:"mimeType"`
+	Size      int64             `json:"size"`
+	SHA256    string            `json:"sha256"`
+	SourceRef string            `json:"sourceRef"`
+	MediaRefs map[string]string `json:"mediaRefs,omitempty"`
+}
+
+type conversationSnapshotOmission struct {
+	ID        string `json:"id,omitempty"`
+	SourceRef string `json:"sourceRef,omitempty"`
 	Name      string `json:"name"`
-	MIMEType  string `json:"mimeType"`
-	Size      int64  `json:"size"`
-	SHA256    string `json:"sha256"`
-	SourceRef string `json:"sourceRef"`
+	Reason    string `json:"reason"`
+}
+
+func (r *conversationSnapshotResource) UnmarshalJSON(data []byte) error {
+	type resource conversationSnapshotResource
+	var decoded resource
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return err
+	}
+	if len(fields["size"]) == 0 || bytes.Equal(bytes.TrimSpace(fields["size"]), []byte("null")) ||
+		bytes.Equal(bytes.TrimSpace(fields["mediaRefs"]), []byte("null")) {
+		return errors.New("invalid resource metadata")
+	}
+	*r = conversationSnapshotResource(decoded)
+	return nil
 }
 
 // decodeConversationShare keeps only the bounded JSON snapshot in memory.
@@ -137,47 +164,110 @@ func parseConversationSnapshotResources(snapshot []byte) (map[string]conversatio
 		return nil, errors.New("invalid conversation snapshot")
 	}
 	var envelope struct {
-		Version     int                            `json:"version"`
-		Attachments []conversationSnapshotResource `json:"attachments"`
+		Version          int                            `json:"version"`
+		Attachments      []conversationSnapshotResource `json:"attachments"`
+		OmittedResources json.RawMessage                `json:"omittedResources"`
+		Turns            []struct {
+			Nodes []struct {
+				AttachmentIDs json.RawMessage `json:"attachmentIds"`
+			} `json:"nodes"`
+		} `json:"turns"`
 	}
 	if json.Unmarshal(snapshot, &envelope) != nil || envelope.Version != store.ConversationSnapshotVersion {
 		return nil, errors.New("unsupported conversation snapshot version")
 	}
 	descriptors := make(map[string]conversationSnapshotResource, len(envelope.Attachments))
+	sourceRefs := make(map[string]bool)
 	for _, descriptor := range envelope.Attachments {
 		if !resourceIDPattern.MatchString(descriptor.ID) || descriptors[descriptor.ID].ID != "" ||
 			descriptor.Size < 0 || !resourceHashPattern.MatchString(descriptor.SHA256) ||
 			!resourceMIMEPattern.MatchString(descriptor.MIMEType) || descriptor.MIMEType != strings.ToLower(descriptor.MIMEType) || len(descriptor.Name) > 255 ||
 			descriptor.Name == "" || strings.ContainsAny(descriptor.Name, "/\\") ||
-			strings.ContainsFunc(descriptor.Name, unicode.IsControl) || !canonicalArtifactSourceRef(descriptor.SourceRef) {
+			strings.ContainsFunc(descriptor.Name, unicode.IsControl) || !canonicalChatSourceRef(descriptor.SourceRef) || sourceRefs[descriptor.SourceRef] {
 			return nil, errors.New("invalid conversation resource descriptor")
 		}
 		descriptors[descriptor.ID] = descriptor
+		sourceRefs[descriptor.SourceRef] = true
+	}
+	omitted := make(map[string]bool)
+	var omissions []conversationSnapshotOmission
+	if len(envelope.OmittedResources) != 0 && (bytes.Equal(bytes.TrimSpace(envelope.OmittedResources), []byte("null")) || json.Unmarshal(envelope.OmittedResources, &omissions) != nil) {
+		return nil, errors.New("invalid omitted resources")
+	}
+	for _, item := range omissions {
+		if item.Name == "" || len(item.Name) > 255 || strings.ContainsAny(item.Name, `/\`) || strings.ContainsFunc(item.Name, unicode.IsControl) {
+			return nil, errors.New("invalid omitted resource name")
+		}
+		switch item.Reason {
+		case "not_found", "forbidden", "unsupported", "too_large", "timeout", "changed", "invalid", "read_failed":
+		default:
+			return nil, errors.New("invalid omitted resource reason")
+		}
+		if item.ID == "" && item.SourceRef == "" {
+			continue
+		}
+		if !resourceIDPattern.MatchString(item.ID) || !canonicalChatSourceRef(item.SourceRef) ||
+			descriptors[item.ID].ID != "" || omitted[item.ID] || sourceRefs[item.SourceRef] {
+			return nil, errors.New("invalid omitted resource identity")
+		}
+		omitted[item.ID] = true
+		sourceRefs[item.SourceRef] = true
+	}
+	for _, descriptor := range envelope.Attachments {
+		if descriptor.MediaRefs != nil && descriptor.MIMEType != "text/html" {
+			return nil, errors.New("only HTML resources may declare media references")
+		}
+		for raw, id := range descriptor.MediaRefs {
+			target, exists := descriptors[id]
+			if strings.TrimSpace(raw) == "" || strings.ContainsFunc(raw, unicode.IsControl) ||
+				(!exists && !omitted[id]) || (exists && !isShareMediaMIME(target.MIMEType)) {
+				return nil, errors.New("invalid HTML media reference")
+			}
+		}
+	}
+	for _, turn := range envelope.Turns {
+		for _, node := range turn.Nodes {
+			var ids []string
+			if len(node.AttachmentIDs) != 0 && (bytes.Equal(bytes.TrimSpace(node.AttachmentIDs), []byte("null")) || json.Unmarshal(node.AttachmentIDs, &ids) != nil) {
+				return nil, errors.New("invalid node attachment references")
+			}
+			seen := make(map[string]bool)
+			for _, id := range ids {
+				if seen[id] || (descriptors[id].ID == "" && !omitted[id]) {
+					return nil, errors.New("invalid node attachment reference")
+				}
+				seen[id] = true
+			}
+		}
 	}
 	return descriptors, nil
 }
 
-func canonicalArtifactSourceRef(value string) bool {
+func canonicalChatSourceRef(value string) bool {
 	segments := strings.Split(value, "/")
-	if len(segments) != 3 || segments[0] != "artifacts" {
+	if len(value) == 0 || len(value) > 2048 {
 		return false
 	}
-	for _, segment := range segments[1:] {
+	for _, segment := range segments {
 		if segment == "" || strings.ContainsAny(segment, `\\?#`) || strings.ContainsFunc(segment, unicode.IsControl) {
 			return false
 		}
 		decoded, err := url.PathUnescape(segment)
-		if err != nil || url.PathEscape(decoded) != segment {
+		if err != nil || !utf8.ValidString(decoded) || url.PathEscape(decoded) != segment {
 			return false
 		}
-		for depth := 0; depth < 4; depth++ {
+		for depth := 0; ; depth++ {
 			if decoded == "" || decoded == "." || decoded == ".." ||
-				strings.ContainsAny(decoded, `/\\`) || strings.ContainsFunc(decoded, unicode.IsControl) {
+				decoded == ".tools" || decoded == ".btw" || decoded == ".explain" ||
+				strings.ContainsAny(decoded, `/\\:`) || strings.ContainsFunc(decoded, unicode.IsControl) {
 				return false
 			}
 			next, err := url.PathUnescape(decoded)
 			if err != nil || next == decoded {
 				break
+			}
+			if depth >= 4 {
+				return false
 			}
 			decoded = next
 		}

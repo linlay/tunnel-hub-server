@@ -304,7 +304,7 @@ curl -X POST https://hub.example.test/api/desktop/devices/register \
 
 创建、读取和撤销对话分享：
 
-Relay 保存 Desktop 上传的 `ConversationSnapshotV1` JSON 和冻结的 HTML 附件，匿名访问时安全注入当前唯一分享模板。Snapshot 与附件累计分别默认 50 MiB，环境配置只接受正整数 MiB，重启生效。创建前通过同一鉴权读取 `GET /api/desktop/shares/limits` 的 `maxSnapshotBytes`、`maxResourceBytes`（字节，`no-store`）。请求体额度由两者加 1 MiB 推导，Go 上传入口执行限制，独立于通用请求额度；MySQL packet 至少 64 MiB 且容纳快照加 1 MiB。store 和历史读取不重复执行新建额度。创建请求必须提供 `multipart/form-data`、`X-Conversation-Snapshot-Version: 1`、非空 `X-Conversation-ID` 和 `X-Conversation-Share-Expiration`；时效只接受 `once`、`3h`、`1d`、`7d`、`30d`、`permanent`。multipart 中 `snapshot` part 必填，每个附件使用 `attachment:<id>` part 并与 Snapshot 声明严格匹配。Desktop 不下载模板或生成分享 HTML；本地 HTML 导出仍是独立功能。下面命令只用于服务端联调。
+Relay 保存 Desktop 上传的 `ConversationSnapshotV1` JSON 和冻结的已发布产物及当前 Chat 图片音视频，匿名访问时安全注入当前唯一分享模板。Snapshot 与附件累计分别默认 50 MiB，环境配置只接受正整数 MiB，重启生效。创建前通过同一鉴权读取 `GET /api/desktop/shares/limits` 的 `maxSnapshotBytes`、`maxResourceBytes`（字节，`no-store`）。请求体额度由两者加 1 MiB 推导，Go 上传入口执行限制，独立于通用请求额度；MySQL packet 至少 64 MiB 且容纳快照加 1 MiB。store 和历史读取不重复执行新建额度。创建请求必须提供 `multipart/form-data`、`X-Conversation-Snapshot-Version: 1`、非空 `X-Conversation-ID` 和 `X-Conversation-Share-Expiration`；时效只接受 `once`、`3h`、`1d`、`7d`、`30d`、`permanent`。multipart 中 `snapshot` part 必填，每个附件使用 `attachment:<id>` part 并与 Snapshot 声明严格匹配。Desktop 不下载模板或生成分享 HTML；本地 HTML 导出仍是独立功能。下面命令只用于服务端联调。
 
 ```bash
 curl -X POST https://hub.example.test/api/desktop/shares \
@@ -329,6 +329,12 @@ curl -X DELETE https://hub.example.test/api/desktop/shares/share_xxx \
 创建和列表响应固定包含 `conversationId` 和 `singleUse`。列表按创建时间倒序返回当前所有者在所有会话下仍有效的元数据，不读取 Snapshot，也不接受查询参数。匿名 `GET /share/{id}` 使用当前模板渲染仍有效且未撤销的 Snapshot，媒体类型为 `text/html; charset=utf-8`。普通链接成功 GET 会 best-effort 更新独立访问元数据；一次性链接在写事务内原子认领浏览器会话，认领后的 30 分钟内同一会话可继续读取页面和附件，其他浏览器得到 404。MySQL 使用行锁，SQLite 使用立即写事务。HEAD 与其他方法不会认领；已撤销、到期和未知 ID 统一返回最小 404 HTML。
 
 `GET/HEAD /assets/conversation-export/{sha256}/{file}` 提供随 Relay 编译且通过内容 Hash 校验的资源集；当前 manifest 决定新分享页使用的资源集，历史资源集继续服务已有 HTML。分享渲染包由 WebClient 显式同步后随 Relay 原子发布，普通 WebClient 发布不修改它。
+
+Snapshot V1 兼容新增可选 `attachmentIds`、HTML `mediaRefs` 和 `omittedResources`，上传入口验证成功/省略身份及所有关联。资源以规范的当前 Chat 相对引用登记；不接受跨 Chat、内部目录或路径别名。媒体预览与下载继续通过同一分享鉴权和 `ServeContent` 支持 GET/HEAD/Range；SVG 仅在图片上下文使用，下载保持原字节和 attachment 响应。
+
+HTML 的普通 preview 请求重定向到独立附件页；`?embed=1` 返回当前 assetSet 内带 SRI/匿名 CORS 的固定 bootstrap。网络 iframe 保持 opaque origin，只允许脚本；父页从已授权下载接口读取 HTML 与显式媒体映射，经文档绑定 MessagePort 交付一次。guest 创建 Blob 媒体并执行原 HTML；HTTP CSP 拒绝 connect/frame/worker/object/form/base，仅允许约定的内联及 HTTPS 静态依赖。已删除服务端 HTML 清洗旧路径，不提供任意 URL RPC、资源代理或 Cookie 放宽。父页 CSP 的图片和媒体只增加 self。
+
+本次改造的实现、检查结果、浏览器证据和待完成的发布门禁见[执行记录](docs/conversation-share-rendering/08-execution-record.md)。
 
 公开分享页和可下载模板均在每次响应时生成独立的 32 字节随机样式 nonce，并同时填入 CSP 与 `conversation-export-style-nonce` 元数据。分享运行时将 nonce 传给组件动态样式，`style-src-elem` 不放开任意内联样式；可下载模板保留原有 Snapshot、资产 origin 和本地品牌占位符，旧版 Desktop 组装流程无需更改。
 

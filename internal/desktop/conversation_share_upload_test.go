@@ -219,26 +219,31 @@ func TestConversationShareUploadRejectsAggregateResourceLimit(t *testing.T) {
 	}
 }
 
-func TestCanonicalArtifactSourceRefMatchesPlatformEncoding(t *testing.T) {
+func TestCanonicalChatSourceRefMatchesPlatformEncoding(t *testing.T) {
 	for _, value := range []string{
 		"artifacts/run-1/report.html",
 		"artifacts/run-1/%E6%8A%A5%E5%91%8A.pdf",
 		"artifacts/run-1/report+v1.pdf",
+		"image.png",
+		"media/nested/audio.wav",
 	} {
-		if !canonicalArtifactSourceRef(value) {
+		if !canonicalChatSourceRef(value) {
 			t.Fatalf("canonical ref rejected: %q", value)
 		}
 	}
 	for _, value := range []string{
-		"report.pdf",
-		"artifacts/run-1/nested/report.pdf",
+		"/etc/passwd",
+		"https://example.test/a.png",
+		"C:/Windows/a.png",
+		"a//b.png",
+		"a/../b.png",
 		"artifacts/run-1/报告.pdf",
 		"artifacts/run-1/%e6%8a%a5%e5%91%8a.pdf",
 		"artifacts/run-1/%2e%2e",
 		"artifacts/run-1/%252e%252e",
 		"artifacts/run-1/a%2Fb.pdf",
 	} {
-		if canonicalArtifactSourceRef(value) {
+		if canonicalChatSourceRef(value) {
 			t.Fatalf("non-canonical ref accepted: %q", value)
 		}
 	}
@@ -323,39 +328,6 @@ func TestConversationShareRevokeRemovesFrozenResourceDirectory(t *testing.T) {
 	}
 }
 
-func TestSanitizeSharedHTMLRemovesActiveContent(t *testing.T) {
-	source := []byte(`<html><head><style>p{color:red}</style></head><body><script>alert(1)</script><p style="color:blue">safe</p><img src="https://bad.example/x.png"><img src="data:image/png;base64,AAAA"><iframe src="https://bad.example"></iframe></body></html>`)
-	result := string(sanitizeSharedHTML(source))
-	for _, fragment := range []string{"alert(1)", "<script", "<iframe", "bad.example"} {
-		if strings.Contains(result, fragment) {
-			t.Fatalf("unsafe fragment %q in %s", fragment, result)
-		}
-	}
-	if !strings.Contains(result, "safe") || !strings.Contains(result, "data:image/png;base64,AAAA") {
-		t.Fatalf("safe content lost: %s", result)
-	}
-}
-
-func TestSanitizeSharedHTMLDropsDocumentTitleAndPreservesBody(t *testing.T) {
-	for _, title := range []string{
-		`<title>MCP 服务上线计划 · 会议纪要摘要</title>`,
-		`<TITLE>MCP 服务上线计划 &amp; 会议纪要摘要</TITLE>`,
-	} {
-		t.Run(title, func(t *testing.T) {
-			source := []byte(`<html><head>` + title + `<style>h1{color:blue}</style></head><body><h1>会议正文标题</h1><p title="补充说明">会议内容</p></body></html>`)
-			result := string(sanitizeSharedHTML(source))
-			if strings.Contains(result, "MCP 服务上线计划") || strings.Contains(result, "会议纪要摘要") {
-				t.Fatalf("document title leaked into preview: %s", result)
-			}
-			for _, fragment := range []string{`<style>h1{color:blue}</style>`, `<h1>会议正文标题</h1>`, `<p title="补充说明">会议内容</p>`} {
-				if !strings.Contains(result, fragment) {
-					t.Fatalf("body content or safe styling lost: missing %q in %s", fragment, result)
-				}
-			}
-		})
-	}
-}
-
 func TestConversationShareOnceSessionReadsFrozenAttachment(t *testing.T) {
 	cfg := desktopTestConfig(t)
 	cfg.SharePublicBaseURL = "https://share.example.test"
@@ -423,12 +395,16 @@ func TestConversationShareOnceSessionReadsFrozenAttachment(t *testing.T) {
 		server.ServeHTTP(rec, req)
 		return rec
 	}
-	preview := read(attachmentPath)
-	if preview.Code != http.StatusOK || !strings.Contains(preview.Body.String(), "报告") || strings.Contains(preview.Body.String(), "alert(1)") {
+	redirect := read(attachmentPath)
+	if redirect.Code != http.StatusSeeOther || redirect.Header().Get("Location") != pagePath+"?attachment="+id {
+		t.Fatalf("redirect status=%d location=%q", redirect.Code, redirect.Header().Get("Location"))
+	}
+	preview := read(attachmentPath + "?embed=1")
+	if preview.Code != http.StatusOK || !strings.Contains(preview.Body.String(), "html-preview-bootstrap.js") || strings.Contains(preview.Body.String(), "alert(1)") {
 		t.Fatalf("preview status=%d body=%s", preview.Code, preview.Body.String())
 	}
-	if strings.Contains(preview.Body.String(), "不应出现在预览正文的元标题") {
-		t.Fatalf("document title leaked into attachment preview: %s", preview.Body.String())
+	if csp := preview.Header().Get("Content-Security-Policy"); !strings.Contains(csp, "sandbox allow-scripts") || strings.Contains(csp, "allow-same-origin") || !strings.Contains(csp, "connect-src 'none'") {
+		t.Fatalf("preview CSP=%q", csp)
 	}
 	const otherAttachmentID = "ffffffffffffffffffffffff"
 	otherShareID, err := store.NewConversationShareID()

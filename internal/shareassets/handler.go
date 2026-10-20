@@ -3,6 +3,7 @@ package shareassets
 import (
 	"bytes"
 	"crypto/rand"
+	"crypto/sha512"
 	"embed"
 	"encoding/base64"
 	"encoding/json"
@@ -38,15 +39,17 @@ type assetManifest struct {
 	Profile  string `json:"profile"`
 	AssetSet string `json:"assetSet"`
 	Files    []struct {
-		Path string `json:"path"`
+		Path      string `json:"path"`
+		Integrity string `json:"integrity"`
 	} `json:"files"`
 }
 
 type Bundle struct {
-	assetSet   string
-	template   []byte
-	files      fs.FS
-	fileServer http.Handler
+	assetSet             string
+	template             []byte
+	files                fs.FS
+	fileServer           http.Handler
+	htmlPreviewIntegrity string
 }
 
 func NewBundle() *Bundle {
@@ -73,6 +76,7 @@ func NewBundle() *Bundle {
 	if err != nil {
 		panic("conversation export assets are unavailable: " + err.Error())
 	}
+	var htmlPreviewIntegrity string
 	for _, file := range manifest.Files {
 		if !relativeAssetPath.MatchString(file.Path) {
 			panic("conversation export manifest contains an invalid asset path")
@@ -81,13 +85,39 @@ func NewBundle() *Bundle {
 		if statErr != nil || !info.Mode().IsRegular() {
 			panic("conversation export manifest references a missing asset")
 		}
+		if file.Path == "html-preview-bootstrap.js" {
+			body, readErr := fs.ReadFile(files, path.Join(manifest.AssetSet, file.Path))
+			digest := sha512.Sum384(body)
+			if readErr != nil || file.Integrity != "sha384-"+base64.StdEncoding.EncodeToString(digest[:]) {
+				panic("conversation HTML bootstrap integrity mismatch")
+			}
+			htmlPreviewIntegrity = file.Integrity
+		}
+	}
+	if htmlPreviewIntegrity == "" {
+		panic("conversation HTML bootstrap is missing")
 	}
 	return &Bundle{
-		assetSet:   manifest.AssetSet,
-		template:   template,
-		files:      files,
-		fileServer: http.StripPrefix(PublicPathPrefix, http.FileServer(http.FS(files))),
+		assetSet:             manifest.AssetSet,
+		template:             template,
+		files:                files,
+		fileServer:           http.StripPrefix(PublicPathPrefix, http.FileServer(http.FS(files))),
+		htmlPreviewIntegrity: htmlPreviewIntegrity,
 	}
+}
+
+// RenderHTMLPreview returns only trusted bootstrap markup. User HTML is delivered
+// once by the authenticated parent over a document-bound MessagePort.
+func (b *Bundle) RenderHTMLPreview(shareOrigin string) ([]byte, error) {
+	origin, err := normalizedOrigin(shareOrigin)
+	if err != nil {
+		return nil, err
+	}
+	if !regexp.MustCompile(`^sha384-[A-Za-z0-9+/]{64}$`).MatchString(b.htmlPreviewIntegrity) {
+		return nil, errors.New("HTML preview bootstrap is unavailable")
+	}
+	scriptURL := origin + PublicPathPrefix + b.assetSet + "/html-preview-bootstrap.js"
+	return []byte(`<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="conversation-share-origin" content="` + html.EscapeString(origin) + `"><script defer src="` + html.EscapeString(scriptURL) + `" crossorigin="anonymous" integrity="` + html.EscapeString(b.htmlPreviewIntegrity) + `"></script></head><body></body></html>`), nil
 }
 
 func NewHandler() http.Handler {

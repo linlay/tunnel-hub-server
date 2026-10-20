@@ -1,0 +1,443 @@
+{
+  "scope": "2026-10-20 收尾边界修复；不代表完整发布验收",
+  "fixes": [
+    "宿主提供关联会话链接，保留应用内导航及修饰键点击",
+    "自动化历史复用 TimelineAttachmentView 并注入宿主剪贴板",
+    "资源型 query 和人类 steer 扩展只在 snapshot 导出入口启用，恢复普通读取和 Markdown 投影",
+    "应用宿主与公开分享分别负责复制反馈，避免双重提示"
+  ],
+  "changesThisRound": {
+    "desktopFilesChanged": 0,
+    "platformProductionFiles": [
+      "internal/conversationexport/snapshot.go",
+      "internal/conversationexport/resources.go"
+    ],
+    "ordinaryProjectionGoldensRestored": 4,
+    "newProductionAbstraction": false
+  },
+  "platform": {
+    "regressionPackages": [
+      "internal/conversationexport",
+      "internal/chatresource",
+      "internal/conversation",
+      "internal/server",
+      "internal/chat"
+    ],
+    "regressionPassed": true,
+    "projectionAndControlRaceTestsPassed": true,
+    "mainBuildPassed": true
+  },
+  "web": {
+    "mainBuildTypecheckBoundariesDesktopContractI18nPassed": true,
+    "initialFullRun": {
+      "numTotalTestSuites": 462,
+      "numPassedTestSuites": 456,
+      "numFailedTestSuites": 6,
+      "numTotalTests": 3954,
+      "numPassedTests": 3893,
+      "numFailedTests": 61
+    },
+    "initialFailedSuites": [
+      {
+        "file": "src/app/layout/LeftSidebar.test.ts",
+        "failedTests": 47
+      },
+      {
+        "file": "src/app/layout/ConversationSurface.integration.test.ts",
+        "failedTests": 2
+      },
+      {
+        "file": "src/features/kbases/components/KBasesConsole.test.tsx",
+        "failedTests": 3
+      },
+      {
+        "file": "src/features/project/components/ProjectConsole.test.tsx",
+        "failedTests": 7
+      },
+      {
+        "file": "src/shared/contracts/generated/agentWebclientBridge.test.ts",
+        "failedTests": 1
+      },
+      {
+        "file": "src/shared/styles/tailwindPrefix.test.ts",
+        "failedTests": 1
+      }
+    ],
+    "isolatedTimeoutRetry": {
+      "numTotalTestSuites": 2,
+      "numPassedTestSuites": 2,
+      "numFailedTestSuites": 0,
+      "numTotalTests": 31,
+      "numPassedTests": 31,
+      "numFailedTests": 0
+    },
+    "remainingFailures": {
+      "tests": 56,
+      "suites": 4,
+      "reproducedOnOriginalHeadInPreviousReview": true
+    },
+    "focusedSuites": [
+      {
+        "file": "src/features/selection/components/SelectedTextFragmentsPill.dom.test.ts",
+        "tests": 11,
+        "status": "passed"
+      },
+      {
+        "file": "src/features/artifacts/components/ReferenceCard.activation.test.ts",
+        "tests": 4,
+        "status": "passed"
+      },
+      {
+        "file": "src/features/artifacts/components/ReferenceCard.test.tsx",
+        "tests": 4,
+        "status": "passed"
+      },
+      {
+        "file": "src/features/selection/components/SelectedTextFragmentsPill.test.ts",
+        "tests": 2,
+        "status": "passed"
+      },
+      {
+        "file": "src/features/conversation/components/ConversationPreview.test.ts",
+        "tests": 8,
+        "status": "passed"
+      },
+      {
+        "file": "src/features/viewers/components/MarkdownCode.copy.test.tsx",
+        "tests": 2,
+        "status": "passed"
+      },
+      {
+        "file": "src/features/automations/components/AutomationExecutionDrawer.test.ts",
+        "tests": 10,
+        "status": "passed"
+      },
+      {
+        "file": "src/features/timeline/components/ImageGenerationCard.test.ts",
+        "tests": 6,
+        "status": "passed"
+      },
+      {
+        "file": "src/export/readOnlyRendering.test.tsx",
+        "tests": 2,
+        "status": "passed"
+      },
+      {
+        "file": "src/features/timeline/components/TimelineRow.relatedChat.test.tsx",
+        "tests": 1,
+        "status": "passed"
+      },
+      {
+        "file": "src/features/btw/hooks/useBtwTimelineInteraction.test.tsx",
+        "tests": 2,
+        "status": "passed"
+      },
+      {
+        "file": "src/features/timeline/components/RelatedChatCards.test.tsx",
+        "tests": 3,
+        "status": "passed"
+      }
+    ],
+    "exportBuildAndSyncChecksPassed": true
+  },
+  "tunnel": {
+    "sqlitePackagesPassed": [
+      "internal/shareassets",
+      "internal/desktop"
+    ],
+    "assetAudit": {
+      "finalAssetSet": "f9bdc1237af18ddd2a3449a9694cc4e274fdf4d2e0f12762e81735aa27a3fc9b",
+      "verifiedFiles": 161,
+      "historicalAssetSetsPreserved": 9,
+      "historicalFilesUnchanged": 1440,
+      "originalPlanDocumentsUnchanged": 8,
+      "ordinaryProjectionGoldensRestored": 4,
+      "onlyFinalNewAssetSetRetained": true
+    }
+  },
+  "desktop": {
+    "originalHead": "73e3b3c8a64908baa70f50623cad4ba925eb906e",
+    "bothIsolatedMainAndRendererBuildsPassed": true,
+    "runs": {
+      "head": {
+        "tests": {
+          "tests": 3378,
+          "pass": 3310,
+          "fail": 31,
+          "cancelled": 2,
+          "skipped": 35
+        },
+        "recheck": {
+          "tests": 362,
+          "pass": 289,
+          "fail": 66,
+          "cancelled": 1,
+          "skipped": 6
+        },
+        "screenshot": {
+          "tests": 5,
+          "pass": 5,
+          "fail": 0,
+          "cancelled": 0,
+          "skipped": 0
+        },
+        "mac-share-final": {
+          "tests": 8,
+          "pass": 8,
+          "fail": 0,
+          "cancelled": 0,
+          "skipped": 0
+        },
+        "service-unrestricted": {
+          "tests": 141,
+          "pass": 136,
+          "fail": 1,
+          "cancelled": 1,
+          "skipped": 3
+        },
+        "service-group-0": {
+          "tests": 5,
+          "pass": 3,
+          "fail": 1,
+          "cancelled": 0,
+          "skipped": 1
+        },
+        "service-group-1": {
+          "tests": 5,
+          "pass": 4,
+          "fail": 1,
+          "cancelled": 0,
+          "skipped": 0
+        },
+        "service-group-2": {
+          "tests": 4,
+          "pass": 4,
+          "fail": 0,
+          "cancelled": 0,
+          "skipped": 0
+        },
+        "service-group-3": {
+          "tests": 4,
+          "pass": 3,
+          "fail": 0,
+          "cancelled": 0,
+          "skipped": 1
+        }
+      },
+      "current": {
+        "tests": {
+          "tests": 3378,
+          "pass": 3310,
+          "fail": 31,
+          "cancelled": 2,
+          "skipped": 35
+        },
+        "recheck": {
+          "tests": 362,
+          "pass": 290,
+          "fail": 65,
+          "cancelled": 1,
+          "skipped": 6
+        },
+        "screenshot": {
+          "tests": 5,
+          "pass": 5,
+          "fail": 0,
+          "cancelled": 0,
+          "skipped": 0
+        },
+        "mac-share-final": {
+          "tests": 8,
+          "pass": 8,
+          "fail": 0,
+          "cancelled": 0,
+          "skipped": 0
+        },
+        "service-unrestricted": {
+          "tests": 141,
+          "pass": 136,
+          "fail": 1,
+          "cancelled": 1,
+          "skipped": 3
+        },
+        "service-group-0": {
+          "tests": 5,
+          "pass": 3,
+          "fail": 1,
+          "cancelled": 0,
+          "skipped": 1
+        },
+        "service-group-1": {
+          "tests": 5,
+          "pass": 4,
+          "fail": 1,
+          "cancelled": 0,
+          "skipped": 0
+        },
+        "service-group-2": {
+          "tests": 4,
+          "pass": 4,
+          "fail": 0,
+          "cancelled": 0,
+          "skipped": 0
+        },
+        "service-group-3": {
+          "tests": 4,
+          "pass": 3,
+          "fail": 0,
+          "cancelled": 0,
+          "skipped": 1
+        }
+      }
+    },
+    "latestObservedFailureComparison": {
+      "currentFailureNames": [
+        "Chinese chat copy consistently uses 对话 while technical sessions keep 会话",
+        "Kanban cards match the Website hierarchy and date-only contract",
+        "Kanban cloud popover resyncs and toolbar filters by project tree",
+        "Kanban route exposes native desktop api and page styles",
+        "Kanban status order places completed after in progress",
+        "Kanban toolbar merges issue count into the wider project filter and compacts cloud status",
+        "Kanban toolbar remembers all filter preferences and defaults assignee to self",
+        "Local Kanban cards show workers without repeating the implicit assignee",
+        "Podman remains an asynchronous fallback when Docker is unreachable",
+        "Projects header refresh force-loads navigation agents without toggling the group",
+        "Projects headers show hover cards for Coder and Knowledge Base agents only",
+        "WebApp lifecycle actions keep install, runtime, and Tunnel publishing separate",
+        "Windows installer data directory page requires the visible path to end with the owned root name",
+        "Windows installer keeps the program root fixed while the data root remains selectable",
+        "Windows main renderer owns the thin system bar and bottom-docked DevTools",
+        "Windows service webview modal overlays mask renderer-owned window controls",
+        "Windows uninstall safety requires path validation in addition to owner markers",
+        "a release signer rejects invalid outer identity even when its service checksum is valid",
+        "agent platform assistant bridge returns no agents when platform is installed but stopped",
+        "agent webclient management routes render embedded webclient pages",
+        "asset refresh follows initialization and bundle signatures, not service-owned config",
+        "assistant launcher sits beside the sidebar collapse button",
+        "assistant navigation agents are exposed through dedicated ipc without changing pet agents",
+        "assistant navigation agents refresh immediately after startup services become ready",
+        "assistant sidebar awaiting chats use a right-side loading status",
+        "assistant sidebar chat history selection follows the current chat route",
+        "assistant sidebar chat rows keep chatName while preserving live statuses",
+        "assistant sidebar empty state is localized",
+        "assistant.reorderProjects maps stale and Platform failures to structured results",
+        "assistant.reorderProjects writes the public valid catalog while preserving non-Project slots",
+        "brand icon generation surfaces are brand-owned and distinct",
+        "chat headers expose sorting and new chat while the chat menu keeps sharing",
+        "control center keeps service operations in the prototype dashboard layout",
+        "critical runtime path modules use shared brand-aware roots",
+        "desktop global search contract is wired across main preload renderer and help",
+        "desktop pet active task panel lists all agent tasks and opens chat rows",
+        "desktop pet appearance picker confirms persistence before success feedback",
+        "desktop pet base mode stays sprite-sized while bubble and preview modes expand separately",
+        "desktop pet drag ignores transient capture loss while the pointer is still down",
+        "desktop pet visual states stay local to renderer priority",
+        "desktop sso waits for a user click and keeps pending login recoverable",
+        "desktop state debug tab is wired through the fixed read-only IPC contract",
+        "electron-builder filters retain npm dotfiles and only the target Windows PE",
+        "embedded browser accepts host-opened tabs after multiple tabs exist",
+        "embedded browser address stays directly editable while WorkPanel Edit toggles page review",
+        "empty content fallback is separate from the startup progress card",
+        "enterprise IM settings use independent persistence and notify runtime changes",
+        "final app signing skips already finalized services and preserves other signing options",
+        "final packaging fails on bad inputs and on post-sign integrity failures",
+        "fixed sidebar tool trigger exposes account state and Help affordance",
+        "installed Market WebApps open only after an explicit user action",
+        "mac fullscreen forces the main window to an opaque background",
+        "main process keeps app identity visible in platform program bars",
+        "only the physical realtime client constructs the Agent Platform /ws URL",
+        "page-level copilot controls sidebar visibility and assistant agent following",
+        "primary sidebar navigation uses separate compact and rail SVG families",
+        "public source keeps ZenMind literals out of shared paths except brand-specific defaults",
+        "renderer diagnostics keep warnings out of error.log and flush before quit",
+        "restoreRunningServices skips install-only container hub and restores other optional services",
+        "runExecFile resolves when a daemon child keeps stdout open",
+        "runStartupPreparation prepares packaged first-launch core services in parallel and gates webclient verification",
+        "service webview main-world script exposes a fixed typed Platform Frame Port",
+        "service webview surface provides webview-backed assistant context instead of guessing embedded content",
+        "settings page configures desktop helper default agent separately from desktop pet",
+        "settings page keeps Kanban, Control, and Tunnel Hub separate",
+        "settings route moves section navigation into the app sidebar and uses section subroutes",
+        "shared contracts do not add string *At or *timestamp fields",
+        "shutdown stops delivery, tears down adapters and WorkPanel, then disposes the physical client",
+        "sidebar action buttons and right-clicks share native menus while selection popovers keep glass surfaces",
+        "sidebar assigns Chats and Projects a single route owner",
+        "sidebar chat rows open the rename dialog on double click",
+        "sidebar collapse toggle moves into the top chrome with the outline sidebar icon",
+        "sidebar header icon buttons use color-only hover feedback",
+        "sidebar more-actions buttons match the Codex hover treatment",
+        "sidebar renders Kanban and section groups above the fixed tool menu",
+        "sidebar row action buttons stay out of default tab order",
+        "sidebar translucency is fixed and not user configurable",
+        "skill package installs and uninstalls all included skills as one transaction",
+        "skin mutations use existing confirmation and denial leaves state and notifications unchanged",
+        "source and tests do not contain internal endpoint or legacy icon literals",
+        "storefront market keeps sandbox image tab wired to local image import",
+        "web copilot dock yields to native dialogs",
+        "webapps expose desktop api and start from webs sidebar route",
+        "website Copilot association is exposed across webs desktop api layers",
+        "website row close action removes the hover tile",
+        "website tab lifecycle, surface refresh, active styling, and copilot restore stay integrated"
+      ],
+      "currentOnlyFailureNames": [],
+      "headOnlyFailureNames": [
+        "macOS dev rebuilds retain the previous permission requirement across version and resource changes"
+      ]
+    },
+    "notes": [
+      "不同轮次存在重叠，不累加测试数量，也不将其写成一次全量通过。",
+      "tests 是 45 秒文件时限的初次全量对照；recheck 补齐父级依赖解析后复验八个文件，服务文件仍触及 180 秒时限。",
+      "截图测试串行运行；mac-share-final 补齐原工作区已有图标输入后运行。",
+      "服务测试的沙箱运行被本地端口 EPERM 阻止；service-unrestricted 允许本地监听和连接，但仍触及 300 秒文件时限。其余 18 个用例在 service-group-0..3 按名称分组补跑。中间诊断轮次不用于通过率统计。",
+      "剩余同名失败在原 HEAD 可复现，不能由此推断所有未执行平台和人工链路没有风险。"
+    ],
+    "serviceCoverage": {
+      "head": {
+        "namedTestsCompletedOrSkipped": 156,
+        "failures": [
+          "restoreRunningServices skips install-only container hub and restores other optional services",
+          "runExecFile resolves when a daemon child keeps stdout open",
+          "runStartupPreparation prepares packaged first-launch core services in parallel and gates webclient verification"
+        ],
+        "missingTests": []
+      },
+      "current": {
+        "namedTestsCompletedOrSkipped": 156,
+        "failures": [
+          "restoreRunningServices skips install-only container hub and restores other optional services",
+          "runExecFile resolves when a daemon child keeps stdout open",
+          "runStartupPreparation prepares packaged first-launch core services in parallel and gates webclient verification"
+        ],
+        "missingTests": []
+      }
+    }
+  },
+  "pendingReleaseValidation": [
+    "独立 MySQL TEST_MYSQL_*",
+    "中性扫描名单 FORBIDDEN_BRAND_TERMS",
+    "Safari/Firefox 浏览器矩阵",
+    "完整 Electron → Platform → Desktop → Tunnel 人工链路",
+    "现存全仓测试门禁"
+  ],
+  "cleanup": {
+    "verified": true,
+    "desktopAllSourceTestConfigFilesUnchanged": true,
+    "allRepositoryHeadsUnchanged": true,
+    "allLocalGitConfigUnchanged": true,
+    "webOriginalDistRestored": {
+      "exact": true,
+      "files": 1005
+    },
+    "externalTestTemporaryDirectoriesRemoved": 24,
+    "finalSourceDiffAllowlistVerified": true,
+    "allBranchesRemainMain": true,
+    "repositoryDiffChecksPassed": true,
+    "workspaceRootClean": true,
+    "taskOwnedProcessesStopped": true,
+    "historicalAssetFilesUnchanged": 1440,
+    "originalPlanDocumentsUnchanged": 8,
+    "onlyFinalNewAssetSetRetained": true,
+    "temporaryTaskDirectoryRemoved": true,
+    "externalTestTemporaryDirectoriesRemovalVerified": true
+  }
+}
