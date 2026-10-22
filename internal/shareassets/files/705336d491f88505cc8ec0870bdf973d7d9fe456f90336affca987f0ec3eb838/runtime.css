@@ -8146,8 +8146,18 @@ html[data-theme="dark"] .WHKcJJ_9 {
   .mXRDaFkt, .T_VRp8Kr, ._f1C5ITm, .RT6_GtT7 { transition: none; }
 }
 
+.CwH7P5bu { display: flex; flex: 1; min-width: 0; min-height: 0; }
+.CwH7P5bu iframe { display: block; flex: 1; width: 100%; min-height: 0; border: 0; background: white; }
+.CwH7P5bu > p { margin: auto; padding: 24px; }
+.PfFc6818 { display: flex; flex: 1; align-items: center; justify-content: center; min-width: 0; min-height: 0; overflow: auto; }
+._bfd0ZYr, .kiYVDkTF { display: block; max-width: 100%; max-height: 100%; -o-object-fit: contain; object-fit: contain; }
+.dx_nBy1l { width: min(100%, 600px); }
+.oX9iEeTV { display: flex; flex: 1; flex-direction: column; align-items: center; justify-content: center; gap: 12px; min-width: 0; min-height: 0; padding: 24px; overflow: auto; text-align: center; overflow-wrap: anywhere; }
+.oX9iEeTV span { color: var(--ink-muted); }
+.oX9iEeTV a { padding: 6px 10px; border: 1px solid var(--line-soft); border-radius: 8px; background: var(--bg-elev-2); color: var(--ink-1); text-decoration: none; }
+
 .b6oqM3hc { display: flex; flex: 1; flex-direction: column; min-width: 0; min-height: 0; color: var(--ink-1); }
-.lxifbVxm { flex: 0 0 auto; padding-bottom: 12px; }
+.Xx2B1KIm { flex: 0 0 auto; padding-bottom: 12px; }
 .Xx2B1KIm, .DiBXm49s { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
 .BRrj_Rw0 { flex: 1 1 180px; min-width: 0; }
 .tDezstJf { display: flex; align-items: center; gap: 8px; width: 100%; min-width: 0; min-height: 32px; padding: 4px 0; border: 0; border-radius: 6px; background: transparent; color: inherit; font: inherit; font-weight: 600; text-align: left; cursor: pointer; }
@@ -8168,24 +8178,14 @@ html[data-theme="dark"] .WHKcJJ_9 {
 .DiBXm49s .material-icon { display: inline-flex; width: 18px; height: 18px; font-size: 18px; }
 .GlraKbGG { display: inline-flex; border-radius: 8px; }
 .GlraKbGG:focus-visible { outline: 2px solid var(--accent-electric); outline-offset: 2px; }
-.feibhBIQ a { padding: 6px 10px; border: 1px solid var(--line-soft); border-radius: 8px; background: var(--bg-elev-2); color: var(--ink-1); text-decoration: none; }
 .m4SP0LB1 { display: flex; align-items: center; gap: 12px; width: min(420px, calc(100vw - 100px)); text-align: left; }
 .m4SP0LB1 label { flex: 1; min-width: 0; }
 .m4SP0LB1 input { display: block; box-sizing: border-box; width: 100%; margin-top: 6px; padding: 6px 8px; border: 1px solid var(--line-soft); border-radius: 6px; color: inherit; background: transparent; }
 .m4SP0LB1 button { flex-shrink: 0; padding: 4px 8px; border: 1px solid var(--line-soft); border-radius: 6px; color: inherit; background: transparent; cursor: pointer; font: inherit; }
-.b6oqM3hc iframe { display: block; flex: 1; width: 100%; min-height: 0; border: 1px solid var(--line-soft); box-sizing: border-box; background: white; }
-.feibhBIQ { display: flex; flex: 1; flex-direction: column; align-items: center; justify-content: center; gap: 12px; min-height: 0; padding: 24px; overflow: auto; text-align: center; overflow-wrap: anywhere; }
-.feibhBIQ span { color: var(--ink-muted); }
 @media (max-width: 700px), (pointer: coarse) {
   .DiBXm49s :where(button, a) { width: 44px; height: 44px; }
   .tDezstJf { min-height: 44px; }
 }
-
-.Mc2v0wQL { display: flex; flex: 1; min-height: 0; }
-.Mc2v0wQL > p { margin: auto; padding: 24px; }
-.l522Kovj { display: flex; flex: 1; align-items: center; justify-content: center; min-height: 0; overflow: auto; }
-.aFFEipFn, .rlqnEITr { display: block; max-width: 100%; max-height: 100%; -o-object-fit: contain; object-fit: contain; }
-.PALzQZuQ { width: min(100%, 600px); }
 
 .Lj2JSdQq { min-height: 100vh; background: var(--bg-page); color: var(--ink-1); }
 .zFQKLH1R { position: sticky; top: 0; z-index: 10; border-bottom: 1px solid var(--line-soft); background: var(--bg-elev-1); }
@@ -8207,8 +8207,7 @@ html[data-theme="dark"] .WHKcJJ_9 {
 .mvl5vrMI { width: 100%; }
 @media (max-width: 700px) { .gD2_p0xQ { width: 100%; padding: 10px; } .hBgAVI20 { display: none; } }
 
-.skTbHaIT { position: fixed; inset: 0; display: flex; padding: 16px; background: var(--bg-elev-1); color: var(--ink-1); }
+.skTbHaIT { position: fixed; inset: 0; display: flex; background: var(--bg-elev-1); color: var(--ink-1); }
 .OVO2TZoT { margin: auto; text-align: center; }
 .OVO2TZoT a { color: var(--ink-1); }
-@media (max-width: 700px) { .skTbHaIT { padding: 10px; } }
 
