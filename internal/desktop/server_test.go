@@ -776,31 +776,64 @@ func TestDesktopRegistrationWebAppHTTPIntegration(t *testing.T) {
 	registration := postRegisterHTTP(t, server.URL, desktopRegisterBody("mac-mini", "", false))
 	webApp := postRegisterWebAppHTTP(t, server.URL, "mac-mini", "notes", `{"targetUrl":"`+upstream.URL+`"}`)
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go runFakeWebAppTunnelClient(t, ctx, server.URL, defaultDesktopJWT, handleFakeWebAppHTTPStream)
-	waitForDesktopDevice(t, manager, registration.DeviceID)
+	assertOffline := func() {
+		t.Helper()
+		waitForDesktopOffline(t, manager)
+		request, err := http.NewRequest(http.MethodGet, server.URL+"/hello?source=wa", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		request.Host = webApp.PublicHost
+		response, err := http.DefaultClient.Do(request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer response.Body.Close()
+		body, err := io.ReadAll(response.Body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if response.StatusCode != http.StatusBadGateway || strings.TrimSpace(string(body)) != "assigned desktop is offline" {
+			t.Fatalf("offline response = %d %q", response.StatusCode, body)
+		}
+	}
+	assertOffline()
+	for cycle := 0; cycle < 2; cycle++ {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		go runFakeWebAppTunnelClient(t, ctx, server.URL, defaultDesktopJWT, handleFakeWebAppHTTPStream)
+		waitForDesktopDevice(t, manager, registration.DeviceID)
 
-	req, err := http.NewRequest(http.MethodGet, server.URL+"/hello?source=wa", nil)
+		req, err := http.NewRequest(http.MethodGet, server.URL+"/hello?source=wa", nil)
+		if err != nil {
+			t.Fatalf("new webapp request: %v", err)
+		}
+		req.Host = webApp.PublicHost
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("do webapp request: %v", err)
+		}
+		defer resp.Body.Close()
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			t.Fatalf("read webapp body: %v", err)
+		}
+		if resp.StatusCode != http.StatusOK || resp.Header.Get("X-WebApp") != "ok" || string(body) != "hello webapp" {
+			t.Fatalf("unexpected webapp response: status=%d header=%q body=%q", resp.StatusCode, resp.Header.Get("X-WebApp"), string(body))
+		}
+		event := waitForTrafficEvent(t, db, "webapp", webApp.PublicHost, "http")
+		if event.StatusCode != http.StatusOK || event.RouteID == "" || event.SessionID == "" || event.Path != "/hello?source=wa" || event.BytesIn != 0 || event.BytesOut != int64(len("hello webapp")) {
+			t.Fatalf("unexpected http traffic event: %+v", event)
+		}
+
+		assertOffline()
+	}
+	stored, err := db.GetActiveDesktopWebAppRouteByHost(context.Background(), webApp.PublicHost)
 	if err != nil {
-		t.Fatalf("new webapp request: %v", err)
+		t.Fatal(err)
 	}
-	req.Host = webApp.PublicHost
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatalf("do webapp request: %v", err)
-	}
-	defer resp.Body.Close()
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		t.Fatalf("read webapp body: %v", err)
-	}
-	if resp.StatusCode != http.StatusOK || resp.Header.Get("X-WebApp") != "ok" || string(body) != "hello webapp" {
-		t.Fatalf("unexpected webapp response: status=%d header=%q body=%q", resp.StatusCode, resp.Header.Get("X-WebApp"), string(body))
-	}
-	event := waitForTrafficEvent(t, db, "webapp", webApp.PublicHost, "http")
-	if event.StatusCode != http.StatusOK || event.RouteID == "" || event.SessionID == "" || event.Path != "/hello?source=wa" || event.BytesIn != 0 || event.BytesOut != int64(len("hello webapp")) {
-		t.Fatalf("unexpected http traffic event: %+v", event)
+	if stored.Route.ID != webApp.RouteID || stored.Device.DeviceID != registration.DeviceID {
+		t.Fatalf("reconnect changed the registered identity: %+v", stored)
 	}
 }
 
@@ -851,40 +884,68 @@ func TestDesktopRegistrationWebAppWebSocketIntegration(t *testing.T) {
 	registration := postRegisterHTTP(t, server.URL, desktopRegisterBody("mac-mini", "", false))
 	webApp := postRegisterWebAppHTTP(t, server.URL, "mac-mini", "chat", `{"targetUrl":"`+upstream.URL+`"}`)
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go runFakeWebAppTunnelClient(t, ctx, server.URL, defaultDesktopJWT, handleFakeWebAppWebSocketStream)
-	waitForDesktopDevice(t, manager, registration.DeviceID)
+	assertOffline := func() {
+		t.Helper()
+		waitForDesktopOffline(t, manager)
+		_, response, err := dialDesktopPublicWebSocket(t, context.Background(), server.URL, webApp.PublicHost, "/socket?room=1", nil)
+		if err == nil || response == nil {
+			t.Fatalf("expected offline WebSocket rejection, response=%v err=%v", response, err)
+		}
+		defer response.Body.Close()
+		body, err := io.ReadAll(response.Body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if response.StatusCode != http.StatusBadGateway || strings.TrimSpace(string(body)) != "assigned desktop is offline" {
+			t.Fatalf("offline response = %d %q", response.StatusCode, body)
+		}
+	}
+	assertOffline()
+	for cycle := 0; cycle < 2; cycle++ {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		go runFakeWebAppTunnelClient(t, ctx, server.URL, defaultDesktopJWT, handleFakeWebAppWebSocketStream)
+		waitForDesktopDevice(t, manager, registration.DeviceID)
 
-	serverURL, err := url.Parse(server.URL)
+		serverURL, err := url.Parse(server.URL)
+		if err != nil {
+			t.Fatalf("parse server url: %v", err)
+		}
+		publicWSURL := "ws://" + webApp.PublicHost + ":" + serverURL.Port() + "/socket?room=1"
+		dialer := websocket.Dialer{NetDialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			return (&net.Dialer{}).DialContext(ctx, network, serverURL.Host)
+		}}
+		client, _, err := dialer.DialContext(ctx, publicWSURL, nil)
+		if err != nil {
+			t.Fatalf("dial webapp ws: %v", err)
+		}
+		defer client.Close()
+		if err := client.WriteMessage(websocket.TextMessage, []byte("ping")); err != nil {
+			t.Fatalf("write webapp ws: %v", err)
+		}
+		_, payload, err := client.ReadMessage()
+		if err != nil {
+			t.Fatalf("read webapp ws: %v", err)
+		}
+		if string(payload) != "webapp:ping" {
+			t.Fatalf("payload = %q", payload)
+		}
+		if err := client.Close(); err != nil {
+			t.Fatalf("close webapp ws: %v", err)
+		}
+		event := waitForTrafficEvent(t, db, "webapp", webApp.PublicHost, "websocket")
+		if event.StatusCode != http.StatusSwitchingProtocols || event.RouteID == "" || event.SessionID == "" || event.Path != "/socket?room=1" || event.BytesIn != int64(len("ping")) || event.BytesOut != int64(len("webapp:ping")) {
+			t.Fatalf("unexpected websocket traffic event: %+v", event)
+		}
+
+		assertOffline()
+	}
+	stored, err := db.GetActiveDesktopWebAppRouteByHost(context.Background(), webApp.PublicHost)
 	if err != nil {
-		t.Fatalf("parse server url: %v", err)
+		t.Fatal(err)
 	}
-	publicWSURL := "ws://" + webApp.PublicHost + ":" + serverURL.Port() + "/socket?room=1"
-	dialer := websocket.Dialer{NetDialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-		return (&net.Dialer{}).DialContext(ctx, network, serverURL.Host)
-	}}
-	client, _, err := dialer.DialContext(ctx, publicWSURL, nil)
-	if err != nil {
-		t.Fatalf("dial webapp ws: %v", err)
-	}
-	defer client.Close()
-	if err := client.WriteMessage(websocket.TextMessage, []byte("ping")); err != nil {
-		t.Fatalf("write webapp ws: %v", err)
-	}
-	_, payload, err := client.ReadMessage()
-	if err != nil {
-		t.Fatalf("read webapp ws: %v", err)
-	}
-	if string(payload) != "webapp:ping" {
-		t.Fatalf("payload = %q", payload)
-	}
-	if err := client.Close(); err != nil {
-		t.Fatalf("close webapp ws: %v", err)
-	}
-	event := waitForTrafficEvent(t, db, "webapp", webApp.PublicHost, "websocket")
-	if event.StatusCode != http.StatusSwitchingProtocols || event.RouteID == "" || event.SessionID == "" || event.Path != "/socket?room=1" || event.BytesIn != int64(len("ping")) || event.BytesOut != int64(len("webapp:ping")) {
-		t.Fatalf("unexpected websocket traffic event: %+v", event)
+	if stored.Route.ID != webApp.RouteID || stored.Device.DeviceID != registration.DeviceID {
+		t.Fatalf("reconnect changed the registered identity: %+v", stored)
 	}
 }
 
@@ -1523,6 +1584,18 @@ func waitForDesktopDevice(t *testing.T, manager *proxy.Manager, deviceID string)
 		time.Sleep(20 * time.Millisecond)
 	}
 	t.Fatalf("desktop device %s did not connect", deviceID)
+}
+
+func waitForDesktopOffline(t *testing.T, manager *proxy.Manager) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if manager.Metrics().ActiveDesktopCount == 0 {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("desktop connection did not go offline")
 }
 
 func waitForTrafficEvent(t *testing.T, db *store.DB, objectType, publicHost, kind string) store.TrafficEvent {

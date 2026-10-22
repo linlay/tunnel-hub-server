@@ -23,6 +23,8 @@ WebApp 有两条独立链路：
 - 手机配对访问使用 `https://<device>-<frontendPort>.m.example.test/`，不创建数据库 WebApp route。首次导航携带配对 `app` token，Relay 换成 HttpOnly Cookie 并重定向到无 token 地址；每个请求仍由 Desktop 校验 token scope、device id 和运行中的 WebApp 端口。
 - 用户主动公开分享使用 `*-wa.example.test`。该路由仅由 Desktop 的“一键发布”注册和启停，保持匿名 URL 分享语义。
 
+发布路由是持久化配置，桌面在线状态来自 Manager 当前持有的可用连接；注册或发布成功不代表连接持续在线。公开 WebApp 路由存在但所属桌面离线时，HTTP 和 WebSocket 握手均返回 `502 assigned desktop is offline`。同一桌面重新连接后沿用原路由和公网地址，无需重新发布；断线不会删除路由或轮换设备身份。
+
 ## 2. 快速开始
 
 ### 前置要求
