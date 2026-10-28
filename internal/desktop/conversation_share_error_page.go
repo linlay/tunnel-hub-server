@@ -15,7 +15,7 @@ var (
 	publicConversationShareNotFoundDocument = buildPublicConversationShareErrorDocument(
 		publicConversationShareErrorCopy{
 			title:       "分享不可用",
-			description: "该分享可能已过期、被撤销，或链接不正确。",
+			description: "该分享可能已被撤销，或链接不正确。",
 			hint:        "请向分享者确认链接是否仍然有效。",
 		},
 	)
@@ -80,7 +80,7 @@ func buildPublicConversationShareErrorDocument(copy publicConversationShareError
 <body>
   <main class="share-error-page">
     <div class="share-error-shell">
-      <p class="share-error-context">Shared conversation</p>
+      <p class="share-error-context">Shared content</p>
       <section class="share-error-card" aria-labelledby="share-error-title">
         <div class="share-error-icon" aria-hidden="true">
           <svg viewBox="0 0 24 24"><path d="M9.5 14.5l5-5"/><path d="M7.2 17.8l-1 1a3.5 3.5 0 01-5-5l3.1-3.1a3.5 3.5 0 014.9 0"/><path d="M16.8 6.2l1-1a3.5 3.5 0 115 5l-3.1 3.1a3.5 3.5 0 01-4.9 0"/></svg>

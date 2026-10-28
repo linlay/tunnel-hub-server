@@ -96,20 +96,17 @@ CREATE TABLE IF NOT EXISTS events (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
 
 CREATE TABLE IF NOT EXISTS conversation_shares (
-	id VARCHAR(128) PRIMARY KEY,
-	owner_user_id VARCHAR(255) NOT NULL,
-	conversation_id VARCHAR(255) NOT NULL,
-	snapshot_version INTEGER NOT NULL,
-	snapshot_json LONGBLOB NOT NULL,
-	created_at DATETIME(6) NOT NULL,
-	expires_at DATETIME(6),
-	revoked_at DATETIME(6),
-	single_use INTEGER NOT NULL DEFAULT 0,
-	CONSTRAINT chk_conversation_share_single_use CHECK (
-		single_use IN (0, 1)
-		AND (single_use = 0 OR expires_at IS NULL)
-	),
-	INDEX idx_conversation_shares_owner_created (owner_user_id, created_at DESC, id DESC)
+ id VARCHAR(128) PRIMARY KEY,
+ owner_user_id VARCHAR(255) NOT NULL,
+ conversation_id VARCHAR(255),
+ kind VARCHAR(128) NOT NULL DEFAULT 'conversation',
+ title VARCHAR(255) NOT NULL DEFAULT '历史对话分享',
+ description_json LONGBLOB,
+ snapshot_version INTEGER NOT NULL,
+ snapshot_json LONGBLOB NOT NULL,
+ created_at DATETIME(6) NOT NULL,
+ revoked_at DATETIME(6),
+ INDEX idx_conversation_shares_owner_created (owner_user_id, created_at DESC, id DESC)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
 
 CREATE TABLE IF NOT EXISTS conversation_share_access (
@@ -125,14 +122,9 @@ CREATE TABLE IF NOT EXISTS conversation_share_resources (
 	mime_type VARCHAR(100) NOT NULL,
 	size_bytes BIGINT NOT NULL,
 	sha256 VARCHAR(64) NOT NULL,
+ logical_path VARCHAR(255),
 	PRIMARY KEY (share_id, resource_id),
-	FOREIGN KEY (share_id) REFERENCES conversation_shares(id) ON DELETE CASCADE
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
-
-CREATE TABLE IF NOT EXISTS conversation_share_claims (
-	share_id VARCHAR(128) PRIMARY KEY,
-	token_hash VARBINARY(32) NOT NULL,
-	expires_at DATETIME(6) NOT NULL,
+ UNIQUE KEY idx_share_resource_path (share_id, logical_path),
 	FOREIGN KEY (share_id) REFERENCES conversation_shares(id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
 

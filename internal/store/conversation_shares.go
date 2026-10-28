@@ -3,17 +3,17 @@ package store
 import (
 	"context"
 	"crypto/rand"
-	"crypto/subtle"
 	"database/sql"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"regexp"
 	"strings"
 	"time"
 	"unicode"
-)
 
-const ConversationShareSessionDuration = 30 * time.Minute
+	"example.invalid/tunnel-hub-server/internal/sharecontract"
+)
 
 const ConversationSnapshotVersion = 1
 const MaxConversationShareConversationIDBytes = 255
@@ -24,10 +24,11 @@ type ConversationShare struct {
 	ConversationID  string
 	SnapshotVersion int
 	SnapshotJSON    []byte
+	Kind            string
+	Title           string
+	DescriptionJSON []byte
 	CreatedAt       time.Time
-	ExpiresAt       *time.Time
 	LastAccessedAt  *time.Time
-	SingleUse       bool
 }
 
 type ConversationShareResource struct {
@@ -37,6 +38,7 @@ type ConversationShareResource struct {
 	MIMEType string
 	Size     int64
 	SHA256   string
+	Path     string
 }
 
 var conversationShareResourceID = regexp.MustCompile(`^[a-f0-9]{24}$`)
@@ -44,105 +46,79 @@ var conversationShareResourceMIME = regexp.MustCompile(`^[A-Za-z0-9!#$&^_.+-]+/[
 var conversationShareResourceHash = regexp.MustCompile(`^[a-f0-9]{64}$`)
 var conversationShareID = regexp.MustCompile(`^share_[A-Za-z0-9_-]{1,74}$`)
 
-func (db *DB) CreateConversationShare(
-	ctx context.Context,
-	ownerUserID string,
-	conversationID string,
-	snapshotVersion int,
-	snapshotJSON []byte,
-	createdAt time.Time,
-	expiresAt *time.Time,
-	singleUse bool,
-) (ConversationShare, error) {
+// The conversation entry remains a narrow compatibility adapter. The generic
+// write below does not require a conversation ID or Snapshot V1.
+func (db *DB) CreateConversationShare(ctx context.Context, ownerUserID, conversationID string,
+	snapshotVersion int, snapshotJSON []byte, createdAt time.Time) (ConversationShare, error) {
 	id, err := NewConversationShareID()
 	if err != nil {
 		return ConversationShare{}, err
 	}
-	return db.CreateConversationShareWithResources(ctx, id, ownerUserID, conversationID,
-		snapshotVersion, snapshotJSON, nil, createdAt, expiresAt, singleUse)
+	return db.CreateConversationShareWithResources(ctx, id, ownerUserID, conversationID, snapshotVersion, snapshotJSON, nil, createdAt)
 }
 
-func (db *DB) CreateConversationShareWithResources(
-	ctx context.Context, id, ownerUserID, conversationID string, snapshotVersion int,
-	snapshotJSON []byte, resources []ConversationShareResource,
-	createdAt time.Time, expiresAt *time.Time, singleUse bool,
-) (ConversationShare, error) {
-	ownerUserID = strings.TrimSpace(ownerUserID)
+func (db *DB) CreateConversationShareWithResources(ctx context.Context, id, ownerUserID, conversationID string,
+	snapshotVersion int, snapshotJSON []byte, resources []ConversationShareResource, createdAt time.Time) (ConversationShare, error) {
 	conversationID = strings.TrimSpace(conversationID)
-	createdAt = databaseTime(createdAt)
-	if expiresAt != nil {
-		normalized := databaseTime(*expiresAt)
-		expiresAt = &normalized
+	if !ValidConversationShareConversationID(conversationID) || snapshotVersion != ConversationSnapshotVersion {
+		return ConversationShare{}, errors.New("invalid conversation share snapshot identity")
 	}
-	if err := ValidateTextLength("ownerUserId", ownerUserID, 255); err != nil {
+	var metadata struct {
+		Title string `json:"title"`
+	}
+	_ = json.Unmarshal(snapshotJSON, &metadata)
+	title := strings.TrimSpace(metadata.Title)
+	if title == "" || len(title) > 255 || strings.ContainsFunc(title, unicode.IsControl) {
+		title = "历史对话分享"
+	}
+	return db.CreateShareWithResources(ctx, ConversationShare{ID: id, OwnerUserID: ownerUserID, ConversationID: conversationID,
+		Kind: "conversation", Title: title, SnapshotVersion: snapshotVersion, SnapshotJSON: snapshotJSON, CreatedAt: createdAt}, resources)
+}
+
+func (db *DB) CreateShareWithResources(ctx context.Context, share ConversationShare, resources []ConversationShareResource) (ConversationShare, error) {
+	share.OwnerUserID = strings.TrimSpace(share.OwnerUserID)
+	share.CreatedAt = databaseTime(share.CreatedAt)
+	if err := ValidateTextLength("ownerUserId", share.OwnerUserID, 255); err != nil {
 		return ConversationShare{}, err
 	}
-	if ownerUserID == "" {
-		return ConversationShare{}, errors.New("owner user id is required")
+	if share.OwnerUserID == "" || !conversationShareID.MatchString(share.ID) || share.Kind == "" || len(share.Kind) > 128 ||
+		share.Title == "" || len(share.Title) > 255 || share.SnapshotVersion < 1 || !json.Valid(share.SnapshotJSON) ||
+		(len(share.DescriptionJSON) > 0 && !json.Valid(share.DescriptionJSON)) {
+		return ConversationShare{}, errors.New("invalid share metadata")
 	}
-	if !ValidConversationShareConversationID(conversationID) {
-		return ConversationShare{}, errors.New("invalid conversation id")
-	}
-	if snapshotVersion != ConversationSnapshotVersion {
-		return ConversationShare{}, errors.New("unsupported conversation snapshot version")
-	}
-	if len(snapshotJSON) == 0 {
-		return ConversationShare{}, errors.New("conversation snapshot is required")
-	}
-	seenResources := make(map[string]struct{}, len(resources))
+	seen := make(map[string]bool)
+	paths := make(map[string]bool)
 	for _, resource := range resources {
-		if !conversationShareResourceID.MatchString(resource.ID) || resource.Name == "" ||
+		if !conversationShareResourceID.MatchString(resource.ID) || seen[resource.ID] || resource.Name == "" ||
 			len(resource.Name) > 255 || strings.ContainsAny(resource.Name, "/\\") || strings.ContainsFunc(resource.Name, unicode.IsControl) ||
-			!conversationShareResourceMIME.MatchString(resource.MIMEType) || resource.MIMEType != strings.ToLower(resource.MIMEType) || resource.Size < 0 ||
-			len(resource.MIMEType) > 100 ||
-			!conversationShareResourceHash.MatchString(resource.SHA256) {
-			return ConversationShare{}, errors.New("invalid conversation share resource")
+			!conversationShareResourceMIME.MatchString(resource.MIMEType) || resource.MIMEType != strings.ToLower(resource.MIMEType) || len(resource.MIMEType) > 100 ||
+			resource.Size < 0 || resource.Size > (1<<53)-1 || !conversationShareResourceHash.MatchString(resource.SHA256) {
+			return ConversationShare{}, errors.New("invalid share resource")
 		}
-		if _, exists := seenResources[resource.ID]; exists {
-			return ConversationShare{}, errors.New("duplicate conversation share resource")
+		if resource.Path != "" && (!sharecontract.ValidResourcePath(resource.Path) || paths[resource.Path]) {
+			return ConversationShare{}, errors.New("invalid share resource path")
 		}
-		seenResources[resource.ID] = struct{}{}
-	}
-	if expiresAt != nil && !expiresAt.After(createdAt) {
-		return ConversationShare{}, errors.New("expiration must be after creation")
-	}
-	if singleUse && expiresAt != nil {
-		return ConversationShare{}, errors.New("single-use share cannot have an expiration")
-	}
-	id = strings.TrimSpace(id)
-	if !conversationShareID.MatchString(id) {
-		return ConversationShare{}, errors.New("invalid conversation share id")
-	}
-	share := ConversationShare{
-		ID:              id,
-		OwnerUserID:     ownerUserID,
-		ConversationID:  conversationID,
-		SnapshotVersion: snapshotVersion,
-		SnapshotJSON:    snapshotJSON,
-		CreatedAt:       createdAt,
-		ExpiresAt:       expiresAt,
-		SingleUse:       singleUse,
+		seen[resource.ID] = true
+		if resource.Path != "" {
+			paths[resource.Path] = true
+		}
 	}
 	tx, err := db.beginWriteTx(ctx)
 	if err != nil {
 		return ConversationShare{}, err
 	}
 	defer tx.Rollback()
-	_, err = tx.ExecContext(ctx, `
-		INSERT INTO conversation_shares (
-			id, owner_user_id, conversation_id, snapshot_version, snapshot_json,
-			created_at, expires_at, single_use
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-	`, share.ID, share.OwnerUserID, share.ConversationID, share.SnapshotVersion, share.SnapshotJSON, share.CreatedAt, share.ExpiresAt, share.SingleUse)
+	_, err = tx.ExecContext(ctx, `INSERT INTO conversation_shares
+  (id,owner_user_id,conversation_id,kind,title,description_json,snapshot_version,snapshot_json,created_at)
+  VALUES (?,?,?,?,?,?,?,?,?)`, share.ID, share.OwnerUserID, nullableString(share.ConversationID), share.Kind, share.Title,
+		share.DescriptionJSON, share.SnapshotVersion, share.SnapshotJSON, share.CreatedAt)
 	if err != nil {
 		return ConversationShare{}, err
 	}
 	for _, resource := range resources {
 		_, err = tx.ExecContext(ctx, `INSERT INTO conversation_share_resources
-			(share_id, resource_id, name, mime_type, size_bytes, sha256)
-			VALUES (?, ?, ?, ?, ?, ?)`,
-			share.ID, resource.ID, resource.Name, resource.MIMEType,
-			resource.Size, resource.SHA256)
+   (share_id,resource_id,name,mime_type,size_bytes,sha256,logical_path) VALUES (?,?,?,?,?,?,?)`,
+			share.ID, resource.ID, resource.Name, resource.MIMEType, resource.Size, resource.SHA256, nullableString(resource.Path))
 		if err != nil {
 			return ConversationShare{}, err
 		}
@@ -153,26 +129,16 @@ func (db *DB) CreateConversationShareWithResources(
 	return share, nil
 }
 
-func (db *DB) ListConversationShares(
-	ctx context.Context,
-	ownerUserID string,
-	now time.Time,
-) ([]ConversationShare, error) {
+func (db *DB) ListShares(ctx context.Context, ownerUserID string) ([]ConversationShare, error) {
 	ownerUserID = strings.TrimSpace(ownerUserID)
 	if ownerUserID == "" {
 		return nil, errors.New("owner user id is required")
 	}
-	rows, err := db.sql.QueryContext(ctx, `
-		SELECT shares.id, shares.owner_user_id, shares.conversation_id,
-		       shares.snapshot_version, shares.created_at, shares.expires_at,
-		       access.last_accessed_at, shares.single_use
-		FROM conversation_shares AS shares
-		LEFT JOIN conversation_share_access AS access ON access.share_id = shares.id
-		WHERE shares.owner_user_id = ?
-		  AND shares.revoked_at IS NULL
-		  AND (shares.expires_at IS NULL OR shares.expires_at > ?)
-		ORDER BY shares.created_at DESC, shares.id DESC
-	`, ownerUserID, databaseTime(now))
+	// No snapshot or description BLOB is read for management lists.
+	rows, err := db.sql.QueryContext(ctx, `SELECT s.id,s.owner_user_id,COALESCE(s.conversation_id,''),s.kind,s.title,
+  s.snapshot_version,s.created_at,a.last_accessed_at FROM conversation_shares AS s
+  LEFT JOIN conversation_share_access AS a ON a.share_id=s.id
+  WHERE s.owner_user_id=? AND s.revoked_at IS NULL ORDER BY s.created_at DESC,s.id DESC`, ownerUserID)
 	if err != nil {
 		return nil, err
 	}
@@ -180,122 +146,103 @@ func (db *DB) ListConversationShares(
 	shares := make([]ConversationShare, 0)
 	for rows.Next() {
 		var share ConversationShare
-		if err := rows.Scan(
-			&share.ID,
-			&share.OwnerUserID,
-			&share.ConversationID,
-			&share.SnapshotVersion,
-			&share.CreatedAt,
-			&share.ExpiresAt,
-			&share.LastAccessedAt,
-			&share.SingleUse,
-		); err != nil {
+		if err := rows.Scan(&share.ID, &share.OwnerUserID, &share.ConversationID, &share.Kind, &share.Title,
+			&share.SnapshotVersion, &share.CreatedAt, &share.LastAccessedAt); err != nil {
 			return nil, err
 		}
 		shares = append(shares, share)
 	}
-	if err := rows.Err(); err != nil {
+	return shares, rows.Err()
+}
+
+func (db *DB) ListConversationShares(ctx context.Context, ownerUserID string) ([]ConversationShare, error) {
+	shares, err := db.ListShares(ctx, ownerUserID)
+	if err != nil {
 		return nil, err
 	}
-	return shares, nil
+	conversations := make([]ConversationShare, 0, len(shares))
+	for _, share := range shares {
+		if share.Kind == "conversation" && share.ConversationID != "" {
+			conversations = append(conversations, share)
+		}
+	}
+	return conversations, nil
 }
 
-// AccessPublicConversationShare atomically claims a single-use share.
-// A matching session hash can continue reading the page during its 30-minute window.
-func (db *DB) AccessPublicConversationShare(ctx context.Context, id string, now time.Time, presentedHash, newHash []byte) (ConversationShare, bool, error) {
-	tx, err := db.beginWriteTx(ctx)
-	if err != nil {
-		return ConversationShare{}, false, err
-	}
-	defer tx.Rollback()
+func (db *DB) AccessPublicConversationShare(ctx context.Context, id string) (ConversationShare, error) {
 	var share ConversationShare
-	err = tx.QueryRowContext(ctx, `SELECT id, snapshot_version, snapshot_json, single_use
-		FROM conversation_shares WHERE id = ? AND snapshot_version = 1
-		AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at > ?)`+db.forUpdateClause(),
-		id, databaseTime(now)).Scan(&share.ID, &share.SnapshotVersion, &share.SnapshotJSON, &share.SingleUse)
-	if errors.Is(err, sql.ErrNoRows) {
-		return ConversationShare{}, false, ErrNotFound
-	}
-	if err != nil {
-		return ConversationShare{}, false, err
-	}
-	if !share.SingleUse {
-		if err := tx.Commit(); err != nil {
-			return ConversationShare{}, false, err
-		}
-		return share, false, nil
-	}
-	var storedHash []byte
-	var expiresAt time.Time
-	err = tx.QueryRowContext(ctx, `SELECT token_hash, expires_at FROM conversation_share_claims WHERE share_id = ?`+db.forUpdateClause(), id).
-		Scan(&storedHash, &expiresAt)
-	if errors.Is(err, sql.ErrNoRows) {
-		if len(newHash) != 32 {
-			return ConversationShare{}, false, ErrNotFound
-		}
-		_, err = tx.ExecContext(ctx, `INSERT INTO conversation_share_claims
-			(share_id, token_hash, expires_at) VALUES (?, ?, ?)`,
-			id, newHash, databaseTime(now.Add(ConversationShareSessionDuration)))
-		if err != nil {
-			return ConversationShare{}, false, err
-		}
-		if err := tx.Commit(); err != nil {
-			return ConversationShare{}, false, err
-		}
-		return share, true, nil
-	}
-	if err != nil {
-		return ConversationShare{}, false, err
-	}
-	if len(presentedHash) != 32 || !expiresAt.After(now) ||
-		subtle.ConstantTimeCompare(storedHash, presentedHash) != 1 {
-		return ConversationShare{}, false, ErrNotFound
-	}
-	if err := tx.Commit(); err != nil {
-		return ConversationShare{}, false, err
-	}
-	return share, false, nil
-}
-
-func (db *DB) PeekPublicConversationShare(ctx context.Context, id string, now time.Time) (ConversationShare, error) {
-	var share ConversationShare
-	err := db.sql.QueryRowContext(ctx, `SELECT id, snapshot_version, single_use
-		FROM conversation_shares WHERE id = ? AND revoked_at IS NULL
-		AND snapshot_version = 1 AND (expires_at IS NULL OR expires_at > ?)`,
-		id, databaseTime(now)).Scan(&share.ID, &share.SnapshotVersion, &share.SingleUse)
+	err := db.sql.QueryRowContext(ctx, `SELECT id,COALESCE(conversation_id,''),kind,title,description_json,snapshot_version,snapshot_json
+  FROM conversation_shares WHERE id=? AND revoked_at IS NULL`, id).
+		Scan(&share.ID, &share.ConversationID, &share.Kind, &share.Title, &share.DescriptionJSON, &share.SnapshotVersion, &share.SnapshotJSON)
 	if errors.Is(err, sql.ErrNoRows) {
 		return ConversationShare{}, ErrNotFound
 	}
 	return share, err
 }
 
-func (db *DB) ReadPublicConversationShareResource(ctx context.Context, shareID, resourceID string,
-	now time.Time, presentedHash []byte) (ConversationShareResource, error) {
+func (db *DB) PeekPublicConversationShare(ctx context.Context, id string) (ConversationShare, error) {
+	var share ConversationShare
+	err := db.sql.QueryRowContext(ctx, `SELECT id,kind,title,snapshot_version FROM conversation_shares
+  WHERE id=? AND revoked_at IS NULL`, id).Scan(&share.ID, &share.Kind, &share.Title, &share.SnapshotVersion)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ConversationShare{}, ErrNotFound
+	}
+	return share, err
+}
+
+// Description and resource metadata reads never load the frozen content BLOB.
+func (db *DB) DescribePublicShare(ctx context.Context, id string) (ConversationShare, error) {
+	var share ConversationShare
+	err := db.sql.QueryRowContext(ctx, `SELECT id,owner_user_id,COALESCE(conversation_id,''),kind,title,description_json,snapshot_version
+		FROM conversation_shares WHERE id=? AND revoked_at IS NULL`, id).
+		Scan(&share.ID, &share.OwnerUserID, &share.ConversationID, &share.Kind, &share.Title, &share.DescriptionJSON, &share.SnapshotVersion)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ConversationShare{}, ErrNotFound
+	}
+	return share, err
+}
+
+func (db *DB) ListPublicShareResources(ctx context.Context, id string) ([]ConversationShareResource, error) {
+	rows, err := db.sql.QueryContext(ctx, `SELECT r.share_id,r.resource_id,r.name,r.mime_type,r.size_bytes,r.sha256,COALESCE(r.logical_path,'')
+		FROM conversation_share_resources AS r JOIN conversation_shares AS s ON s.id=r.share_id
+		WHERE r.share_id=? AND s.revoked_at IS NULL ORDER BY r.resource_id`, id)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	resources := make([]ConversationShareResource, 0)
+	for rows.Next() {
+		var resource ConversationShareResource
+		if err := rows.Scan(&resource.ShareID, &resource.ID, &resource.Name, &resource.MIMEType, &resource.Size, &resource.SHA256, &resource.Path); err != nil {
+			return nil, err
+		}
+		resources = append(resources, resource)
+	}
+	return resources, rows.Err()
+}
+
+func (db *DB) ReadPublicConversationShareResource(ctx context.Context, shareID, resourceID string) (ConversationShareResource, error) {
 	var resource ConversationShareResource
-	var singleUse bool
-	var storedHash []byte
-	var sessionExpiry *time.Time
-	err := db.sql.QueryRowContext(ctx, `SELECT resource.share_id, resource.resource_id, resource.name, resource.mime_type,
-		resource.size_bytes, resource.sha256, s.single_use, c.token_hash, c.expires_at
-		FROM conversation_share_resources AS resource
-		JOIN conversation_shares AS s ON s.id = resource.share_id
-		LEFT JOIN conversation_share_claims AS c ON c.share_id = s.id
-		WHERE resource.share_id = ? AND resource.resource_id = ? AND s.snapshot_version = 1
-		AND s.revoked_at IS NULL AND (s.expires_at IS NULL OR s.expires_at > ?)`,
-		shareID, resourceID, databaseTime(now)).
-		Scan(&resource.ShareID, &resource.ID, &resource.Name, &resource.MIMEType,
-			&resource.Size, &resource.SHA256, &singleUse, &storedHash, &sessionExpiry)
+	err := db.sql.QueryRowContext(ctx, `SELECT r.share_id,r.resource_id,r.name,r.mime_type,r.size_bytes,r.sha256,COALESCE(r.logical_path,'')
+  FROM conversation_share_resources AS r JOIN conversation_shares AS s ON s.id=r.share_id
+  WHERE r.share_id=? AND r.resource_id=? AND s.revoked_at IS NULL`, shareID, resourceID).
+		Scan(&resource.ShareID, &resource.ID, &resource.Name, &resource.MIMEType, &resource.Size, &resource.SHA256, &resource.Path)
 	if errors.Is(err, sql.ErrNoRows) {
 		return ConversationShareResource{}, ErrNotFound
 	}
-	if err != nil {
-		return ConversationShareResource{}, err
-	}
-	if singleUse && (len(presentedHash) != 32 || sessionExpiry == nil ||
-		!sessionExpiry.After(now) || subtle.ConstantTimeCompare(storedHash, presentedHash) != 1) {
+	return resource, err
+}
+
+func (db *DB) ReadPublicShareResourceByPath(ctx context.Context, shareID, path string) (ConversationShareResource, error) {
+	var resource ConversationShareResource
+	err := db.sql.QueryRowContext(ctx, `SELECT r.share_id,r.resource_id,r.name,r.mime_type,r.size_bytes,r.sha256,r.logical_path
+		FROM conversation_share_resources AS r JOIN conversation_shares AS s ON s.id=r.share_id
+		WHERE r.share_id=? AND r.logical_path=? AND s.revoked_at IS NULL`, shareID, path).
+		Scan(&resource.ShareID, &resource.ID, &resource.Name, &resource.MIMEType, &resource.Size, &resource.SHA256, &resource.Path)
+	if errors.Is(err, sql.ErrNoRows) {
 		return ConversationShareResource{}, ErrNotFound
 	}
-	return resource, nil
+	return resource, err
 }
 
 func (db *DB) RevokeConversationShare(ctx context.Context, id, ownerUserID string, revokedAt time.Time) error {
@@ -334,14 +281,9 @@ func (db *DB) RecordConversationShareAccess(ctx context.Context, id string, acce
 	return err
 }
 
-func (db *DB) ConversationShareResourceCleanupIDs(ctx context.Context, now time.Time) ([]string, error) {
-	rows, err := db.sql.QueryContext(ctx, `SELECT DISTINCT s.id
-		FROM conversation_shares AS s
-		JOIN conversation_share_resources AS resource ON resource.share_id = s.id
-		LEFT JOIN conversation_share_claims AS claim ON claim.share_id = s.id
-		WHERE s.revoked_at IS NOT NULL OR (s.expires_at IS NOT NULL AND s.expires_at <= ?)
-		   OR (s.single_use = 1 AND claim.expires_at IS NOT NULL AND claim.expires_at <= ?)`,
-		databaseTime(now), databaseTime(now))
+func (db *DB) ConversationShareResourceCleanupIDs(ctx context.Context) ([]string, error) {
+	rows, err := db.sql.QueryContext(ctx, `SELECT DISTINCT s.id FROM conversation_shares AS s
+  JOIN conversation_share_resources AS r ON r.share_id=s.id WHERE s.revoked_at IS NOT NULL`)
 	if err != nil {
 		return nil, err
 	}

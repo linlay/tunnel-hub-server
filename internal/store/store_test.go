@@ -5,7 +5,6 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
-	"time"
 
 	"example.invalid/tunnel-hub-server/internal/testutil/mysqltest"
 )
@@ -77,6 +76,23 @@ func TestDesktopWebAppRouteUsesDeviceJoinWithoutToken(t *testing.T) {
 	if joined.Device.DeviceKey != device.Device.DeviceKey || joined.Route.ID != created.Route.ID {
 		t.Fatalf("joined route = %+v", joined)
 	}
+	byID, err := db.GetActiveDesktopWebAppRouteByID(t.Context(), created.WebApp.ID)
+	if err != nil || byID.Device.OwnerUserID != "user-1" || byID.Route.ID != created.Route.ID {
+		t.Fatal("binding lookup lost ownership", err)
+	}
+	owned, err := db.GetActiveOwnedDesktopWebAppRoute(t.Context(), "user-1", "mac-lan", "notes")
+	if err != nil || owned.WebApp.ID != created.WebApp.ID {
+		t.Fatal("publication read changed identity", err)
+	}
+	if _, err := db.GetActiveOwnedDesktopWebAppRoute(t.Context(), "another-user", "mac-lan", "notes"); err != ErrNotFound {
+		t.Fatal("foreign publication was visible", err)
+	}
+	if _, err := db.sql.ExecContext(t.Context(), `DELETE FROM desktop_webapps WHERE id=?`, created.WebApp.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.GetActiveDesktopWebAppRouteByID(t.Context(), created.WebApp.ID); err != ErrNotFound {
+		t.Fatal("removed publication remained readable", err)
+	}
 }
 
 func TestDesktopSessionsAndTrafficUseDeviceIdentity(t *testing.T) {
@@ -98,20 +114,25 @@ func TestDesktopSessionsAndTrafficUseDeviceIdentity(t *testing.T) {
 	}
 }
 
-func TestConversationShareSchemaRejectsSingleUseWithExpiration(t *testing.T) {
-	assertConversationShareSingleUseExpirationConstraint(t, openTestDB(t), "share_invalid_fresh_once")
-}
-
-func assertConversationShareSingleUseExpirationConstraint(t *testing.T, db *DB, id string) {
-	t.Helper()
-	now := time.Date(2026, time.August, 17, 1, 2, 3, 0, time.UTC)
-	if _, err := db.sql.Exec(`
-		INSERT INTO conversation_shares (
-			id, owner_user_id, conversation_id, snapshot_version,
-			snapshot_json, created_at, expires_at, single_use
-		) VALUES (?, 'owner-a', 'chat-a', 1, '{"version":1}', ?, ?, 1)
-	`, id, now, now.Add(24*time.Hour)); err == nil {
-		t.Fatal("database accepted a single-use share with an expiration")
+func TestShareSchemaHasNoRetiredLifecycleFields(t *testing.T) {
+	db := openTestDB(t)
+	var query string
+	if db.database == databaseSQLite {
+		query = `SELECT COUNT(*) FROM pragma_table_info('conversation_shares') WHERE name IN ('expires_at','single_use')`
+	} else {
+		query = `SELECT COUNT(*) FROM information_schema.columns WHERE table_schema=DATABASE() AND table_name='conversation_shares' AND column_name IN ('expires_at','single_use')`
+	}
+	var count int
+	if err := db.sql.QueryRow(query).Scan(&count); err != nil || count != 0 {
+		t.Fatal("retired share fields remain", count, err)
+	}
+	if db.database == databaseSQLite {
+		query = `SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='conversation_share_claims'`
+	} else {
+		query = `SELECT COUNT(*) FROM information_schema.tables WHERE table_schema=DATABASE() AND table_name='conversation_share_claims'`
+	}
+	if err := db.sql.QueryRow(query).Scan(&count); err != nil || count != 0 {
+		t.Fatal("claim table remains", count, err)
 	}
 }
 

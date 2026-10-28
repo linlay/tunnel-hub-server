@@ -88,7 +88,7 @@ func TestSQLiteSchemaLifecycleAndConnectionSettings(t *testing.T) {
 		`PRAGMA foreign_keys`: "1",
 		`PRAGMA journal_mode`: "wal",
 		`PRAGMA busy_timeout`: "5000",
-		`PRAGMA user_version`: "4",
+		`PRAGMA user_version`: "5",
 	} {
 		var got string
 		if err := db.sql.QueryRow(query).Scan(&got); err != nil || !strings.EqualFold(got, want) {
@@ -140,10 +140,10 @@ func TestSQLiteRejectsUnsupportedSchemas(t *testing.T) {
 			t.Fatal(err)
 		}
 		t.Cleanup(func() { _ = db.Close() })
-		if _, err := db.sql.Exec(`PRAGMA user_version = 5`); err != nil {
+		if _, err := db.sql.Exec(`PRAGMA user_version = 6`); err != nil {
 			t.Fatal(err)
 		}
-		if err := db.Migrate(context.Background()); err == nil || !strings.Contains(err.Error(), "version 5") {
+		if err := db.Migrate(context.Background()); err == nil || !strings.Contains(err.Error(), "version 6") {
 			t.Fatalf("error = %v", err)
 		}
 	})
@@ -202,7 +202,7 @@ func TestSQLiteDuplicateKeyClassification(t *testing.T) {
 	if !db.isDuplicateKey(err) || !db.isDuplicateKey(fmt.Errorf("wrapped: %w", err)) {
 		t.Fatalf("unique error not recognized: %v", err)
 	}
-	if _, err := db.sql.Exec(`INSERT INTO conversation_shares (id, owner_user_id, conversation_id, snapshot_version, snapshot_json, created_at, expires_at, single_use) VALUES ('bad', 'owner', 'chat', 1, '{}', ?, ?, 1)`, time.Now(), time.Now().Add(time.Hour)); err == nil || db.isDuplicateKey(err) {
+	if _, err := db.sql.Exec(`INSERT INTO conversation_shares (id, owner_user_id, conversation_id, snapshot_version, snapshot_json, created_at) VALUES ('bad', NULL, 'chat', 1, '{}', ?)`, time.Now()); err == nil || db.isDuplicateKey(err) {
 		t.Fatalf("check constraint classification = %v", err)
 	}
 }
@@ -232,7 +232,7 @@ func TestSQLiteConcurrentWritesPreserveInvariants(t *testing.T) {
 	if created != 1 {
 		t.Fatalf("created = %d", created)
 	}
-	share, err := db.CreateConversationShare(ctx, "owner", "chat", 1, []byte(`{"version":1}`), time.Now(), nil, true)
+	share, err := db.CreateConversationShare(ctx, "owner", "chat", 1, []byte(`{"version":1}`), time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -242,8 +242,7 @@ func TestSQLiteConcurrentWritesPreserveInvariants(t *testing.T) {
 		acquireWait.Add(1)
 		go func(database *DB, index int) {
 			defer acquireWait.Done()
-			digest := sha256.Sum256([]byte(fmt.Sprintf("browser-%d", index)))
-			_, _, err := database.AccessPublicConversationShare(ctx, share.ID, time.Now(), nil, digest[:])
+			_, err := database.AccessPublicConversationShare(ctx, share.ID)
 			acquireResults <- err
 		}(databases[i%len(databases)], i)
 	}
@@ -259,7 +258,7 @@ func TestSQLiteConcurrentWritesPreserveInvariants(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if acquired != 1 || missing != workers-1 {
+	if acquired != workers || missing != 0 {
 		t.Fatalf("acquired=%d missing=%d", acquired, missing)
 	}
 
@@ -364,7 +363,7 @@ func TestSQLiteConversationAccessTimeDoesNotRegress(t *testing.T) {
 	db := openSQLiteTestDB(t)
 	ctx := context.Background()
 	now := time.Date(2026, 9, 17, 1, 2, 3, 123456000, time.UTC)
-	share, err := db.CreateConversationShare(ctx, "owner", "chat", 1, []byte(`{"version":1}`), now, nil, false)
+	share, err := db.CreateConversationShare(ctx, "owner", "chat", 1, []byte(`{"version":1}`), now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -374,7 +373,7 @@ func TestSQLiteConversationAccessTimeDoesNotRegress(t *testing.T) {
 	if err := db.RecordConversationShareAccess(ctx, share.ID, now); err != nil {
 		t.Fatal(err)
 	}
-	listed, err := db.ListConversationShares(ctx, "owner", now)
+	listed, err := db.ListConversationShares(ctx, "owner")
 	if err != nil || len(listed) != 1 || listed[0].LastAccessedAt == nil || !listed[0].LastAccessedAt.Equal(now.Add(time.Minute)) {
 		t.Fatalf("shares = %+v, error = %v", listed, err)
 	}

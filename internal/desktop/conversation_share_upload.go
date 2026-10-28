@@ -14,6 +14,7 @@ import (
 	"unicode/utf8"
 
 	"example.invalid/tunnel-hub-server/internal/config"
+	"example.invalid/tunnel-hub-server/internal/sharecontract"
 	"example.invalid/tunnel-hub-server/internal/sharefiles"
 	"example.invalid/tunnel-hub-server/internal/store"
 )
@@ -32,9 +33,30 @@ type conversationSnapshotResource struct {
 	SourceRef string `json:"sourceRef"`
 }
 
-// decodeConversationShare keeps only the bounded JSON snapshot in memory.
-// Resource bodies are streamed into a request-scoped staging directory.
-func decodeConversationShare(w http.ResponseWriter, r *http.Request, stage *sharefiles.Stage, limits config.ConversationShareLimits) (snapshot []byte, resources []store.ConversationShareResource, err error) {
+// The old decoder owns sourceRef/Snapshot validation; the streaming uploader
+// underneath is shared with v2. Neither route buffers resource bodies in memory.
+func decodeConversationShare(w http.ResponseWriter, r *http.Request, stage *sharefiles.Stage, limits config.ConversationShareLimits) ([]byte, []store.ConversationShareResource, error) {
+	return decodeShareUpload(w, r, stage, limits, "snapshot", "attachment:", func(data []byte) ([]sharecontract.Resource, error) {
+		descriptors, err := parseConversationSnapshotResources(data)
+		if err != nil {
+			return nil, err
+		}
+		var snapshot struct {
+			Attachments []conversationSnapshotResource `json:"attachments"`
+		}
+		if err := json.Unmarshal(data, &snapshot); err != nil {
+			return nil, errors.New("invalid conversation snapshot")
+		}
+		ordered := make([]sharecontract.Resource, 0, len(descriptors))
+		for _, item := range snapshot.Attachments {
+			ordered = append(ordered, sharecontract.Resource{ID: item.ID, Name: item.Name, MIMEType: item.MIMEType, Size: item.Size, SHA256: item.SHA256})
+		}
+		return ordered, nil
+	})
+}
+
+func decodeShareUpload(w http.ResponseWriter, r *http.Request, stage *sharefiles.Stage, limits config.ConversationShareLimits,
+	manifestName, resourcePrefix string, decodeResources func([]byte) ([]sharecontract.Resource, error)) (manifest []byte, resources []store.ConversationShareResource, err error) {
 	mediaType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
 	if err != nil || mediaType != "multipart/form-data" || stage == nil {
 		return nil, nil, errors.New("Content-Type must be multipart/form-data")
@@ -48,52 +70,64 @@ func decodeConversationShare(w http.ResponseWriter, r *http.Request, stage *shar
 	}()
 	reader, err := r.MultipartReader()
 	if err != nil {
-		return nil, nil, fmt.Errorf("invalid conversation share multipart request: %w", err)
+		return nil, nil, errors.New("invalid share multipart request")
 	}
-	descriptors := make(map[string]conversationSnapshotResource)
+	var ordered []sharecontract.Resource
+	descriptors := make(map[string]sharecontract.Resource)
 	uploaded := make(map[string]store.ConversationShareResource)
 	var total int64
 	for {
-		part, err := reader.NextPart()
-		if err == io.EOF {
+		part, readErr := reader.NextPart()
+		if readErr == io.EOF {
 			break
 		}
-		if err != nil {
-			return nil, nil, fmt.Errorf("invalid conversation share multipart request: %w", err)
+		if readErr != nil {
+			return nil, nil, fmt.Errorf("invalid share multipart request: %w", readErr)
 		}
 		name := part.FormName()
-		if name == "snapshot" {
-			if snapshot != nil || len(uploaded) != 0 {
-				return nil, nil, errors.New("snapshot must be the first and only snapshot part")
+		if name == manifestName {
+			if manifest != nil || len(uploaded) != 0 {
+				return nil, nil, errors.New("manifest must be the first and only manifest part")
 			}
-			snapshot, err = io.ReadAll(io.LimitReader(part, limits.MaxSnapshotBytes+1))
+			if manifestName == sharecontract.ManifestPart {
+				contentType, _, mimeErr := mime.ParseMediaType(part.Header.Get("Content-Type"))
+				if mimeErr != nil || contentType != "application/json" {
+					return nil, nil, errors.New("share manifest must be application/json")
+				}
+			}
+			manifest, err = io.ReadAll(io.LimitReader(part, limits.MaxSnapshotBytes+1))
 			if err != nil {
 				return nil, nil, err
 			}
-			if int64(len(snapshot)) > limits.MaxSnapshotBytes {
+			if int64(len(manifest)) > limits.MaxSnapshotBytes {
 				return nil, nil, &conversationShareSizeError{"snapshot_too_large", limits.MaxSnapshotBytes}
 			}
-			descriptors, err = parseConversationSnapshotResources(snapshot)
+			ordered, err = decodeResources(manifest)
 			if err != nil {
 				return nil, nil, err
+			}
+			for _, item := range ordered {
+				if descriptors[item.ID].ID != "" {
+					return nil, nil, errors.New("duplicate share resource")
+				}
+				descriptors[item.ID] = item
 			}
 			continue
 		}
-		if !strings.HasPrefix(name, "attachment:") || snapshot == nil {
-			return nil, nil, errors.New("unknown conversation share part")
+		if !strings.HasPrefix(name, resourcePrefix) || manifest == nil {
+			return nil, nil, errors.New("unknown share part")
 		}
-		id := strings.TrimPrefix(name, "attachment:")
+		id := strings.TrimPrefix(name, resourcePrefix)
 		descriptor, ok := descriptors[id]
 		if !ok || uploaded[id].ID != "" || part.FileName() != descriptor.Name {
-			return nil, nil, errors.New("invalid conversation resource part")
+			return nil, nil, errors.New("invalid share resource part")
 		}
 		partMIME, _, mimeErr := mime.ParseMediaType(part.Header.Get("Content-Type"))
 		if mimeErr != nil || !strings.EqualFold(partMIME, descriptor.MIMEType) {
-			return nil, nil, errors.New("conversation resource MIME type mismatch")
+			return nil, nil, errors.New("share resource MIME type mismatch")
 		}
-		remaining := limits.MaxResourceBytes - total
 		source := &conversationPartReader{Reader: part}
-		written, writeErr := stage.Write(id, source, remaining)
+		written, writeErr := stage.Write(id, source, limits.MaxResourceBytes-total)
 		if writeErr != nil {
 			if errors.Is(writeErr, sharefiles.ErrTooLarge) {
 				return nil, nil, &conversationShareSizeError{"resources_too_large", limits.MaxResourceBytes}
@@ -104,32 +138,22 @@ func decodeConversationShare(w http.ResponseWriter, r *http.Request, stage *shar
 			return nil, nil, fmt.Errorf("%w: %v", errConversationShareResourceStorage, writeErr)
 		}
 		total += written.Size
-		if written.Size != descriptor.Size || !strings.EqualFold(written.SHA256, descriptor.SHA256) {
-			return nil, nil, errors.New("conversation resource integrity mismatch")
+		if written.Size != descriptor.Size || written.SHA256 != descriptor.SHA256 {
+			return nil, nil, errors.New("share resource integrity mismatch")
 		}
-		uploaded[id] = store.ConversationShareResource{
-			ID: id, Name: descriptor.Name, MIMEType: descriptor.MIMEType,
-			Size: written.Size, SHA256: strings.ToLower(written.SHA256),
-		}
+		uploaded[id] = store.ConversationShareResource{ID: id, Name: descriptor.Name, MIMEType: descriptor.MIMEType, Size: written.Size, SHA256: written.SHA256, Path: descriptor.Path}
 	}
-	// Apply the same request bound to any multipart epilogue.
 	if _, err := io.Copy(io.Discard, r.Body); err != nil {
 		return nil, nil, err
 	}
-	if len(snapshot) == 0 || len(uploaded) != len(descriptors) {
-		return nil, nil, errors.New("missing conversation resource")
+	if len(manifest) == 0 || len(uploaded) != len(descriptors) {
+		return nil, nil, errors.New("missing share resource")
 	}
-	resources = make([]store.ConversationShareResource, 0, len(descriptors))
-	var envelope struct {
-		Attachments []conversationSnapshotResource `json:"attachments"`
+	resources = make([]store.ConversationShareResource, 0, len(ordered))
+	for _, item := range ordered {
+		resources = append(resources, uploaded[item.ID])
 	}
-	if err := json.Unmarshal(snapshot, &envelope); err != nil {
-		return nil, nil, errors.New("invalid conversation snapshot")
-	}
-	for _, descriptor := range envelope.Attachments {
-		resources = append(resources, uploaded[descriptor.ID])
-	}
-	return snapshot, resources, nil
+	return manifest, resources, nil
 }
 
 func parseConversationSnapshotResources(snapshot []byte) (map[string]conversationSnapshotResource, error) {

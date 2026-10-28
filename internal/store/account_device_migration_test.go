@@ -18,8 +18,8 @@ func TestSQLiteV3CopyMigrationPreservesDevicesSharesAndResources(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { old.Close() })
-	legacy := strings.Replace(sqliteSchema, "\trevoked_at TIMESTAMP,\n\tUNIQUE(owner_user_id, display_device_id)", "\tUNIQUE(owner_user_id, display_device_id)", 1)
-	if legacy == sqliteSchema {
+	legacy := strings.Replace(legacySQLiteSchema(t), "\trevoked_at TIMESTAMP,\n\tUNIQUE(owner_user_id, display_device_id)", "\tUNIQUE(owner_user_id, display_device_id)", 1)
+	if legacy == legacySQLiteSchema(t) {
 		t.Fatal("legacy Desktop schema was not constructed")
 	}
 	for _, statement := range strings.Split(legacy, ";") {
@@ -79,7 +79,7 @@ func TestSQLiteV3CopyMigrationPreservesDevicesSharesAndResources(t *testing.T) {
 		t.Fatal("attachment changed", err)
 	}
 	var version int
-	if err := copyDB.sql.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil || version != 4 {
+	if err := copyDB.sql.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil || version != sqliteSchemaVersion {
 		t.Fatal("copy migration version", version, err)
 	}
 	if err := old.sql.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil || version != 3 {

@@ -1,0 +1,138 @@
+{
+  "conversation": {
+    "protocolVersion": 1,
+    "kind": "conversation",
+    "title": "Frozen conversation",
+    "source": {
+      "module": "conversation",
+      "id": "chat_1"
+    },
+    "content": {
+      "version": 1,
+      "data": {
+        "version": 1,
+        "title": "发布计划",
+        "locale": "zh-CN",
+        "createdAt": 1786928523000,
+        "capturedAt": 1786928523000,
+        "turns": [
+          {
+            "runId": "run-1",
+            "queryAt": 1786928523000,
+            "startedAt": 1786928523000,
+            "endedAt": 1786928523000,
+            "outcome": "completed",
+            "assistant": {
+              "name": "测试助理"
+            },
+            "nodes": [
+              {
+                "id": "query-1",
+                "kind": "message",
+                "role": "user",
+                "text": "检查冻结快照",
+                "at": 1786928523000,
+                "runId": "run-1"
+              },
+              {
+                "id": "answer-1",
+                "kind": "content",
+                "role": "assistant",
+                "text": "冻结内容保持可读。",
+                "at": 1786928523000,
+                "runId": "run-1"
+              }
+            ]
+          }
+        ],
+        "attachments": []
+      }
+    },
+    "resources": [],
+    "preview": {
+      "type": "builtin",
+      "viewer": "conversation"
+    }
+  },
+  "market": {
+    "protocolVersion": 1,
+    "kind": "market-resource",
+    "title": "Example connector 1.2.3",
+    "source": {
+      "module": "marketplace",
+      "id": "connector_1"
+    },
+    "content": {
+      "version": 1,
+      "data": {
+        "itemId": "connector_1",
+        "resourceVersion": "1.2.3",
+        "description": "Frozen public description"
+      }
+    },
+    "resources": [
+      {
+        "id": "0123456789abcdef01234567",
+        "name": "index.html",
+        "mimeType": "text/html",
+        "size": 65,
+        "sha256": "e12bfa9fdef9dc1f700c691fd298a4fffdd24a915f36f8db971700cc425a8c38",
+        "path": "index.html"
+      }
+    ],
+    "preview": {
+      "type": "package",
+      "entrypoint": "index.html"
+    },
+    "desktop": {
+      "receiverId": "builtin.market",
+      "contextVersion": 1,
+      "context": {
+        "itemId": "connector_1",
+        "resourceVersion": "1.2.3",
+        "resourceType": "connector",
+        "title": "Example connector 1.2.3",
+        "description": "Frozen public description"
+      }
+    }
+  },
+  "preview": {
+    "protocolVersion": 1,
+    "kind": "static-report",
+    "title": "Independent report",
+    "content": {
+      "version": 3,
+      "resourceId": "0123456789abcdef01234567"
+    },
+    "resources": [
+      {
+        "id": "0123456789abcdef01234567",
+        "name": "index.html",
+        "mimeType": "text/html",
+        "size": 65,
+        "sha256": "e12bfa9fdef9dc1f700c691fd298a4fffdd24a915f36f8db971700cc425a8c38",
+        "path": "index.html"
+      }
+    ],
+    "preview": {
+      "type": "package",
+      "entrypoint": "index.html"
+    }
+  },
+  "service": {
+    "protocolVersion": 1,
+    "kind": "webapp-service",
+    "title": "Published application",
+    "content": {
+      "version": 1,
+      "data": {
+        "description": "Frozen introduction; service stays current"
+      }
+    },
+    "resources": [],
+    "service": {
+      "type": "webapp",
+      "webAppId": "webapp_1"
+    }
+  }
+}

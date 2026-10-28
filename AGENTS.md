@@ -39,7 +39,7 @@ Relay 入口在 `cmd/relay/main.go`，启动顺序是：
 - `*.m.example.test/api/upload`: Mobile 上传入口，只从请求 Host 确定 Desktop，内部发送 `ns=ap`, `type=/api/upload`；multipart 不允许携带 `publicHost`。
 - `*.m.example.test/api/resource`: Mobile 资源入口，内部发送 `ns=ap`, `type=/api/resource` 和 `{file,pushURL}`；Desktop 通过 ticket 保护的 `/api/push/{id}` 回推文件。
 - `*-wa.example.test`: Desktop WebApp public HTTP/WebSocket。Relay 通过 WebApp route 与所属 deviceKey 打开 Desktop stream，向 Desktop 发送 `ns=wa` 的 `http.request` 或 `websocket.connect` 元数据。
-- `share.example.test`: 对话分享只读站点。公开边缘网关将 `/share/{id}` 和 `/assets/conversation-export/*` 转发到 Relay；Tunnel API origin 也暴露分享模板。Relay 从当前数据库读取 `ConversationSnapshotV1`，注入当前唯一模板后返回 HTML；一次性分享通过数据库对应的写事务、删除和提交实现原子消费。当前模板和 manifest 由 WebClient 的独立发布命令替换，历史内容寻址资产保留，并从编译期 `embed.FS` 返回。
+- `share.example.test`: 分享只读站点。公开边缘网关将 `/share/*` 和 `/assets/conversation-export/*` 转发到 Relay；Tunnel API origin 也暴露对话模板。Relay 按冻结描述提供内置对话、隔离业务预览或明确支持的动作；对话 `ConversationSnapshotV1` 继续注入当前唯一模板。所有分享仅在所有者撤销后失效，公开读取不建立领取会话。对话模板和 manifest 由 WebClient 的独立发布命令替换，历史内容寻址资产保留，并从编译期 `embed.FS` 返回。
 
 ## 4. 目录结构
 
@@ -53,6 +53,7 @@ Relay 入口在 `cmd/relay/main.go`，启动顺序是：
 - `tools/neutralcheck`: 使用外部禁用词扫描 Git 跟踪文件和待提交的新文件。
 - `internal/desktop`: Desktop device 和 Desktop WebApp 注册 API。
 - `internal/proxy`: Relay/Agent 转发实现、yamux session、active agent manager、traffic event 记录。
+- `internal/sharecontract`: 通用分享 v1 DTO、包内路径、选择参数和形态校验；不解释市场或接收方业务上下文。
 - `internal/shareassets`: 公开对话显示模板、manifest、当前 asset-set、历史内容寻址资源集与服务端渲染器；新分享页只使用当前 manifest 指向的资源集。
 - `internal/store`: MySQL/SQLite schema、连接、少量方言适配、共享 DAO 和领域模型。
 - `internal/tunnel`: 隧道协议结构、JSON frame、WebSocket frame、Host/path/upstream 工具。
@@ -73,7 +74,7 @@ Relay 入口在 `cmd/relay/main.go`，启动顺序是：
 - `desktop_sessions`: Desktop tunnel 在线历史，以 deviceKey 关联设备。
 - `events`: 管理操作和系统事件。
 - `traffic_events`: Desktop/WebApp/普通 route 的访问统计。
-- `conversation_shares`: 用户创建的 `ConversationSnapshotV1` JSON、会话关联、绝对到期时间、撤销状态和一次性标记；公开 ID 必须不可预测。所有者身份来自官网 SSO JWT，Desktop main 直接上传 Snapshot。Relay 严格校验 JSON 和版本，公开读取时用当前模板渲染；一次性记录在首次合法 GET 时原子删除。不保留 HTML 上传或旧 Header 兼容路径。
+- `conversation_shares`: 一个 shareId 独占的内容、kind、冻结标题、描述、所有者、可选旧会话关联及撤销状态；原 snapshot_json 字节只保存一份。旧非永久记录必须先撤销，再移除到期/一次性列和 claims 表；保留既有撤销时间及永久分享 ID、内容和资源。新内部模型不含退役字段；当前已发布 Desktop 的七键响应仅在 HTTP DTO 中保留 null/false 常量。不恢复 HTML 上传或旧 Platform 凭据路径。
 - `conversation_share_access`: 每条分享最近一次成功公开访问时间；热更新与 Snapshot BLOB 分表，不保存访问日志或次数。
 
 数据库只包含当前有效模型，不保留未使用的 API key 表或历史字段迁移；MySQL/SQLite 差异仅限当前 schema 所需的显式适配。
@@ -98,9 +99,12 @@ Relay 入口在 `cmd/relay/main.go`，启动顺序是：
 - `GET /api/admin/metrics`
 - `GET /api/components`
 - `POST /api/desktop/devices/register`
-- `PUT /api/desktop/devices/{deviceId}/webapps/{name}`
+- `PUT /api/desktop/devices/{deviceId}/webapps/{name}`；同路径 `GET` 只读查询当前所有者已有 active 发布及 webAppId，不注册或更新
 - `POST /api/desktop/shares`, `GET /api/desktop/shares`, `DELETE /api/desktop/shares/{shareId}`
-- `GET /share/{shareId}`
+- `POST/GET /api/desktop/v2/shares`, `GET /api/desktop/v2/shares/limits`, `DELETE /api/desktop/v2/shares/{shareId}`
+- `GET /share/{shareId}`；preview/resolve/desktop/download 行为按通用契约选择，未接入行为明确拒绝
+- `GET/HEAD /share/{shareId}/preview/{logicalPath}`：仅显式包描述下的本 ID 资源，Fetch Metadata、严格 CSP、opaque sandbox 与外层精确 frame-src 一并保留，禁止放开 same-origin/宿主 bridge 或新增裸文件旁路
+- `GET/HEAD /share/{shareId}?action=service`：只引用已核实归属的现有 WebApp 注册 ID，复验撤销/active 后跳原公网 Host；不新建代理、转发 SSO 或把撤销短链等同停止原服务
 - `GET/HEAD /assets/conversation-export/{assetSet}/{file}`
 - `POST https://<desktop>.m.example.test/api/upload`
 - `GET https://<desktop>.m.example.test/api/resource?file=<chat-relative-path>`
@@ -179,7 +183,7 @@ npm run dev
 - 使用 `database/sql` 和具体 `store.DB`，数据库差异只允许出现在连接、schema 和必要 SQL/事务分支；不引入 ORM、通用方言框架或 Repository。
 - 全新 MySQL 库由应用逐表建表；全新 SQLite 库在事务中建表并写入版本。两者采用现有显式迁移；Desktop 撤销字段升级必须保留设备、公网地址、分享及资源。
 - 使用 InnoDB、utf8mb4、区分大小写的标识符、UTC DATETIME(6)；`max_allowed_packet` 至少 64 MiB。
-- 一次性分享提交成功后才返回正文；设备/WebApp 注册和最后管理员保护必须通过数据库约束和事务保证并发语义。
+- 设备/WebApp 注册和最后管理员保护必须通过数据库约束和事务保证并发语义；分享公开读取只查同一撤销状态，不恢复领取 Cookie 或访问到期分支。
 - MySQL 测试使用 `internal/testutil/mysqltest` 创建独立随机库，不得读取生产账号或静默跳过；SQLite 测试只使用 `t.TempDir()` 下的文件。清理失败必须明确报告。
 - 保留本地历史数据库和旧 Docker 卷，不把它们当作代码清理对象。
 

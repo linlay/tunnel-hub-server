@@ -123,6 +123,9 @@ func (db *DB) migrateMySQL(ctx context.Context, resourceDir string) error {
 			return fmt.Errorf("add MySQL Desktop revocation: %w", err)
 		}
 	}
+	if err := db.migrateMySQLShareLifecycle(ctx); err != nil {
+		return fmt.Errorf("migrate share lifecycle: %w", err)
+	}
 	return db.migrateLegacyConversationShareAttachments(ctx, resourceDir)
 }
 

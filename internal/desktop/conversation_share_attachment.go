@@ -2,11 +2,14 @@ package desktop
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	stdhtml "html"
 	"io"
 	"mime"
 	"net/http"
+	"os"
 	"regexp"
 	"strconv"
 	"strings"
@@ -120,6 +123,10 @@ func writePublicConversationShareAttachmentError(w http.ResponseWriter, status i
 }
 
 func (s *Server) handleGetPublicConversationShareAttachment(w http.ResponseWriter, r *http.Request) {
+	if r.URL.RawQuery != "" {
+		writeError(w, http.StatusBadRequest, "attachment path does not accept query parameters")
+		return
+	}
 	path := strings.TrimPrefix(r.URL.Path, publicConversationSharePagePath)
 	segments := strings.Split(path, "/")
 	if len(segments) != 4 || segments[1] != "attachments" ||
@@ -133,7 +140,16 @@ func (s *Server) handleGetPublicConversationShareAttachment(w http.ResponseWrite
 		writePublicConversationShareAttachmentError(w, http.StatusNotFound)
 		return
 	}
-	resource, err := s.DB.ReadPublicConversationShareResource(r.Context(), shareID, segments[2], s.now().UTC(), conversationShareSessionHash(r, shareID))
+	peek, err := s.DB.PeekPublicConversationShare(r.Context(), shareID)
+	if err != nil || peek.Kind != "conversation" || peek.SnapshotVersion != store.ConversationSnapshotVersion {
+		writePublicConversationShareAttachmentError(w, http.StatusNotFound)
+		return
+	}
+	s.serveShareResource(w, r, shareID, segments[2], segments[3] == "preview")
+}
+
+func (s *Server) serveShareResource(w http.ResponseWriter, r *http.Request, shareID, resourceID string, preview bool) {
+	resource, err := s.DB.ReadPublicConversationShareResource(r.Context(), shareID, resourceID)
 	if err != nil {
 		if !errors.Is(err, store.ErrNotFound) {
 			s.Logger.Error("read conversation share attachment", "error", err)
@@ -141,24 +157,24 @@ func (s *Server) handleGetPublicConversationShareAttachment(w http.ResponseWrite
 		writePublicConversationShareAttachmentError(w, http.StatusNotFound)
 		return
 	}
-	if s.conversationShareResources == nil || (segments[3] == "preview" && resource.MIMEType != "text/html") {
+	if s.conversationShareResources == nil || (preview && resource.MIMEType != "text/html") {
 		writePublicConversationShareAttachmentError(w, http.StatusNotFound)
 		return
 	}
-	file, err := s.conversationShareResources.Open(shareID, resource.ID)
+	file, err := s.openVerifiedShareResource(shareID, resource)
 	if err != nil {
-		writePublicConversationShareAttachmentError(w, http.StatusNotFound)
+		status := http.StatusInternalServerError
+		if errors.Is(err, os.ErrNotExist) {
+			status = http.StatusNotFound
+		}
+		writePublicConversationShareAttachmentError(w, status)
 		return
 	}
 	defer file.Close()
-	info, err := file.Stat()
-	if err != nil || info.Size() != resource.Size {
-		writePublicConversationShareAttachmentError(w, http.StatusNotFound)
-		return
-	}
+
 	header := w.Header()
 	setPublicConversationShareHeaders(header)
-	if segments[3] == "preview" {
+	if preview {
 		header.Set("Content-Type", "text/html; charset=utf-8")
 		header.Set("Content-Security-Policy", "default-src 'none'; img-src data:; style-src 'unsafe-inline'; font-src 'none'; script-src 'none'; form-action 'none'; base-uri 'none'; frame-ancestors 'self'; sandbox")
 		header.Set("Content-Disposition", mime.FormatMediaType("inline", map[string]string{"filename": resource.Name}))
@@ -171,6 +187,7 @@ func (s *Server) handleGetPublicConversationShareAttachment(w http.ResponseWrite
 		header.Set("Content-Length", strconv.Itoa(len(body)))
 		w.WriteHeader(http.StatusOK)
 		if r.Method == http.MethodGet {
+			s.recordShareAccess(r, shareID)
 			_, _ = w.Write(body)
 		}
 		return
@@ -181,6 +198,34 @@ func (s *Server) handleGetPublicConversationShareAttachment(w http.ResponseWrite
 	header.Set("Content-Length", strconv.FormatInt(resource.Size, 10))
 	w.WriteHeader(http.StatusOK)
 	if r.Method == http.MethodGet {
+		s.recordShareAccess(r, shareID)
 		_, _ = io.CopyN(w, file, resource.Size)
 	}
+}
+
+// Use the same verified file handle for preview/download; do not re-open a
+// potentially different file after checking its hash.
+func (s *Server) openVerifiedShareResource(shareID string, resource store.ConversationShareResource) (*os.File, error) {
+	if s.conversationShareResources == nil {
+		return nil, os.ErrNotExist
+	}
+	file, err := s.conversationShareResources.Open(shareID, resource.ID)
+	if err != nil {
+		return nil, err
+	}
+	info, err := file.Stat()
+	if err != nil || info.Size() != resource.Size {
+		file.Close()
+		return nil, errors.New("share resource size mismatch")
+	}
+	digest := sha256.New()
+	if _, err := io.CopyN(digest, file, resource.Size); err != nil || hex.EncodeToString(digest.Sum(nil)) != resource.SHA256 {
+		file.Close()
+		return nil, errors.New("share resource hash mismatch")
+	}
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		file.Close()
+		return nil, err
+	}
+	return file, nil
 }

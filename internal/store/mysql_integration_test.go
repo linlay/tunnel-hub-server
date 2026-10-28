@@ -203,23 +203,24 @@ func TestMySQLLargeSnapshotAndMicrosecondTimes(t *testing.T) {
 	prefix, suffix := []byte(`{"version":1,"title":"`), []byte(`"}`)
 	snapshot := append(append(prefix, bytes.Repeat([]byte("x"), (50<<20)-len(prefix)-len(suffix))...), suffix...)
 	now := time.Date(2026, 9, 16, 12, 0, 0, 123456789, time.FixedZone("offset", 8*60*60))
-	share, err := db.CreateConversationShare(ctx, "owner", "chat", 1, snapshot, now, nil, false)
+	share, err := db.CreateConversationShare(ctx, "owner", "chat", 1, snapshot, now)
 	if err != nil {
 		t.Fatal(err)
 	}
-	found, _, err := db.AccessPublicConversationShare(ctx, share.ID, now, nil, nil)
+	found, err := db.AccessPublicConversationShare(ctx, share.ID)
 	if err != nil || !bytes.Equal(snapshot, found.SnapshotJSON) {
 		t.Fatal("large snapshot round-trip failed", err)
 	}
 	if share.CreatedAt.Nanosecond() != 123456000 || share.CreatedAt.Location() != time.UTC {
 		t.Fatal("incorrect timestamp normalization")
 	}
-	listed, err := db.ListConversationShares(ctx, "owner", now)
+	listed, err := db.ListConversationShares(ctx, "owner")
 	if err != nil || len(listed) != 1 || !listed[0].CreatedAt.Equal(share.CreatedAt) {
 		t.Fatal("timestamp round-trip failed", err)
 	}
-	if _, err := db.CreateConversationShare(ctx, "owner", "chat", 1, append(snapshot, ' '), now, nil, false); err == nil {
-		t.Fatal("oversized snapshot accepted")
+	// New-upload quotas are enforced by HTTP; historical storage must not inherit them.
+	if _, err := db.CreateConversationShare(ctx, "other-owner", "chat", 1, append(snapshot, ' '), now); err != nil {
+		t.Fatal("storage unexpectedly reapplied upload quota", err)
 	}
 	if err := db.RecordConversationShareAccess(ctx, share.ID, now.Add(time.Minute)); err != nil {
 		t.Fatal(err)
@@ -227,7 +228,7 @@ func TestMySQLLargeSnapshotAndMicrosecondTimes(t *testing.T) {
 	if err := db.RecordConversationShareAccess(ctx, share.ID, now); err != nil {
 		t.Fatal(err)
 	}
-	listed, err = db.ListConversationShares(ctx, "owner", now)
+	listed, err = db.ListConversationShares(ctx, "owner")
 	if err != nil || listed[0].LastAccessedAt == nil || !listed[0].LastAccessedAt.Equal(databaseTime(now.Add(time.Minute))) {
 		t.Fatal("access timestamp regressed", err)
 	}
@@ -247,12 +248,11 @@ func TestMySQLConversationShareResourceMetadataTransaction(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	share, err := db.CreateConversationShareWithResources(ctx, shareID, "owner", "chat", ConversationSnapshotVersion,
-		[]byte(`{"version":1}`), []ConversationShareResource{resource}, now, nil, false)
+	share, err := db.CreateConversationShareWithResources(ctx, shareID, "owner", "chat", ConversationSnapshotVersion, []byte(`{"version":1}`), []ConversationShareResource{resource}, now)
 	if err != nil {
 		t.Fatal(err)
 	}
-	stored, err := db.ReadPublicConversationShareResource(ctx, share.ID, resource.ID, now, nil)
+	stored, err := db.ReadPublicConversationShareResource(ctx, share.ID, resource.ID)
 	expected := resource
 	expected.ShareID = share.ID
 	if err != nil || stored != expected {
@@ -267,8 +267,7 @@ func TestMySQLConversationShareResourceMetadataTransaction(t *testing.T) {
 		t.Fatal(err)
 	}
 	resource.ID = "ffffffffffffffffffffffff"
-	if _, err := db.CreateConversationShareWithResources(ctx, failedID, "owner", "chat", ConversationSnapshotVersion,
-		[]byte(`{"version":1}`), []ConversationShareResource{resource}, now, nil, false); err == nil {
+	if _, err := db.CreateConversationShareWithResources(ctx, failedID, "owner", "chat", ConversationSnapshotVersion, []byte(`{"version":1}`), []ConversationShareResource{resource}, now); err == nil {
 		t.Fatal("resource metadata failure unexpectedly committed")
 	}
 	var count int
@@ -281,8 +280,7 @@ func TestMySQLLegacyConversationShareMigrationCanResumeAfterFileCommit(t *testin
 	db := openMySQLTestDB(t)
 	ctx := context.Background()
 	now := time.Date(2026, 9, 22, 0, 0, 0, 0, time.UTC)
-	share, err := db.CreateConversationShare(ctx, "owner", "chat", ConversationSnapshotVersion,
-		[]byte(`{"version":1}`), now, nil, false)
+	share, err := db.CreateConversationShare(ctx, "owner", "chat", ConversationSnapshotVersion, []byte(`{"version":1}`), now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -317,7 +315,7 @@ func TestMySQLLegacyConversationShareMigrationCanResumeAfterFileCommit(t *testin
 	if err := db.migrateLegacyConversationShareAttachments(ctx, resourceDir); err != nil {
 		t.Fatalf("rerun completed migration: %v", err)
 	}
-	resource, err := db.ReadPublicConversationShareResource(ctx, share.ID, resourceID, now, nil)
+	resource, err := db.ReadPublicConversationShareResource(ctx, share.ID, resourceID)
 	if err != nil || resource.Size != int64(len(body)) || resource.SHA256 != hex.EncodeToString(digest[:]) {
 		t.Fatalf("migrated resource=%+v error=%v", resource, err)
 	}

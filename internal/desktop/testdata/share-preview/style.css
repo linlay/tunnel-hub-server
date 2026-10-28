@@ -1,0 +1,4 @@
+@font-face { font-family: Probe; src: url("font.woff2") format("woff2"); }
+body { font-family: system-ui; border-top: 8px solid rgb(12,88,133); padding: 16px; }
+button { margin: 8px; }
+#font-check { font-family: Probe; }

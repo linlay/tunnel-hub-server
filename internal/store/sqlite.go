@@ -19,7 +19,7 @@ import (
 //go:embed schema_sqlite.sql
 var sqliteSchema string
 
-const sqliteSchemaVersion = 4
+const sqliteSchemaVersion = 5
 
 func OpenSQLite(ctx context.Context, path string) (*DB, error) {
 	path = strings.TrimSpace(path)
@@ -63,7 +63,18 @@ func OpenSQLite(ctx context.Context, path string) (*DB, error) {
 	return &DB{sql: pool, database: databaseSQLite}, nil
 }
 
-func (db *DB) migrateSQLite(ctx context.Context, resourceDir string) error {
+func (db *DB) migrateSQLite(ctx context.Context, resourceDir string) (result error) {
+	// SQLite requires disabling FK enforcement outside the rebuild transaction.
+	// This pool is limited to one connection. Always restore before returning.
+	if _, err := db.sql.ExecContext(ctx, `PRAGMA foreign_keys = OFF`); err != nil {
+		return err
+	}
+	defer func() {
+		restore, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_, err := db.sql.ExecContext(restore, `PRAGMA foreign_keys = ON`)
+		result = errors.Join(result, err)
+	}()
 	tx, err := db.beginWriteTx(ctx)
 	if err != nil {
 		return fmt.Errorf("initialize SQLite schema: %w", err)
@@ -91,7 +102,7 @@ func (db *DB) migrateSQLite(ctx context.Context, resourceDir string) error {
 				return fmt.Errorf("initialize SQLite schema: %w", err)
 			}
 		}
-		if _, err := tx.ExecContext(ctx, `PRAGMA user_version = 4`); err != nil {
+		if _, err := tx.ExecContext(ctx, `PRAGMA user_version = 5`); err != nil {
 			return fmt.Errorf("write SQLite schema version: %w", err)
 		}
 	case 1:
@@ -115,6 +126,9 @@ func (db *DB) migrateSQLite(ctx context.Context, resourceDir string) error {
 		if err := migrateSQLiteDesktopRevocation(ctx, tx); err != nil {
 			return err
 		}
+		if err := migrateSQLiteShareLifecycle(ctx, tx); err != nil {
+			return err
+		}
 		if err := verifySQLiteSchema(ctx, tx); err != nil {
 			return err
 		}
@@ -136,6 +150,16 @@ func (db *DB) migrateSQLite(ctx context.Context, resourceDir string) error {
 		return db.migrateSQLite(ctx, resourceDir)
 	case 3:
 		if err := migrateSQLiteDesktopRevocation(ctx, tx); err != nil {
+			return err
+		}
+		if err := migrateSQLiteShareLifecycle(ctx, tx); err != nil {
+			return err
+		}
+		if err := verifySQLiteSchema(ctx, tx); err != nil {
+			return err
+		}
+	case 4:
+		if err := migrateSQLiteShareLifecycle(ctx, tx); err != nil {
 			return err
 		}
 		if err := verifySQLiteSchema(ctx, tx); err != nil {
@@ -165,7 +189,7 @@ func migrateSQLiteDesktopRevocation(ctx context.Context, tx *sql.Tx) error {
 }
 
 func verifySQLiteSchema(ctx context.Context, tx *sql.Tx) error {
-	const expectedTables = 14
+	const expectedTables = 13
 	var tables int
 	err := tx.QueryRowContext(ctx, `
 		SELECT COUNT(*) FROM sqlite_master
@@ -173,7 +197,7 @@ func verifySQLiteSchema(ctx context.Context, tx *sql.Tx) error {
 			'admin_users', 'admin_sessions', 'tunnel_tokens', 'routes',
 			'desktop_devices', 'desktop_webapps', 'agent_sessions', 'desktop_sessions',
 			'events', 'conversation_shares', 'conversation_share_access', 'traffic_events',
-			'conversation_share_resources', 'conversation_share_claims'
+			'conversation_share_resources'
 		)
 	`).Scan(&tables)
 	if err != nil {
@@ -189,7 +213,34 @@ func verifySQLiteSchema(ctx context.Context, tx *sql.Tx) error {
 	if columns != 1 {
 		return errors.New("SQLite schema is missing Desktop revocation")
 	}
-	return nil
+	var legacyColumns int
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM pragma_table_info('conversation_shares') WHERE name IN ('expires_at','single_use')`).Scan(&legacyColumns); err != nil {
+		return err
+	}
+	var claims int
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='conversation_share_claims'`).Scan(&claims); err != nil {
+		return err
+	}
+	var shareColumns int
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM pragma_table_info('conversation_shares') WHERE name IN ('kind','title','description_json')`).Scan(&shareColumns); err != nil {
+		return err
+	}
+	var resourceColumns int
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM pragma_table_info('conversation_share_resources') WHERE name='logical_path'`).Scan(&resourceColumns); err != nil {
+		return err
+	}
+	if legacyColumns != 0 || claims != 0 || shareColumns != 3 || resourceColumns != 1 {
+		return errors.New("SQLite share schema is incomplete")
+	}
+	rows, err := tx.QueryContext(ctx, `PRAGMA foreign_key_check`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	if rows.Next() {
+		return errors.New("SQLite migration violated foreign keys")
+	}
+	return rows.Err()
 }
 
 func isSQLiteDuplicateKey(err error) bool {
