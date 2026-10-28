@@ -195,25 +195,20 @@ func (s *Server) handlePublicShare(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnprocessableEntity, errShareBehaviorUnsupported.Error())
 		return
 	}
-	desktopURL := ""
-	if description.Desktop != nil {
-		desktopURL = s.Config.BrandID + "://share/" + url.PathEscape(id) + "?action=desktop"
-	}
 	switch selection.Action {
 	case sharecontract.Preview:
 		if description.Preview != nil && description.Preview.Type == "package" {
 			previewURL := strings.TrimSuffix(s.Config.SharePublicBaseURL, "/") + sharecontract.PublicPath + id + "/preview/" + description.Preview.Entrypoint
-			s.writeShareMetadataPage(w, r, share, resources, desktopURL, previewURL)
+			s.writeShareMetadataPage(w, r, share, description, resources, previewURL)
 			return
 		}
 		if description.Preview != nil {
 			s.handleGetPublicConversationSharePage(w, r)
 			return
 		}
-		s.writeShareMetadataPage(w, r, share, resources, desktopURL, "")
+		s.writeShareMetadataPage(w, r, share, description, resources, "")
 	case sharecontract.Desktop:
-		link := s.Config.BrandID + "://share/" + url.PathEscape(id) + "?action=desktop"
-		s.writeShareMetadataPage(w, r, share, resources, link, "")
+		s.writeShareMetadataPage(w, r, share, description, resources, "")
 	case sharecontract.Download:
 		s.serveShareResource(w, r, id, selection.ResourceID, false)
 	case sharecontract.Service:
@@ -258,27 +253,39 @@ func (s *Server) recordShareAccess(r *http.Request, id string) {
 }
 
 // Trusted outer page: never handles package messages or exposes a host bridge.
-func (s *Server) writeShareMetadataPage(w http.ResponseWriter, r *http.Request, share store.ConversationShare, resources []store.ConversationShareResource, desktopURL, previewURL string) {
+func (s *Server) writeShareMetadataPage(w http.ResponseWriter, r *http.Request, share store.ConversationShare, description shareDescription, resources []store.ConversationShareResource, previewURL string) {
 	var body strings.Builder
-	body.WriteString(`<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>` + html.EscapeString(share.Title) + `</title></head><body><h1>` + html.EscapeString(share.Title) + `</h1>`)
-	if desktopURL != "" {
-		body.WriteString(`<p><a href="` + html.EscapeString(desktopURL) + `">` + html.EscapeString(s.Config.ProductName) + `</a></p>`)
+	title, product := html.EscapeString(share.Title), html.EscapeString(s.Config.ProductName)
+	body.WriteString(`<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>` + title + `</title><style>
+*{box-sizing:border-box}body{margin:0;padding:48px 20px;background:#f3f6fa;color:#263244;font:15px/1.6 system-ui,sans-serif}main{max-width:820px;margin:auto;background:#fff;border:1px solid #e3e9f1;border-radius:20px;overflow:hidden;box-shadow:0 16px 48px #2632440a}header{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:16px;padding:20px 28px;border-bottom:1px solid #e8edf3}.brand{font-size:17px;font-weight:650}nav{display:flex;align-items:center;flex-wrap:wrap;gap:12px}a{color:#2767a7;text-underline-offset:3px}.button{display:inline-block;padding:9px 16px;border-radius:9px;background:#edf3fa;text-decoration:none;font-size:13px;font-weight:600}.primary{background:#2767a7;color:#fff}a:focus-visible{outline:3px solid #81b5ec;outline-offset:3px}h1{margin:0;padding:32px 28px;font-size:28px;overflow-wrap:anywhere}iframe{display:block;width:100%;height:clamp(360px,60vh,640px);border:0}.resource{margin:0;padding:16px 28px;border-top:1px solid #e8edf3;overflow-wrap:anywhere}@media(max-width:560px){body{padding:16px 12px}header{padding:20px}nav{width:100%}main{border-radius:14px}}
+</style></head><body><main><header><span class="brand">` + product + `</span><nav aria-label="分享操作">`)
+	if description.Desktop != nil {
+		link := s.Config.BrandID + "://share/" + url.PathEscape(share.ID) + "?action=desktop"
+		body.WriteString(`<a class="button primary" href="` + html.EscapeString(link) + `">在 ` + product + ` 中打开</a>`)
+		if s.Config.ProductDownloadPageURL != "" {
+			body.WriteString(`<a class="button" href="` + html.EscapeString(s.Config.ProductDownloadPageURL) + `" target="_blank" rel="noopener noreferrer">下载 ` + product + `</a>`)
+		}
 	}
-	if description, err := descriptionForShare(share); err == nil && description.Service != nil {
-		body.WriteString(`<p><a href="?action=service">打开在线服务</a></p>`)
+	if description.Service != nil {
+		body.WriteString(`<a class="button primary" href="?action=service">打开在线服务</a>`)
 	}
+	body.WriteString(`</nav></header>`)
 	if previewURL != "" {
-		body.WriteString(`<iframe title="Share preview" sandbox="allow-scripts" credentialless referrerpolicy="no-referrer" src="` + html.EscapeString(previewURL) + `" style="width:100%;height:75vh;border:0"></iframe>`)
+		body.WriteString(`<iframe title="` + title + `" sandbox="allow-scripts" credentialless referrerpolicy="no-referrer" src="` + html.EscapeString(previewURL) + `"></iframe>`)
+	} else {
+		body.WriteString(`<h1>` + title + `</h1>`)
 	}
 	for _, resource := range resources {
-		body.WriteString(`<p><a href="?action=download&amp;resourceId=` + resource.ID + `">` + html.EscapeString(resource.Name) + `</a></p>`)
+		if resource.Path == "" { // Logical package files belong to the preview, not the attachment list.
+			body.WriteString(`<p class="resource"><a href="?action=download&amp;resourceId=` + resource.ID + `">` + html.EscapeString(resource.Name) + `</a></p>`)
+		}
 	}
-	body.WriteString(`</body></html>`)
+	body.WriteString(`</main></body></html>`)
 	setPublicConversationShareHeaders(w.Header())
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	policy := "default-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+	policy := "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
 	if previewURL != "" {
-		policy += "; style-src 'unsafe-inline'; frame-src " + strings.TrimSuffix(s.Config.SharePublicBaseURL, "/") + sharecontract.PublicPath + share.ID + "/preview/"
+		policy += "; frame-src " + strings.TrimSuffix(s.Config.SharePublicBaseURL, "/") + sharecontract.PublicPath + share.ID + "/preview/"
 	}
 	w.Header().Set("Content-Security-Policy", policy)
 	w.Header().Set("Content-Length", strconv.Itoa(body.Len()))

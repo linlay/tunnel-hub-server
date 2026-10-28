@@ -135,3 +135,50 @@ func TestSharePreviewIsExplicitIsolatedAndRevocable(t *testing.T) {
 		}
 	}
 }
+
+func TestSharePreviewPageSeparatesAppActionsFromPackageFiles(t *testing.T) {
+	cfg := desktopTestConfig(t)
+	cfg.SharePublicBaseURL = "https://share.example.test"
+	cfg.ProductName = "Test & Product"
+	cfg.ProductDownloadPageURL = "https://product.example.test/download?platform=desktop&source=share"
+	cfg.ShareLimits.MaxSnapshotBytes = 8192
+	cfg.ShareLimits.MaxResourceBytes = 1 << 20
+	server, _ := newDesktopTestServerWithConfig(t, cfg)
+	manifest, bodies := previewPackageExample(t)
+	manifest.Title = "Frozen <connector>"
+	manifest.Desktop = genericShareExample().Desktop
+	attachment := sharecontract.Resource{ID: "0123456789abcdef01234567", Name: "report & notes.pdf", MIMEType: "application/pdf", Size: 6}
+	digest := sha256.Sum256([]byte("report"))
+	attachment.SHA256 = hex.EncodeToString(digest[:])
+	manifest.Resources = append(manifest.Resources, attachment)
+	bodies[attachment.ID] = []byte("report")
+	record := decodeGenericRecord(t, postGenericShare(t, server, manifest, bodies))
+	base := sharecontract.PublicPath + record.ID
+	for _, query := range []string{"", "?action=desktop"} {
+		response := performConversationShareRequest(server, http.MethodGet, base+query, nil, "")
+		body := response.Body.String()
+		for _, expected := range []string{
+			`href="` + cfg.BrandID + "://share/" + record.ID + `?action=desktop"`,
+			`>在 Test &amp; Product 中打开</a>`, `>下载 Test &amp; Product</a>`,
+			`href="https://product.example.test/download?platform=desktop&amp;source=share"`,
+			`resourceId=` + attachment.ID + `">report &amp; notes.pdf</a>`,
+		} {
+			if response.Code != http.StatusOK || !strings.Contains(body, expected) {
+				t.Fatal("missing share action or attachment", expected, response.Code)
+			}
+		}
+		for _, resource := range manifest.Resources[:len(manifest.Resources)-1] {
+			if strings.Contains(body, "resourceId="+resource.ID) {
+				t.Fatal("package dependency shown as a download", resource.Path)
+			}
+		}
+		if strings.Contains(body, "<connector>") || strings.Contains(body, "<script") || query == "" && strings.Contains(body, "<h1>") {
+			t.Fatal("unsafe or duplicate outer content")
+		}
+	}
+	server.Config.ProductDownloadPageURL = ""
+	response := performConversationShareRequest(server, http.MethodGet, base, nil, "")
+	if strings.Contains(response.Body.String(), "下载") || !strings.Contains(response.Body.String(), "在 Test &amp; Product 中打开") {
+		t.Fatal("missing download configuration changed the open action")
+	}
+}
