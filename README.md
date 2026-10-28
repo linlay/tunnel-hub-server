@@ -1,6 +1,6 @@
 # Tunnel Hub Server
 
-## 1. 项目简介
+## 1. 项目简介1
 
 `tunnel-hub-server` 是 Tunnel Hub 的 Go 后端，负责公网 Relay、Agent/Desktop 出站隧道、管理 API、Desktop 注册 API、公开组件列表，以及基于 Host 的 HTTP/WebSocket 转发。
 
