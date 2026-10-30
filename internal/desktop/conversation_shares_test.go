@@ -749,3 +749,7 @@ func assertConversationShareList(
 		t.Fatalf("lastAccessedAt=%v want=%q", result.Items[0].LastAccessedAt, *wantLastAccessedAt)
 	}
 }
+
+func (*capturingConversationShareRenderer) RenderHTMLPreview(_ string) ([]byte, error) {
+	return []byte(`<script src="/html-preview-bootstrap.js"></script>`), nil
+}

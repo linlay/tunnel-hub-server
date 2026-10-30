@@ -41,6 +41,7 @@ type Server struct {
 
 type conversationShareRenderer interface {
 	Render(snapshot []byte, assetOrigin, brandID, productName, productDownloadPageURL string, canReshare bool) ([]byte, error)
+	RenderHTMLPreview(shareOrigin string) ([]byte, error)
 }
 
 func (s *Server) SetPresenceManager(manager *proxy.Manager) { s.manager = manager }
