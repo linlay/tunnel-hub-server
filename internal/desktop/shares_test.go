@@ -171,10 +171,14 @@ func TestShareV2ResourcesFreezeIntegrityAndBelongToOneShare(t *testing.T) {
 	const id = "0123456789abcdef01234567"
 	body := []byte("frozen bytes")
 	digest := sha256.Sum256(body)
-	manifest.Resources = []sharecontract.Resource{{ID: id, Name: "report.txt", MIMEType: "text/plain", Size: int64(len(body)), SHA256: hex.EncodeToString(digest[:])}}
+	manifest.Resources = []sharecontract.Resource{{ID: id, Name: "report.txt", MIMEType: "text/plain", Size: int64(len(body)), SHA256: hex.EncodeToString(digest[:]), Path: "reports/report.txt"}}
 	manifest.Content = sharecontract.Content{Version: 3, ResourceID: id}
 	first := decodeGenericRecord(t, postGenericShare(t, server, manifest, map[string][]byte{id: body}))
 	second := decodeGenericRecord(t, postGenericShare(t, server, manifest, map[string][]byte{id: body}))
+	page := performConversationShareRequest(server, http.MethodGet, sharecontract.PublicPath+first.ID, nil, "")
+	if page.Code != http.StatusOK || !strings.Contains(page.Body.String(), `href="?action=download&amp;resourceId=`+id+`">report.txt</a>`) {
+		t.Fatal("attachment with a logical path is missing without a package preview", page.Code)
+	}
 	path := sharecontract.PublicPath + first.ID + "?action=download&resourceId=" + id
 	response := performConversationShareRequest(server, http.MethodGet, path, nil, "")
 	if response.Code != http.StatusOK || !bytes.Equal(response.Body.Bytes(), body) || !strings.Contains(response.Header().Get("Content-Disposition"), "attachment") {

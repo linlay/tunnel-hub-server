@@ -276,9 +276,10 @@ func (s *Server) writeShareMetadataPage(w http.ResponseWriter, r *http.Request, 
 		body.WriteString(`<h1>` + title + `</h1>`)
 	}
 	for _, resource := range resources {
-		if resource.Path == "" { // Logical package files belong to the preview, not the attachment list.
-			body.WriteString(`<p class="resource"><a href="?action=download&amp;resourceId=` + resource.ID + `">` + html.EscapeString(resource.Name) + `</a></p>`)
+		if description.Preview != nil && description.Preview.Type == "package" && resource.Path != "" {
+			continue
 		}
+		body.WriteString(`<p class="resource"><a href="?action=download&amp;resourceId=` + resource.ID + `">` + html.EscapeString(resource.Name) + `</a></p>`)
 	}
 	body.WriteString(`</main></body></html>`)
 	setPublicConversationShareHeaders(w.Header())
