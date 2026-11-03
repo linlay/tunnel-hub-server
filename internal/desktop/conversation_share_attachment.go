@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 
+	"example.invalid/tunnel-hub-server/internal/sharefiles"
 	"example.invalid/tunnel-hub-server/internal/store"
 	"golang.org/x/net/html"
 )
@@ -140,16 +141,25 @@ func (s *Server) handleGetPublicConversationShareAttachment(w http.ResponseWrite
 		writePublicConversationShareAttachmentError(w, http.StatusNotFound)
 		return
 	}
-	peek, err := s.DB.PeekPublicConversationShare(r.Context(), shareID)
-	if err != nil || peek.Kind != "conversation" || peek.SnapshotVersion != store.ConversationSnapshotVersion {
-		writePublicConversationShareAttachmentError(w, http.StatusNotFound)
-		return
-	}
 	s.serveShareResource(w, r, shareID, segments[2], segments[3] == "preview")
 }
 
 func (s *Server) serveShareResource(w http.ResponseWriter, r *http.Request, shareID, resourceID string, preview bool) {
-	resource, err := s.DB.ReadPublicConversationShareResource(r.Context(), shareID, resourceID)
+	files := s.shareResources
+	recordAccess := s.DB.RecordShareAccess
+	generic, err := s.DB.DescribePublicShare(r.Context(), shareID)
+	var resource store.ConversationShareResource
+	if errors.Is(err, store.ErrNotFound) {
+		resource, err = s.DB.ReadPublicConversationShareResource(r.Context(), shareID, resourceID, s.now().UTC(), conversationShareSessionHash(r, shareID))
+		files = s.conversationShareResources
+		recordAccess = s.DB.RecordConversationShareAccess
+	} else if err == nil {
+		if strings.Contains(r.URL.Path, "/attachments/") && (generic.Kind != "conversation" || generic.SnapshotVersion != store.ConversationSnapshotVersion) {
+			writePublicConversationShareAttachmentError(w, http.StatusNotFound)
+			return
+		}
+		resource, err = s.DB.ReadPublicShareResource(r.Context(), shareID, resourceID)
+	}
 	if err != nil {
 		if !errors.Is(err, store.ErrNotFound) {
 			s.Logger.Error("read conversation share attachment", "error", err)
@@ -157,11 +167,11 @@ func (s *Server) serveShareResource(w http.ResponseWriter, r *http.Request, shar
 		writePublicConversationShareAttachmentError(w, http.StatusNotFound)
 		return
 	}
-	if s.conversationShareResources == nil || (preview && !previewableShareMIME(resource.MIMEType)) {
+	if files == nil || (preview && !previewableShareMIME(resource.MIMEType)) {
 		writePublicConversationShareAttachmentError(w, http.StatusNotFound)
 		return
 	}
-	file, err := s.openVerifiedShareResource(shareID, resource)
+	file, err := openVerifiedShareResource(files, shareID, resource)
 	if err != nil {
 		status := http.StatusInternalServerError
 		if errors.Is(err, os.ErrNotExist) {
@@ -193,6 +203,9 @@ func (s *Server) serveShareResource(w http.ResponseWriter, r *http.Request, shar
 		header.Set("Content-Length", strconv.Itoa(len(body)))
 		w.WriteHeader(http.StatusOK)
 		if r.Method == http.MethodGet {
+			if err := recordAccess(r.Context(), shareID, s.now().UTC()); err != nil {
+				s.Logger.Error("record share access", "shareId", shareID, "error", err)
+			}
 			_, _ = w.Write(body)
 		}
 		return
@@ -209,16 +222,21 @@ func (s *Server) serveShareResource(w http.ResponseWriter, r *http.Request, shar
 		disposition = "inline"
 	}
 	header.Set("Content-Disposition", mime.FormatMediaType(disposition, map[string]string{"filename": resource.Name}))
+	if r.Method == http.MethodGet {
+		if err := recordAccess(r.Context(), shareID, s.now().UTC()); err != nil {
+			s.Logger.Error("record share access", "shareId", shareID, "error", err)
+		}
+	}
 	http.ServeContent(w, r, resource.Name, info.ModTime(), file)
 }
 
 // Use the same verified file handle for preview/download; do not re-open a
 // potentially different file after checking its hash.
-func (s *Server) openVerifiedShareResource(shareID string, resource store.ConversationShareResource) (*os.File, error) {
-	if s.conversationShareResources == nil {
+func openVerifiedShareResource(files *sharefiles.Store, shareID string, resource store.ConversationShareResource) (*os.File, error) {
+	if files == nil {
 		return nil, os.ErrNotExist
 	}
-	file, err := s.conversationShareResources.Open(shareID, resource.ID)
+	file, err := files.Open(shareID, resource.ID)
 	if err != nil {
 		return nil, err
 	}

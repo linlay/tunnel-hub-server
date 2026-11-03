@@ -53,7 +53,7 @@ func (s *Server) handleSharePreviewResource(w http.ResponseWriter, r *http.Reque
 		writePublicConversationShareAttachmentError(w, http.StatusForbidden)
 		return
 	}
-	file, err := s.openVerifiedShareResource(share.ID, resource)
+	file, err := openVerifiedShareResource(s.shareResources, share.ID, resource)
 	if err != nil {
 		status := http.StatusInternalServerError
 		if errors.Is(err, os.ErrNotExist) {

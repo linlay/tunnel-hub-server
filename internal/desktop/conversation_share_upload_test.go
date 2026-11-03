@@ -446,7 +446,7 @@ func TestConversationSharePermanentReadsFrozenAttachmentUntilRevoked(t *testing.
 		t.Fatal(err)
 	}
 	_, err = db.CreateConversationShareWithResources(request.Context(), otherShareID, "owner", "other-chat", store.ConversationSnapshotVersion, []byte(`{"version":1}`), []store.ConversationShareResource{{ID: otherAttachmentID,
-		Name: "other.html", MIMEType: "text/html", Size: int64(len(body)), SHA256: hex.EncodeToString(hash[:])}}, now)
+		Name: "other.html", MIMEType: "text/html", Size: int64(len(body)), SHA256: hex.EncodeToString(hash[:])}}, now, nil, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -512,7 +512,7 @@ func TestConversationShareCleanupRetriesFailedFileRemoval(t *testing.T) {
 	if err := stage.Commit(id); err != nil {
 		t.Fatal(err)
 	}
-	_, err = db.CreateConversationShareWithResources(context.Background(), id, "42", "chat", 1, []byte(`{}`), []store.ConversationShareResource{{ID: resourceID, Name: "file.txt", MIMEType: "text/plain", Size: int64(len(body)), SHA256: hex.EncodeToString(digest[:])}}, time.Now())
+	_, err = db.CreateConversationShareWithResources(context.Background(), id, "42", "chat", 1, []byte(`{}`), []store.ConversationShareResource{{ID: resourceID, Name: "file.txt", MIMEType: "text/plain", Size: int64(len(body)), SHA256: hex.EncodeToString(digest[:])}}, time.Now(), nil, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -525,7 +525,7 @@ func TestConversationShareCleanupRetriesFailedFileRemoval(t *testing.T) {
 		t.Fatal(err)
 	}
 	_ = server.CleanupConversationShareResources(context.Background())
-	ids, err := db.ConversationShareResourceCleanupIDs(context.Background())
+	ids, err := db.ConversationShareResourceCleanupIDs(context.Background(), time.Now())
 	if err != nil || len(ids) != 1 || ids[0] != id {
 		t.Fatal("file removal failure lost retry metadata", err)
 	}
@@ -538,7 +538,7 @@ func TestConversationShareCleanupRetriesFailedFileRemoval(t *testing.T) {
 	if err := server.CleanupConversationShareResources(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	ids, err = db.ConversationShareResourceCleanupIDs(context.Background())
+	ids, err = db.ConversationShareResourceCleanupIDs(context.Background(), time.Now())
 	if err != nil || len(ids) != 0 {
 		t.Fatal("file removal retry failed", err)
 	}

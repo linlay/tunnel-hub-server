@@ -5,9 +5,11 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"html"
 	"mime"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -158,7 +160,7 @@ func TestSharePreviewPageSeparatesAppActionsFromPackageFiles(t *testing.T) {
 		response := performConversationShareRequest(server, http.MethodGet, base+query, nil, "")
 		body := response.Body.String()
 		for _, expected := range []string{
-			`href="` + cfg.BrandID + "://share/" + record.ID + `?action=desktop"`,
+			`href="` + html.EscapeString(cfg.BrandID+"://share/open?url="+url.QueryEscape(record.URL)+"&v=1") + `"`,
 			`>在 Test &amp; Product 中打开</a>`, `>下载 Test &amp; Product</a>`,
 			`href="https://product.example.test/download?platform=desktop&amp;source=share"`,
 			`resourceId=` + attachment.ID + `">report &amp; notes.pdf</a>`,

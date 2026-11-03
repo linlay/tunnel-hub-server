@@ -63,7 +63,7 @@ func TestShareServiceUsesOwnedExistingPublicationAndOriginalCurrentRoute(t *test
 	if head := performConversationShareRequest(s, "HEAD", "/share/"+first.ID+"?action=service", nil, ""); head.Code != http.StatusSeeOther {
 		t.Fatal("HEAD service selection failed", head.Code)
 	}
-	listed, err := db.ListShares(t.Context(), "42")
+	listed, err := db.ListShares(t.Context(), "42", time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}

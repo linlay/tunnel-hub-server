@@ -79,7 +79,7 @@ func decodeGenericRecord(t *testing.T, response *httptest.ResponseRecorder) shar
 	return record
 }
 
-func TestShareV2AndLegacyUseOneLifecycleAndSeparateProjections(t *testing.T) {
+func TestShareV2AndLegacyUseSeparateStorageAndSharedPublishing(t *testing.T) {
 	cfg := desktopTestConfig(t)
 	cfg.SharePublicBaseURL = "https://share.example.test"
 	cfg.ShareLimits.MaxSnapshotBytes = 8192
@@ -90,7 +90,7 @@ func TestShareV2AndLegacyUseOneLifecycleAndSeparateProjections(t *testing.T) {
 	if first.ID == second.ID || first.Kind != "market-resource" || first.Title != market.Title {
 		t.Fatal("publication identity was reused")
 	}
-	stored, err := db.AccessPublicConversationShare(httptest.NewRequest(http.MethodGet, "/", nil).Context(), first.ID)
+	stored, err := db.AccessPublicShare(httptest.NewRequest(http.MethodGet, "/", nil).Context(), first.ID)
 	if err != nil || stored.ConversationID != "" || stored.SnapshotVersion != 3 || !json.Valid(stored.SnapshotJSON) {
 		t.Fatal("generic content was converted into a conversation", err)
 	}
@@ -113,7 +113,7 @@ func TestShareV2AndLegacyUseOneLifecycleAndSeparateProjections(t *testing.T) {
 			t.Fatal("resolve leaked management identity/content")
 		}
 	}
-	old := performConversationShareRequest(server, http.MethodPost, conversationSharesPath, []byte(validConversationSnapshot), defaultDesktopJWT)
+	old := performConversationShareRequestWithExpiration(server, "permanent", []byte(validConversationSnapshot))
 	if old.Code != http.StatusCreated {
 		t.Fatal(old.Code, old.Body.String())
 	}
@@ -187,7 +187,7 @@ func TestShareV2ResourcesFreezeIntegrityAndBelongToOneShare(t *testing.T) {
 	if response := performConversationShareRequest(server, http.MethodGet, sharecontract.PublicPath+first.ID+"?action=download&resourceId=ffffffffffffffffffffffff", nil, ""); response.Code != http.StatusNotFound {
 		t.Fatal("undeclared resource readable")
 	}
-	file := filepath.Join(cfg.ConversationShareResourceDir, "shares", first.ID, "resources", id)
+	file := filepath.Join(cfg.ConversationShareResourceDir, "v2", "shares", first.ID, "resources", id)
 	if err := os.WriteFile(file, bytes.Repeat([]byte("x"), len(body)), 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -289,5 +289,45 @@ func TestShareV2ManagementKeepsLimitsAndLegacyHeadersAtTheirOwnEdges(t *testing.
 	server.ServeHTTP(response, request)
 	if response.Code != http.StatusBadRequest {
 		t.Fatal("v2 silently ignored old non-permanent request", response.Code)
+	}
+}
+
+func TestShareV2ConversationAndLegacyRevocationUseTheirOwnStorage(t *testing.T) {
+	cfg := desktopTestConfig(t)
+	cfg.SharePublicBaseURL = "https://share.example.test"
+	server, _ := newDesktopTestServerWithConfig(t, cfg)
+	manifest := sharecontract.Envelope{
+		ProtocolVersion: 1, Kind: "conversation", Title: "New conversation",
+		Content:   sharecontract.Content{Version: 1, Data: json.RawMessage(validConversationSnapshot)},
+		Resources: []sharecontract.Resource{},
+		Preview:   &sharecontract.PreviewSpec{Type: "builtin", Viewer: "conversation"},
+	}
+	created := decodeGenericRecord(t, postGenericShare(t, server, manifest, nil))
+	legacyList := performConversationShareRequest(server, http.MethodGet, conversationSharesPath, nil, defaultDesktopJWT)
+	var legacy conversationShareListResponse
+	if err := json.Unmarshal(legacyList.Body.Bytes(), &legacy); err != nil || len(legacy.Items) != 0 {
+		t.Fatal("v2 conversation leaked into the old list", err)
+	}
+	page := performConversationShareRequest(server, http.MethodGet, "/share/"+created.ID, nil, "")
+	if page.Code != http.StatusOK || !bytes.Equal(page.Body.Bytes(), []byte(validConversationSnapshot)) || len(page.Result().Cookies()) != 0 {
+		t.Fatal("v2 conversation did not render without claiming a legacy session", page.Code)
+	}
+	if deleted := performConversationShareRequest(server, http.MethodDelete, conversationSharesPath+"/"+created.ID, nil, defaultDesktopJWT); deleted.Code != http.StatusNotFound {
+		t.Fatal("legacy endpoint mutated a generic share", deleted.Code)
+	}
+	old := performConversationShareRequestWithExpiration(server, "once", []byte(validConversationSnapshot))
+	var oldRecord conversationShareRecordResponse
+	if err := json.Unmarshal(old.Body.Bytes(), &oldRecord); err != nil || old.Code != http.StatusCreated || !oldRecord.SingleUse {
+		t.Fatal("legacy policy lost", err)
+	}
+	deleted := performConversationShareRequest(server, http.MethodDelete, sharecontract.ManagementPath+"/"+oldRecord.ID, nil, defaultDesktopJWT)
+	if deleted.Code != http.StatusNoContent {
+		t.Fatal("v2 could not revoke a legacy record", deleted.Code)
+	}
+	if page := performConversationShareRequest(server, http.MethodGet, "/share/"+oldRecord.ID, nil, ""); page.Code != http.StatusNotFound {
+		t.Fatal("legacy revocation was not enforced", page.Code)
+	}
+	if page := performConversationShareRequest(server, http.MethodGet, "/share/"+created.ID, nil, ""); page.Code != http.StatusOK {
+		t.Fatal("revoking a legacy share affected the v2 conversation", page.Code)
 	}
 }

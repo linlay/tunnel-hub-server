@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -38,6 +39,7 @@ type Server struct {
 	recordConversationShareAccess func(context.Context, string, time.Time) error
 	conversationShareRenderer     conversationShareRenderer
 	conversationShareResources    *sharefiles.Store
+	shareResources                *sharefiles.Store
 }
 
 type conversationShareRenderer interface {
@@ -58,10 +60,14 @@ func NewServer(db *store.DB, cfg config.RelayConfig, logger *slog.Logger, ssoJWT
 	if ssoJWT == nil {
 		return nil, errors.New("SSO JWT verifier is required")
 	}
-	var resources *sharefiles.Store
+	var resources, genericResources *sharefiles.Store
 	if strings.TrimSpace(cfg.ConversationShareResourceDir) != "" {
 		var err error
 		resources, err = sharefiles.New(cfg.ConversationShareResourceDir)
+		if err != nil {
+			return nil, err
+		}
+		genericResources, err = sharefiles.New(filepath.Join(cfg.ConversationShareResourceDir, "v2"))
 		if err != nil {
 			return nil, err
 		}
@@ -74,6 +80,7 @@ func NewServer(db *store.DB, cfg config.RelayConfig, logger *slog.Logger, ssoJWT
 		now:                           time.Now,
 		recordConversationShareAccess: db.RecordConversationShareAccess,
 		conversationShareResources:    resources,
+		shareResources:                genericResources,
 	}, nil
 }
 

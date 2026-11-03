@@ -272,7 +272,7 @@ docker logs tunnel-hub-server
 ### 数据与备份
 
 - MySQL 数据的备份与恢复使用部署环境的 MySQL 运维流程。SQLite 部署应在停止 Relay 或完成一致性快照后备份数据库文件及 WAL 状态；数据库与 `CONVERSATION_SHARE_RESOURCE_DIR` 必须属于同一备份时点，保留历史对话渲染资产。
-- MySQL 模式只在已存在的专用库中创建当前表结构，不创建数据库或账号；SQLite 模式创建配置路径对应的新文件。已有库只执行源码列出的显式迁移，包括旧非永久分享先撤销再删退役字段；无法识别的旧结构应停止升级并保留原数据。
+- MySQL 模式只在已存在的专用库中创建当前表结构，不创建数据库或账号；SQLite 模式创建配置路径对应的新文件。已有库只执行源码列出的显式迁移，通用分享仅新增独立表，保留旧对话表及访问策略；无法识别的旧结构应停止升级并保留原数据。
 - 首次上线顺序：准备 MySQL 空库和账号或 SQLite 可写父目录 → 配置环境变量 → 停止旧 Relay → 启动新 Relay 建表 → 初始化管理员 → 验证注册、路由、分享。
 - 历史数据库文件和 Docker 卷不自动删除。数据库类型切换会看到另一套独立数据，不会同步账号、Token、设备映射或分享链接。
 
@@ -308,7 +308,7 @@ curl -X POST https://hub.example.test/api/desktop/devices/register \
 
 跨端用户操作与来源业务、插件/WebApp、在线服务接入见 sibling Desktop 的 [分享短链使用与对接](../zenmind-desktop/contracts/share-shortlink.md)。当前 Nginx 模板的 v2 创建路径虽然由 `/api/desktop/` 转发，却缺少旧分享上传入口的大小/请求缓冲覆盖；默认 100m 网关上限与 Hub 默认 101 MiB 总请求额度不一致，部署前需补齐并验证，不能把路由可达当作上传策略已经一致。此问题已核实但本轮未修改模板，不代表线上生效配置已复现。
 
-公开 `/share/{id}` 默认 preview，`?action=resolve` 返回最小 JSON，`?action=download&resourceId={id}` 读取本分享资源，`?action=desktop` 提供品牌分享接收链接。选择参数重复、未知动作、资源越界或 receiver/context/version、设备和在线绑定等覆盖请求均失败；同一 ID 所有行为共用撤销状态。资源公开读取复验长度和 SHA-256，禁止重定向和任意服务器路径。当前支持内置对话、安全元数据页、显式自包含预览包及已有 WebApp 发布绑定。
+公开 `/share/{id}` 默认 preview，`?action=resolve` 返回最小 JSON，`?action=download&resourceId={id}` 读取本分享资源，`?action=desktop` 提供品牌分享接收链接 `<品牌scheme>://share/open?v=1&url=<编码后的公开 HTTPS 分享地址>`。选择参数重复、未知动作、资源越界或 receiver/context/version、设备和在线绑定等覆盖请求均失败；同一 ID 所有行为共用撤销状态。资源公开读取复验长度和 SHA-256，禁止重定向和任意服务器路径。当前支持内置对话、安全元数据页、显式自包含预览包及已有 WebApp 发布绑定。
 
 `service:{type:"webapp",webAppId}` 只引用现有注册 ID；创建时核实发布仍 active、设备未撤销且属于分享所有者。公开 `?action=service` 再检查同一分享撤销状态与当前绑定，303 跳转至原注册公网 Host；不把分享站当代理、不接收 upstream、不转发所有者 SSO。当前服务、离线 502、HTTP/WebSocket 与访客权限继续由原 WebApp 发布链路处理。停止发布或移除绑定返回明确不可用页并保留冻结预览。撤销分享只关闭该短链及其私有资源，原公开地址和其他分享不受影响；停止公开服务仍使用原发布操作。
 
@@ -318,7 +318,7 @@ curl -X POST https://hub.example.test/api/desktop/devices/register \
 
 创建、读取和撤销对话分享：
 
-Relay 保存 Desktop 上传的 `ConversationSnapshotV1` JSON 和冻结的已发布产物及当前 Chat 图片音视频，匿名访问时安全注入当前唯一分享模板。Snapshot 与附件累计分别默认 50 MiB，环境配置只接受正整数 MiB，重启生效。创建前通过同一鉴权读取 `GET /api/desktop/shares/limits` 的 `maxSnapshotBytes`、`maxResourceBytes`（字节，`no-store`）。请求体额度由两者加 1 MiB 推导，Go 上传入口执行限制，独立于通用请求额度；MySQL packet 至少 64 MiB 且容纳快照加 1 MiB。store 和历史读取不重复执行新建额度。创建请求必须提供 `multipart/form-data`、`X-Conversation-Snapshot-Version: 1`、非空 `X-Conversation-ID` 和 `X-Conversation-Share-Expiration`；该兼容请求头只接受 `permanent`；`once`、`3h`、`1d`、`7d`、`30d` 明确拒绝，不转为永久。multipart 中 `snapshot` part 必填，每个附件使用 `attachment:<id>` part 并与 Snapshot 声明严格匹配。Desktop 不下载模板或生成分享 HTML；本地 HTML 导出仍是独立功能。下面命令只用于服务端联调。
+Relay 保存 Desktop 上传的 `ConversationSnapshotV1` JSON 和冻结的已发布产物及当前 Chat 图片音视频，匿名访问时安全注入当前唯一分享模板。Snapshot 与附件累计分别默认 50 MiB，环境配置只接受正整数 MiB，重启生效。创建前通过同一鉴权读取 `GET /api/desktop/shares/limits` 的 `maxSnapshotBytes`、`maxResourceBytes`（字节，`no-store`）。请求体额度由两者加 1 MiB 推导，Go 上传入口执行限制，独立于通用请求额度；MySQL packet 至少 64 MiB 且容纳快照加 1 MiB。store 和历史读取不重复执行新建额度。创建请求必须提供 `multipart/form-data`、`X-Conversation-Snapshot-Version: 1`、非空 `X-Conversation-ID` 和 `X-Conversation-Share-Expiration`；该请求头支持 `once`、`3h`、`1d`、`7d`、`30d`、`permanent`，继续保留当前 main 的时效语义。multipart 中 `snapshot` part 必填，每个附件使用 `attachment:<id>` part 并与 Snapshot 声明严格匹配。Desktop 不下载模板或生成分享 HTML；本地 HTML 导出仍是独立功能。下面命令只用于服务端联调。
 
 ```bash
 curl -X POST https://hub.example.test/api/desktop/shares \
@@ -340,11 +340,15 @@ curl -X DELETE https://hub.example.test/api/desktop/shares/share_xxx \
   -H "Authorization: Bearer $OFFICIAL_SSO_JWT"
 ```
 
-创建和列表响应固定保留 id、conversationId、url、createdAt、expiresAt、lastAccessedAt、singleUse 七键，其中 expiresAt 固定为 null、singleUse 固定为 false。这两个兼容值只在 HTTP DTO 中存在。列表按创建时间倒序返回当前所有者仍有效的对话元数据，不读取内容 BLOB，也不接受查询参数。匿名 `GET /share/{id}` 使用当前模板渲染未撤销的 Snapshot；成功 GET best-effort 更新独立访问元数据，HEAD 不更新。公开读取不创建 Cookie 或领取会话。已撤销和未知 ID 统一返回最小 404 HTML。
+旧接口创建和列表响应继续保留 id、conversationId、url、createdAt、expiresAt、lastAccessedAt、singleUse 七键，expiresAt 和 singleUse 返回真实策略。列表仅返回当前所有者的旧对话记录；到期和撤销后不可公开访问。一次性分享在首次合法 GET 中原子认领浏览器会话，同一会话可在原有 30 分钟窗口内读取页面与附件；其他浏览器不可取得，HEAD 不认领。
 
-分享持续有效直到所有者撤销。SQLite schema v5 与 MySQL 可重跑迁移先撤销所有旧 expires_at 非空或 single_use 为真的记录（保留已有 revoked_at），再移除退役列、CHECK 和 claims 表；旧永久内容字节、ID、创建/访问时间及资源目录不变。旧库备份必须连同资源目录保存，升级不能直接降级运行旧 Hub。新 kind/title/description_json 保存在原 conversation_shares 聚合内，快照仍只保存一份；conversation_id 可空，资源仍由 shareId 独占。管理列表不读 description_json 或 snapshot_json。撤销先落库，再删除文件，失败保留元数据；定期清理只回收已撤销资源及失败上传孤儿，不按时间使分享失效。
+通用分享保存在独立的 `shares`、`share_resources`、`share_access` 表；包含对话在内的所有 v2 创建都只写入这组表。旧对话继续使用原有四张表，保留 expires_at、single_use、CHECK、非空 conversation_id 及 claims。v2 列表实时投影新旧有效记录的元数据，不复制正文，不双写或同步；通过 v2 撤销旧记录时仍更新旧表。旧公开 URL 保留原读取和访问策略，通用分享持续有效直到所有者撤销。
 
-恢复旧备份时，先在隔离副本恢复匹配的数据库和资源，以当前迁移重新应用旧非永久记录的撤销，再验证永久 ID、正文和资源 Hash 后才可开放读取。恢复包含旧有效状态的备份并直接启动旧 Hub 会重新公开已经退役的链接，不能作为回退方式。`TestSQLiteShareBackupRestorePreservesPermanentAndReappliesRevocation` 用离线合成库验证上述恢复顺序及备份未被修改；它不代表生产备份或 MySQL 恢复已验证。
+新旧接口共用发布、上传校验、文件提交和失败补偿流程。旧资源仍位于 `CONVERSATION_SHARE_RESOURCE_DIR/shares/`，通用资源通过同一个文件实现保存到 `CONVERSATION_SHARE_RESOURCE_DIR/v2/shares/`；暂存和清理同样分开，无需新增环境变量。撤销先落库，再删除对应目录，失败保留资源元数据以便重试。
+
+MySQL 启动只幂等新增通用分享表，不改变旧表、不批量撤销记录。开发环境可在相同数据库和资源卷上切回当前 main 或使用同一基础结构的功能分支；旧 Hub 继续支持旧分享，新通用分享暂不可用，数据保留，切回本分支后恢复。无需执行删除新表的降级 SQL。`TestShareExtensionPreservesMainWritesClaimsAndResources` 使用隔离数据库覆盖旧结构初始化、领取状态保留、旧代码继续读写及资源目录隔离。
+
+已经运行过旧版破坏性迁移的数据库不属于上述增量升级路径：被删除的时效和领取数据无法由默认值还原，须在隔离副本中恢复匹配的数据库与资源备份后验证。启动结构检查会拒绝缺少旧字段的数据库，不会自动补列或重新公开退役记录。
 
 `GET/HEAD /assets/conversation-export/{sha256}/{file}` 提供随 Relay 编译且通过内容 Hash 校验的资源集；当前 manifest 决定新分享页使用的资源集，历史资源集继续服务已有 HTML。分享渲染包由 WebClient 显式同步后随 Relay 原子发布，普通 WebClient 发布不修改它。
 

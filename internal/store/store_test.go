@@ -114,7 +114,7 @@ func TestDesktopSessionsAndTrafficUseDeviceIdentity(t *testing.T) {
 	}
 }
 
-func TestShareSchemaHasNoRetiredLifecycleFields(t *testing.T) {
+func TestShareSchemaPreservesLegacyLifecycle(t *testing.T) {
 	db := openTestDB(t)
 	var query string
 	if db.database == databaseSQLite {
@@ -123,16 +123,16 @@ func TestShareSchemaHasNoRetiredLifecycleFields(t *testing.T) {
 		query = `SELECT COUNT(*) FROM information_schema.columns WHERE table_schema=DATABASE() AND table_name='conversation_shares' AND column_name IN ('expires_at','single_use')`
 	}
 	var count int
-	if err := db.sql.QueryRow(query).Scan(&count); err != nil || count != 0 {
-		t.Fatal("retired share fields remain", count, err)
+	if err := db.sql.QueryRow(query).Scan(&count); err != nil || count != 2 {
+		t.Fatal("legacy share fields missing", count, err)
 	}
 	if db.database == databaseSQLite {
 		query = `SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='conversation_share_claims'`
 	} else {
 		query = `SELECT COUNT(*) FROM information_schema.tables WHERE table_schema=DATABASE() AND table_name='conversation_share_claims'`
 	}
-	if err := db.sql.QueryRow(query).Scan(&count); err != nil || count != 0 {
-		t.Fatal("claim table remains", count, err)
+	if err := db.sql.QueryRow(query).Scan(&count); err != nil || count != 1 {
+		t.Fatal("legacy claim table missing", count, err)
 	}
 }
 

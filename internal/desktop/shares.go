@@ -16,7 +16,7 @@ import (
 
 func (s *Server) handleShares(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodDelete && r.URL.Path != sharecontract.ManagementPath+"/limits" && strings.HasPrefix(r.URL.Path, sharecontract.ManagementPath+"/") {
-		s.revokeShare(w, r, sharecontract.ManagementPath+"/")
+		s.handleRevokeShare(w, r)
 		return
 	}
 	principal, ok := s.authorizeRegistration(w, r)
@@ -44,7 +44,7 @@ func (s *Server) handleShares(w http.ResponseWriter, r *http.Request) {
 					return
 				}
 			}
-			share, base, ok := s.publishShare(w, r, principal.UserID, decodeGenericShare)
+			share, base, ok := s.publishShare(w, r, principal.UserID, decodeGenericShare, s.shareResources, s.DB.CreateShareWithResources)
 			if ok {
 				writeJSON(w, http.StatusCreated, shareRecord(share, base))
 			}
@@ -54,7 +54,7 @@ func (s *Server) handleShares(w http.ResponseWriter, r *http.Request) {
 				writeError(w, http.StatusServiceUnavailable, err.Error())
 				return
 			}
-			shares, err := s.DB.ListShares(r.Context(), principal.UserID)
+			shares, err := s.DB.ListShares(r.Context(), principal.UserID, s.now().UTC())
 			if err != nil {
 				s.writeInternal(w, "list shares", err)
 				return
@@ -72,9 +72,13 @@ func (s *Server) handleShares(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func sharePublicURL(base, id string) string {
+	return strings.TrimSuffix(base, "/") + "/" + url.PathEscape(id)
+}
+
 func shareRecord(share store.ConversationShare, base string) sharecontract.Record {
-	record := sharecontract.Record{ID: share.ID, Kind: share.Kind, Title: share.Title, URL: strings.TrimSuffix(base, "/") + "/" + url.PathEscape(share.ID),
-		CreatedAt: share.CreatedAt.UTC().Format("2006-01-02T15:04:05.000Z"), LastAccessedAt: formatConversationShareTime(share.LastAccessedAt)}
+	record := sharecontract.Record{ID: share.ID, Kind: share.Kind, Title: share.Title, URL: sharePublicURL(base, share.ID),
+		CreatedAt: share.CreatedAt.UTC().Format("2006-01-02T15:04:05.000Z"), LastAccessedAt: formatConversationShareExpiration(share.LastAccessedAt)}
 	if len(share.DescriptionJSON) > 0 {
 		var description shareDescription
 		if json.Unmarshal(share.DescriptionJSON, &description) == nil {
@@ -111,6 +115,20 @@ func (s *Server) handlePublicShare(w http.ResponseWriter, r *http.Request) {
 		writePublicConversationShareError(w, http.StatusNotFound)
 		return
 	}
+	share, err := s.DB.DescribePublicShare(r.Context(), id)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			s.handleGetPublicConversationSharePage(w, r)
+		} else {
+			s.Logger.Error("describe public share", "error", err)
+			if r.URL.Query().Get("action") == string(sharecontract.Resolve) {
+				writeError(w, http.StatusServiceUnavailable, "share storage is unavailable")
+			} else {
+				writePublicConversationShareError(w, http.StatusInternalServerError)
+			}
+		}
+		return
+	}
 	// The legacy attachment locator is a viewer-only display hint. It cannot
 	// select a new action or participate in generic resolution.
 	query := r.URL.RawQuery
@@ -128,20 +146,6 @@ func (s *Server) handlePublicShare(w http.ResponseWriter, r *http.Request) {
 	selection, err := sharecontract.ParseQuery(query)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
-		return
-	}
-	share, err := s.DB.DescribePublicShare(r.Context(), id)
-	if err != nil {
-		if errors.Is(err, store.ErrNotFound) {
-			writePublicConversationShareError(w, http.StatusNotFound)
-		} else {
-			s.Logger.Error("describe public share", "error", err)
-			if selection.Action == sharecontract.Resolve {
-				writeError(w, http.StatusServiceUnavailable, "share storage is unavailable")
-			} else {
-				writePublicConversationShareError(w, http.StatusInternalServerError)
-			}
-		}
 		return
 	}
 	if legacyAttachment && share.Kind != "conversation" {
@@ -203,7 +207,23 @@ func (s *Server) handlePublicShare(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if description.Preview != nil {
-			s.handleGetPublicConversationSharePage(w, r)
+			full, err := s.DB.AccessPublicShare(r.Context(), id)
+			if err != nil {
+				if errors.Is(err, store.ErrNotFound) {
+					writePublicConversationShareError(w, http.StatusNotFound)
+				} else {
+					s.Logger.Error("read share content", "shareId", id, "error", err)
+					writePublicConversationShareError(w, http.StatusInternalServerError)
+				}
+				return
+			}
+			if r.Method == http.MethodHead {
+				setPublicConversationShareHeaders(w.Header())
+				w.WriteHeader(http.StatusOK)
+				return
+			}
+			s.recordShareAccess(r, id)
+			s.writeConversationSharePage(w, r, full)
 			return
 		}
 		s.writeShareMetadataPage(w, r, share, description, resources, "")
@@ -243,11 +263,7 @@ func (s *Server) handlePublicShare(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) recordShareAccess(r *http.Request, id string) {
-	record := s.recordConversationShareAccess
-	if record == nil {
-		record = s.DB.RecordConversationShareAccess
-	}
-	if err := record(r.Context(), id, s.now().UTC()); err != nil {
+	if err := s.DB.RecordShareAccess(r.Context(), id, s.now().UTC()); err != nil {
 		s.Logger.Error("record share access", "shareId", id, "error", err)
 	}
 }
@@ -259,8 +275,9 @@ func (s *Server) writeShareMetadataPage(w http.ResponseWriter, r *http.Request, 
 	body.WriteString(`<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>` + title + `</title><style>
 *{box-sizing:border-box}body{margin:0;padding:48px 20px;background:#f3f6fa;color:#263244;font:15px/1.6 system-ui,sans-serif}main{max-width:820px;margin:auto;background:#fff;border:1px solid #e3e9f1;border-radius:20px;overflow:hidden;box-shadow:0 16px 48px #2632440a}header{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:16px;padding:20px 28px;border-bottom:1px solid #e8edf3}.brand{font-size:17px;font-weight:650}nav{display:flex;align-items:center;flex-wrap:wrap;gap:12px}a{color:#2767a7;text-underline-offset:3px}.button{display:inline-block;padding:9px 16px;border-radius:9px;background:#edf3fa;text-decoration:none;font-size:13px;font-weight:600}.primary{background:#2767a7;color:#fff}a:focus-visible{outline:3px solid #81b5ec;outline-offset:3px}h1{margin:0;padding:32px 28px;font-size:28px;overflow-wrap:anywhere}iframe{display:block;width:100%;height:clamp(360px,60vh,640px);border:0}.resource{margin:0;padding:16px 28px;border-top:1px solid #e8edf3;overflow-wrap:anywhere}@media(max-width:560px){body{padding:16px 12px}header{padding:20px}nav{width:100%}main{border-radius:14px}}
 </style></head><body><main><header><span class="brand">` + product + `</span><nav aria-label="分享操作">`)
-	if description.Desktop != nil {
-		link := s.Config.BrandID + "://share/" + url.PathEscape(share.ID) + "?action=desktop"
+	if base, err := s.conversationShareBaseURL(); description.Desktop != nil && err == nil {
+		query := url.Values{"v": {"1"}, "url": {sharePublicURL(base, share.ID)}}
+		link := s.Config.BrandID + "://share/open?" + query.Encode()
 		body.WriteString(`<a class="button primary" href="` + html.EscapeString(link) + `">在 ` + product + ` 中打开</a>`)
 		if s.Config.ProductDownloadPageURL != "" {
 			body.WriteString(`<a class="button" href="` + html.EscapeString(s.Config.ProductDownloadPageURL) + `" target="_blank" rel="noopener noreferrer">下载 ` + product + `</a>`)
@@ -295,4 +312,43 @@ func (s *Server) writeShareMetadataPage(w http.ResponseWriter, r *http.Request, 
 		_, _ = w.Write([]byte(body.String()))
 		s.recordShareAccess(r, share.ID)
 	}
+}
+
+func (s *Server) handleRevokeShare(w http.ResponseWriter, r *http.Request) {
+	principal, ok := s.authorizeRegistration(w, r)
+	if !ok {
+		return
+	}
+	id, ok := conversationShareIDFromPath(r.URL.Path, sharecontract.ManagementPath+"/")
+	if r.URL.RawQuery != "" {
+		writeError(w, http.StatusBadRequest, "share revocation does not accept query parameters")
+		return
+	}
+	if !ok {
+		writeError(w, http.StatusNotFound, "share not found")
+		return
+	}
+	files := s.shareResources
+	cleanup := s.DB.DeleteShareResourceMetadata
+	err := s.DB.RevokeShare(r.Context(), id, principal.UserID, s.now().UTC())
+	if errors.Is(err, store.ErrNotFound) {
+		err = s.DB.RevokeConversationShare(r.Context(), id, principal.UserID, s.now().UTC())
+		files, cleanup = s.conversationShareResources, s.DB.DeleteConversationShareResourceMetadata
+	}
+	if errors.Is(err, store.ErrNotFound) {
+		writeError(w, http.StatusNotFound, "share not found")
+		return
+	}
+	if err != nil {
+		s.writeInternal(w, "revoke share", err)
+		return
+	}
+	if files != nil {
+		if err := files.Delete(id); err != nil {
+			s.Logger.Error("delete revoked share resources", "shareId", id, "error", err)
+		} else if err := cleanup(r.Context(), id); err != nil {
+			s.Logger.Error("delete revoked share metadata", "shareId", id, "error", err)
+		}
+	}
+	w.WriteHeader(http.StatusNoContent)
 }

@@ -1,6 +1,7 @@
 package desktop
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -16,7 +17,7 @@ import (
 var errShareBehaviorUnsupported = errors.New("share behavior is not supported")
 
 // The persisted description excludes content bytes and resource metadata. Those
-// remain in the existing snapshot_json and resources table, once per share.
+// remain in the owning content and resources tables, once per share.
 type shareDescription struct {
 	ProtocolVersion   int                        `json:"protocolVersion"`
 	Source            *sharecontract.Source      `json:"source,omitempty"`
@@ -29,19 +30,21 @@ type shareDescription struct {
 type preparedShare struct {
 	envelope       sharecontract.Envelope
 	resources      []store.ConversationShareResource
-	conversationID string // Only the conversation adapter supplies this projection.
+	conversationID string // Optional conversation navigation projection.
 }
 
 type shareUploadDecoder func(http.ResponseWriter, *http.Request, *sharefiles.Stage, config.ConversationShareLimits) (preparedShare, error)
 
 // publishShare owns the single staging, commit, database and compensation path.
 // The two HTTP edges only decode their wire protocol and project their response.
-func (s *Server) publishShare(w http.ResponseWriter, r *http.Request, owner string, decode shareUploadDecoder) (store.ConversationShare, string, bool) {
+func (s *Server) publishShare(w http.ResponseWriter, r *http.Request, owner string, decode shareUploadDecoder, files *sharefiles.Store,
+	create func(context.Context, store.ConversationShare, []store.ConversationShareResource) (store.ConversationShare, error),
+) (store.ConversationShare, string, bool) {
 	if r.URL.RawQuery != "" {
 		writeError(w, http.StatusBadRequest, "share creation does not accept query parameters")
 		return store.ConversationShare{}, "", false
 	}
-	if s.conversationShareResources == nil {
+	if files == nil {
 		writeError(w, http.StatusServiceUnavailable, "share resource storage is unavailable")
 		return store.ConversationShare{}, "", false
 	}
@@ -55,7 +58,7 @@ func (s *Server) publishShare(w http.ResponseWriter, r *http.Request, owner stri
 		s.writeInternal(w, "create share id", err)
 		return store.ConversationShare{}, "", false
 	}
-	stage, err := s.conversationShareResources.Begin()
+	stage, err := files.Begin()
 	if err != nil {
 		s.writeInternal(w, "stage share resources", err)
 		return store.ConversationShare{}, "", false
@@ -101,11 +104,11 @@ func (s *Server) publishShare(w http.ResponseWriter, r *http.Request, owner stri
 		s.writeInternal(w, "commit share resources", err)
 		return store.ConversationShare{}, "", false
 	}
-	share, err := s.DB.CreateShareWithResources(r.Context(), store.ConversationShare{ID: id, OwnerUserID: owner,
+	share, err := create(r.Context(), store.ConversationShare{ID: id, OwnerUserID: owner,
 		ConversationID: prepared.conversationID, Kind: e.Kind, Title: e.Title, DescriptionJSON: description,
 		SnapshotVersion: e.Content.Version, SnapshotJSON: content, CreatedAt: s.now().UTC()}, prepared.resources)
 	if err != nil {
-		if cleanupErr := s.conversationShareResources.Delete(id); cleanupErr != nil {
+		if cleanupErr := files.Delete(id); cleanupErr != nil {
 			s.Logger.Error("remove failed share resources", "shareId", id, "error", cleanupErr)
 		}
 		s.writeInternal(w, "create share", err)

@@ -39,7 +39,7 @@ Relay 入口在 `cmd/relay/main.go`，启动顺序是：
 - `*.m.example.test/api/upload`: Mobile 上传入口，只从请求 Host 确定 Desktop，内部发送 `ns=ap`, `type=/api/upload`；multipart 不允许携带 `publicHost`。
 - `*.m.example.test/api/resource`: Mobile 资源入口，内部发送 `ns=ap`, `type=/api/resource` 和 `{file,pushURL}`；Desktop 通过 ticket 保护的 `/api/push/{id}` 回推文件。
 - `*-wa.example.test`: Desktop WebApp public HTTP/WebSocket。Relay 通过 WebApp route 与所属 deviceKey 打开 Desktop stream，向 Desktop 发送 `ns=wa` 的 `http.request` 或 `websocket.connect` 元数据。
-- `share.example.test`: 分享只读站点。公开边缘网关将 `/share/*` 和 `/assets/conversation-export/*` 转发到 Relay；Tunnel API origin 也暴露对话模板。Relay 按冻结描述提供内置对话、隔离业务预览或明确支持的动作；对话 `ConversationSnapshotV1` 继续注入当前唯一模板。所有分享仅在所有者撤销后失效，公开读取不建立领取会话。对话模板和 manifest 由 WebClient 的独立发布命令替换，历史内容寻址资产保留，并从编译期 `embed.FS` 返回。
+- `share.example.test`: 分享只读站点。公开边缘网关将 `/share/*` 和 `/assets/conversation-export/*` 转发到 Relay；Tunnel API origin 也暴露对话模板。Relay 按冻结描述提供内置对话、隔离业务预览或明确支持的动作；对话 `ConversationSnapshotV1` 继续注入当前唯一模板。通用分享仅在所有者撤销后失效；旧对话分享继续执行到期与一次性领取策略。对话模板和 manifest 由 WebClient 的独立发布命令替换，历史内容寻址资产保留，并从编译期 `embed.FS` 返回。
 
 ## 4. 目录结构
 
@@ -62,7 +62,7 @@ Relay 入口在 `cmd/relay/main.go`，启动顺序是：
 
 ## 5. 数据结构
 
-核心表由 `internal/store/schema.sql` 和 `internal/store/schema_sqlite.sql` 定义：
+基础表由 `internal/store/schema.sql` 和 `internal/store/schema_sqlite.sql` 定义，通用分享表由同目录的 `schema_shares.sql` 和 `schema_shares_sqlite.sql` 增量初始化：
 
 - `admin_users`: 本地管理用户。
 - `admin_sessions`: 本地管理登录 session，cookie 名为 `tunnel_hub_session`。
@@ -74,8 +74,10 @@ Relay 入口在 `cmd/relay/main.go`，启动顺序是：
 - `desktop_sessions`: Desktop tunnel 在线历史，以 deviceKey 关联设备。
 - `events`: 管理操作和系统事件。
 - `traffic_events`: Desktop/WebApp/普通 route 的访问统计。
-- `conversation_shares`: 一个 shareId 独占的内容、kind、冻结标题、描述、所有者、可选旧会话关联及撤销状态；原 snapshot_json 字节只保存一份。旧非永久记录必须先撤销，再移除到期/一次性列和 claims 表；保留既有撤销时间及永久分享 ID、内容和资源。新内部模型不含退役字段；当前已发布 Desktop 的七键响应仅在 HTTP DTO 中保留 null/false 常量。不恢复 HTML 上传或旧 Platform 凭据路径。
-- `conversation_share_access`: 每条分享最近一次成功公开访问时间；热更新与 Snapshot BLOB 分表，不保存访问日志或次数。
+- `conversation_shares`、`conversation_share_resources`、`conversation_share_access`、`conversation_share_claims`: 保留当前 main 的对话存储、资源元数据、最近访问与一次性领取状态；原到期列、一次性列、CHECK 和会话关联约束保持不变。
+- `shares`、`share_resources`、`share_access`: 通用分享的内容、kind、标题、描述、资源及最近访问状态；每次创建独占内容和资源，不向旧表双写。v2 创建的对话也保存在这里。管理列表只投影新旧元数据，不加载正文和描述 BLOB。
+- 资源目录：旧对话继续使用根目录的 `shares/` 和 `.staging/`，通用分享复用同一文件实现，使用根目录下的 `v2/`。两个清理范围必须隔离，防止旧 Hub 清理新分享资源。
+- 兼容范围：当前 main 与同一基础结构的分支可切回运行；旧 Hub 只提供旧分享能力，新分享保留并在切回本分支后恢复。不得启动时批量撤销旧分享或删除旧列/claims 表；已经执行过破坏性迁移的库必须先恢复匹配备份，不自动补默认值伪造恢复。
 
 数据库只包含当前有效模型，不保留未使用的 API key 表或历史字段迁移；MySQL/SQLite 差异仅限当前 schema 所需的显式适配。
 
@@ -183,7 +185,7 @@ npm run dev
 - 使用 `database/sql` 和具体 `store.DB`，数据库差异只允许出现在连接、schema 和必要 SQL/事务分支；不引入 ORM、通用方言框架或 Repository。
 - 全新 MySQL 库由应用逐表建表；全新 SQLite 库在事务中建表并写入版本。两者采用现有显式迁移；Desktop 撤销字段升级必须保留设备、公网地址、分享及资源。
 - 使用 InnoDB、utf8mb4、区分大小写的标识符、UTC DATETIME(6)；`max_allowed_packet` 至少 64 MiB。
-- 设备/WebApp 注册和最后管理员保护必须通过数据库约束和事务保证并发语义；分享公开读取只查同一撤销状态，不恢复领取 Cookie 或访问到期分支。
+- 设备/WebApp 注册和最后管理员保护必须通过数据库约束和事务保证并发语义；通用分享按撤销状态读取；旧对话分享必须保留到期校验、一次性领取 Cookie 和领取窗口的事务语义。
 - MySQL 测试使用 `internal/testutil/mysqltest` 创建独立随机库，不得读取生产账号或静默跳过；SQLite 测试只使用 `t.TempDir()` 下的文件。清理失败必须明确报告。
 - 保留本地历史数据库和旧 Docker 卷，不把它们当作代码清理对象。
 
