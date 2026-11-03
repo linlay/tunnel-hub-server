@@ -123,7 +123,7 @@ func writePublicConversationShareAttachmentError(w http.ResponseWriter, status i
 }
 
 func (s *Server) handleGetPublicConversationShareAttachment(w http.ResponseWriter, r *http.Request) {
-	if r.URL.RawQuery != "" {
+	if r.URL.RawQuery != "" && r.URL.RawQuery != "embed=1" {
 		writeError(w, http.StatusBadRequest, "attachment path does not accept query parameters")
 		return
 	}
@@ -157,7 +157,7 @@ func (s *Server) serveShareResource(w http.ResponseWriter, r *http.Request, shar
 		writePublicConversationShareAttachmentError(w, http.StatusNotFound)
 		return
 	}
-	if s.conversationShareResources == nil || (preview && resource.MIMEType != "text/html") {
+	if s.conversationShareResources == nil || (preview && !previewableShareMIME(resource.MIMEType)) {
 		writePublicConversationShareAttachmentError(w, http.StatusNotFound)
 		return
 	}
@@ -174,33 +174,42 @@ func (s *Server) serveShareResource(w http.ResponseWriter, r *http.Request, shar
 
 	header := w.Header()
 	setPublicConversationShareHeaders(header)
-	if preview {
-		header.Set("Content-Type", "text/html; charset=utf-8")
-		header.Set("Content-Security-Policy", "default-src 'none'; img-src data:; style-src 'unsafe-inline'; font-src 'none'; script-src 'none'; form-action 'none'; base-uri 'none'; frame-ancestors 'self'; sandbox")
-		header.Set("Content-Disposition", mime.FormatMediaType("inline", map[string]string{"filename": resource.Name}))
-		source, err := io.ReadAll(io.LimitReader(file, resource.Size+1))
-		if err != nil || int64(len(source)) != resource.Size {
-			writePublicConversationShareAttachmentError(w, http.StatusNotFound)
+	if preview && resource.MIMEType == "text/html" {
+		if r.URL.Query().Get("embed") != "1" {
+			http.Redirect(w, r, publicConversationSharePagePath+shareID+"?attachment="+resource.ID, http.StatusSeeOther)
 			return
 		}
-		body := sanitizeSharedHTML(source)
+		if s.conversationShareRenderer == nil {
+			writePublicConversationShareAttachmentError(w, http.StatusInternalServerError)
+			return
+		}
+		body, err := s.conversationShareRenderer.RenderHTMLPreview(s.Config.SharePublicBaseURL)
+		if err != nil {
+			writePublicConversationShareAttachmentError(w, http.StatusInternalServerError)
+			return
+		}
+		header.Set("Content-Type", "text/html; charset=utf-8")
+		header.Set("Content-Security-Policy", "default-src 'none'; script-src 'unsafe-inline' https: "+s.Config.SharePublicBaseURL+"; style-src 'unsafe-inline' https:; img-src blob: data: https:; media-src blob: data: https:; font-src https:; connect-src 'none'; object-src 'none'; frame-src 'none'; worker-src 'none'; form-action 'none'; base-uri 'none'; frame-ancestors 'self'; sandbox allow-scripts")
 		header.Set("Content-Length", strconv.Itoa(len(body)))
 		w.WriteHeader(http.StatusOK)
 		if r.Method == http.MethodGet {
-			s.recordShareAccess(r, shareID)
 			_, _ = w.Write(body)
 		}
 		return
 	}
 	header.Set("Content-Type", resource.MIMEType)
 	header.Set("Content-Security-Policy", "default-src 'none'; sandbox")
-	header.Set("Content-Disposition", mime.FormatMediaType("attachment", map[string]string{"filename": resource.Name}))
-	header.Set("Content-Length", strconv.FormatInt(resource.Size, 10))
-	w.WriteHeader(http.StatusOK)
-	if r.Method == http.MethodGet {
-		s.recordShareAccess(r, shareID)
-		_, _ = io.CopyN(w, file, resource.Size)
+	info, err := file.Stat()
+	if err != nil {
+		writePublicConversationShareAttachmentError(w, http.StatusNotFound)
+		return
 	}
+	disposition := "attachment"
+	if preview {
+		disposition = "inline"
+	}
+	header.Set("Content-Disposition", mime.FormatMediaType(disposition, map[string]string{"filename": resource.Name}))
+	http.ServeContent(w, r, resource.Name, info.ModTime(), file)
 }
 
 // Use the same verified file handle for preview/download; do not re-open a
@@ -228,4 +237,13 @@ func (s *Server) openVerifiedShareResource(shareID string, resource store.Conver
 		return nil, err
 	}
 	return file, nil
+}
+
+func previewableShareMIME(value string) bool {
+	return value == "text/html" || isShareMediaMIME(value)
+}
+
+func isShareMediaMIME(value string) bool {
+	return strings.HasPrefix(value, "image/") ||
+		strings.HasPrefix(value, "audio/") || strings.HasPrefix(value, "video/")
 }

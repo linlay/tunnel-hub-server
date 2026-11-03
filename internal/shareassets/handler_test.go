@@ -237,6 +237,36 @@ func TestHandlerServesEveryCurrentManifestAsset(t *testing.T) {
 	}
 }
 
+func TestBundleHTMLPreviewUsesOnlyTheCurrentIntegrityCheckedBootstrap(t *testing.T) {
+	bundle := NewBundle()
+	body, err := bundle.RenderHTMLPreview("https://share.example.test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	markup := string(body)
+	for _, expected := range []string{
+		`name="conversation-share-origin" content="https://share.example.test"`,
+		PublicPathPrefix + bundle.assetSet + "/html-preview-bootstrap.js",
+		`crossorigin="anonymous"`, `integrity="` + bundle.htmlPreviewIntegrity + `"`,
+	} {
+		if !strings.Contains(markup, expected) {
+			t.Fatalf("bootstrap is missing %s", expected)
+		}
+	}
+	if strings.Contains(markup, "runtime.js") || strings.Count(markup, "<script") != 1 {
+		t.Fatal("guest shell contains a second runtime")
+	}
+	if _, err := bundle.RenderHTMLPreview("https://share.example.test/path"); err == nil {
+		t.Fatal("non-origin URL accepted")
+	}
+	req := httptest.NewRequest(http.MethodGet, PublicPathPrefix+bundle.assetSet+"/html-preview-bootstrap.js", nil)
+	rec := httptest.NewRecorder()
+	bundle.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK || rec.Header().Get("Access-Control-Allow-Origin") != "*" || rec.Header().Get("Set-Cookie") != "" {
+		t.Fatalf("anonymous bootstrap headers: %d %v", rec.Code, rec.Header())
+	}
+}
+
 func TestBundleRendersHTMLSafeSnapshotWithCurrentAssets(t *testing.T) {
 	bundle := NewBundle()
 	snapshot := []byte(`{"version":1,"title":"</script>&  "}`)

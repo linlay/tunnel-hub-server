@@ -1,0 +1,37 @@
+{
+  "browser": "Chrome/155.0.8059.80",
+  "fixture": "synthetic share, isolated Chrome profile, local TLS certificate with test-only certificate bypass",
+  "html": {
+    "inline": true,
+    "cdn": true,
+    "parentDOM": false,
+    "cookie": false,
+    "storage": false,
+    "worker": false,
+    "connect": false,
+    "image": true,
+    "blob": true,
+    "audio": true,
+    "video": true,
+    "audioPlay": true,
+    "videoPlay": true
+  },
+  "onceOtherBrowser": 404,
+  "timeline": {
+    "math": 1,
+    "charts": 1,
+    "mermaidStyle": true,
+    "images": [
+      true
+    ]
+  },
+  "unsupportedMediaDownloadFallback": true,
+  "tamperedBootstrapBlocked": true,
+  "navigationCancelledWithoutDelivery": {
+    "probes": [],
+    "frames": 0
+  },
+  "bootstrapAnonymous": true,
+  "parentDownloadsAuthenticated": true,
+  "guestConnectRequests": 0
+}

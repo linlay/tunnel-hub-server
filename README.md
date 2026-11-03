@@ -23,6 +23,8 @@ WebApp 有两条独立链路：
 - 手机配对访问使用 `https://<device>-<frontendPort>.m.example.test/`，不创建数据库 WebApp route。首次导航携带配对 `app` token，Relay 换成 HttpOnly Cookie 并重定向到无 token 地址；每个请求仍由 Desktop 校验 token scope、device id 和运行中的 WebApp 端口。
 - 用户主动公开分享使用 `*-wa.example.test`。该路由仅由 Desktop 的“一键发布”注册和启停，保持匿名 URL 分享语义。
 
+发布路由是持久化配置，桌面在线状态来自 Manager 当前持有的可用连接；注册或发布成功不代表连接持续在线。公开 WebApp 路由存在但所属桌面离线时，HTTP 和 WebSocket 握手均返回 `502 assigned desktop is offline`。同一桌面重新连接后沿用原路由和公网地址，无需重新发布；断线不会删除路由或轮换设备身份。
+
 ## 2. 快速开始
 
 ### 前置要求
@@ -316,7 +318,7 @@ curl -X POST https://hub.example.test/api/desktop/devices/register \
 
 创建、读取和撤销对话分享：
 
-Relay 保存 Desktop 上传的 `ConversationSnapshotV1` JSON 和冻结的 HTML 附件，匿名访问时安全注入当前唯一分享模板。Snapshot 与附件累计分别默认 50 MiB，环境配置只接受正整数 MiB，重启生效。创建前通过同一鉴权读取 `GET /api/desktop/shares/limits` 的 `maxSnapshotBytes`、`maxResourceBytes`（字节，`no-store`）。请求体额度由两者加 1 MiB 推导，Go 上传入口执行限制，独立于通用请求额度；MySQL packet 至少 64 MiB 且容纳快照加 1 MiB。store 和历史读取不重复执行新建额度。创建请求必须提供 `multipart/form-data`、`X-Conversation-Snapshot-Version: 1`、非空 `X-Conversation-ID` 和 `X-Conversation-Share-Expiration`；该兼容请求头只接受 `permanent`；`once`、`3h`、`1d`、`7d`、`30d` 明确拒绝，不转为永久。multipart 中 `snapshot` part 必填，每个附件使用 `attachment:<id>` part 并与 Snapshot 声明严格匹配。Desktop 不下载模板或生成分享 HTML；本地 HTML 导出仍是独立功能。下面命令只用于服务端联调。
+Relay 保存 Desktop 上传的 `ConversationSnapshotV1` JSON 和冻结的已发布产物及当前 Chat 图片音视频，匿名访问时安全注入当前唯一分享模板。Snapshot 与附件累计分别默认 50 MiB，环境配置只接受正整数 MiB，重启生效。创建前通过同一鉴权读取 `GET /api/desktop/shares/limits` 的 `maxSnapshotBytes`、`maxResourceBytes`（字节，`no-store`）。请求体额度由两者加 1 MiB 推导，Go 上传入口执行限制，独立于通用请求额度；MySQL packet 至少 64 MiB 且容纳快照加 1 MiB。store 和历史读取不重复执行新建额度。创建请求必须提供 `multipart/form-data`、`X-Conversation-Snapshot-Version: 1`、非空 `X-Conversation-ID` 和 `X-Conversation-Share-Expiration`；该兼容请求头只接受 `permanent`；`once`、`3h`、`1d`、`7d`、`30d` 明确拒绝，不转为永久。multipart 中 `snapshot` part 必填，每个附件使用 `attachment:<id>` part 并与 Snapshot 声明严格匹配。Desktop 不下载模板或生成分享 HTML；本地 HTML 导出仍是独立功能。下面命令只用于服务端联调。
 
 ```bash
 curl -X POST https://hub.example.test/api/desktop/shares \
@@ -345,6 +347,12 @@ curl -X DELETE https://hub.example.test/api/desktop/shares/share_xxx \
 恢复旧备份时，先在隔离副本恢复匹配的数据库和资源，以当前迁移重新应用旧非永久记录的撤销，再验证永久 ID、正文和资源 Hash 后才可开放读取。恢复包含旧有效状态的备份并直接启动旧 Hub 会重新公开已经退役的链接，不能作为回退方式。`TestSQLiteShareBackupRestorePreservesPermanentAndReappliesRevocation` 用离线合成库验证上述恢复顺序及备份未被修改；它不代表生产备份或 MySQL 恢复已验证。
 
 `GET/HEAD /assets/conversation-export/{sha256}/{file}` 提供随 Relay 编译且通过内容 Hash 校验的资源集；当前 manifest 决定新分享页使用的资源集，历史资源集继续服务已有 HTML。分享渲染包由 WebClient 显式同步后随 Relay 原子发布，普通 WebClient 发布不修改它。
+
+Snapshot V1 兼容新增可选 `attachmentIds`、HTML `mediaRefs` 和 `omittedResources`，上传入口验证成功/省略身份及所有关联。资源以规范的当前 Chat 相对引用登记；不接受跨 Chat、内部目录或路径别名。媒体预览与下载继续通过同一分享鉴权和 `ServeContent` 支持 GET/HEAD/Range；SVG 仅在图片上下文使用，下载保持原字节和 attachment 响应。
+
+HTML 的普通 preview 请求重定向到独立附件页；`?embed=1` 返回当前 assetSet 内带 SRI/匿名 CORS 的固定 bootstrap。网络 iframe 保持 opaque origin，只允许脚本；父页从已授权下载接口读取 HTML 与显式媒体映射，经文档绑定 MessagePort 交付一次。guest 创建 Blob 媒体并执行原 HTML；HTTP CSP 拒绝 connect/frame/worker/object/form/base，仅允许约定的内联及 HTTPS 静态依赖。已删除服务端 HTML 清洗旧路径，不提供任意 URL RPC、资源代理或 Cookie 放宽。父页 CSP 的图片和媒体只增加 self。
+
+本次改造的实现、检查结果、浏览器证据和待完成的发布门禁见[执行记录](docs/conversation-share-rendering/08-execution-record.md)。
 
 公开分享页和可下载模板均在每次响应时生成独立的 32 字节随机样式 nonce，并同时填入 CSP 与 `conversation-export-style-nonce` 元数据。分享运行时将 nonce 传给组件动态样式，`style-src-elem` 不放开任意内联样式；可下载模板保留原有 Snapshot、资产 origin 和本地品牌占位符，旧版 Desktop 组装流程无需更改。
 

@@ -221,26 +221,31 @@ func TestConversationShareUploadRejectsAggregateResourceLimit(t *testing.T) {
 	}
 }
 
-func TestCanonicalArtifactSourceRefMatchesPlatformEncoding(t *testing.T) {
+func TestCanonicalChatSourceRefMatchesPlatformEncoding(t *testing.T) {
 	for _, value := range []string{
 		"artifacts/run-1/report.html",
 		"artifacts/run-1/%E6%8A%A5%E5%91%8A.pdf",
 		"artifacts/run-1/report+v1.pdf",
+		"image.png",
+		"media/nested/audio.wav",
 	} {
-		if !canonicalArtifactSourceRef(value) {
+		if !canonicalChatSourceRef(value) {
 			t.Fatalf("canonical ref rejected: %q", value)
 		}
 	}
 	for _, value := range []string{
-		"report.pdf",
-		"artifacts/run-1/nested/report.pdf",
+		"/etc/passwd",
+		"https://example.test/a.png",
+		"C:/Windows/a.png",
+		"a//b.png",
+		"a/../b.png",
 		"artifacts/run-1/报告.pdf",
 		"artifacts/run-1/%e6%8a%a5%e5%91%8a.pdf",
 		"artifacts/run-1/%2e%2e",
 		"artifacts/run-1/%252e%252e",
 		"artifacts/run-1/a%2Fb.pdf",
 	} {
-		if canonicalArtifactSourceRef(value) {
+		if canonicalChatSourceRef(value) {
 			t.Fatalf("non-canonical ref accepted: %q", value)
 		}
 	}
@@ -424,12 +429,16 @@ func TestConversationSharePermanentReadsFrozenAttachmentUntilRevoked(t *testing.
 		server.ServeHTTP(rec, req)
 		return rec
 	}
-	preview := read(attachmentPath)
-	if preview.Code != http.StatusOK || !strings.Contains(preview.Body.String(), "报告") || strings.Contains(preview.Body.String(), "alert(1)") {
+	redirect := read(attachmentPath)
+	if redirect.Code != http.StatusSeeOther || redirect.Header().Get("Location") != pagePath+"?attachment="+id {
+		t.Fatalf("redirect status=%d location=%q", redirect.Code, redirect.Header().Get("Location"))
+	}
+	preview := read(attachmentPath + "?embed=1")
+	if preview.Code != http.StatusOK || !strings.Contains(preview.Body.String(), "html-preview-bootstrap.js") || strings.Contains(preview.Body.String(), "alert(1)") {
 		t.Fatalf("preview status=%d body=%s", preview.Code, preview.Body.String())
 	}
-	if strings.Contains(preview.Body.String(), "不应出现在预览正文的元标题") {
-		t.Fatalf("document title leaked into attachment preview: %s", preview.Body.String())
+	if csp := preview.Header().Get("Content-Security-Policy"); !strings.Contains(csp, "sandbox allow-scripts") || strings.Contains(csp, "allow-same-origin") || !strings.Contains(csp, "connect-src 'none'") {
+		t.Fatalf("preview CSP=%q", csp)
 	}
 	const otherAttachmentID = "ffffffffffffffffffffffff"
 	otherShareID, err := store.NewConversationShareID()
@@ -461,7 +470,7 @@ func TestConversationSharePermanentReadsFrozenAttachmentUntilRevoked(t *testing.
 		t.Fatalf("pdf preview status=%d", pdfPreview.Code)
 	}
 	now = now.Add(100 * 365 * 24 * time.Hour)
-	if response := read(attachmentPath); response.Code != http.StatusOK {
+	if response := read(attachmentPath + "?embed=1"); response.Code != http.StatusOK {
 		t.Fatalf("permanent attachment status=%d", response.Code)
 	}
 	if err := db.RevokeConversationShare(request.Context(), share.ID, "42", now); err != nil {
