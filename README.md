@@ -354,6 +354,8 @@ MySQL 启动只幂等新增通用分享表，不改变旧表、不批量撤销�
 
 Snapshot V1 兼容新增可选 `attachmentIds`、HTML `mediaRefs` 和 `omittedResources`，上传入口验证成功/省略身份及所有关联。资源以规范的当前 Chat 相对引用登记；不接受跨 Chat、内部目录或路径别名。媒体预览与下载继续通过同一分享鉴权和 `ServeContent` 支持 GET/HEAD/Range；SVG 仅在图片上下文使用，下载保持原字节和 attachment 响应。
 
+可选 `turn.error` 和已有 `awaiting-answer` 节点中的已提交内容由 Platform 投影、WebClient 展示，Hub 原样保存，不解释交互业务。先发布兼容这些字段的渲染资源，再发布 Platform／Desktop；无需数据库或 JSONL 迁移。旧分享可继续读取，缺失的交互明细和具体运行错误需从原对话重新生成。
+
 HTML 的普通 preview 请求重定向到独立附件页；`?embed=1` 返回当前 assetSet 内带 SRI/匿名 CORS 的固定 bootstrap。网络 iframe 保持 opaque origin，只允许脚本；父页从已授权下载接口读取 HTML 与显式媒体映射，经文档绑定 MessagePort 交付一次。guest 创建 Blob 媒体并执行原 HTML；HTTP CSP 拒绝 connect/frame/worker/object/form/base，仅允许约定的内联及 HTTPS 静态依赖。已删除服务端 HTML 清洗旧路径，不提供任意 URL RPC、资源代理或 Cookie 放宽。父页 CSP 的图片和媒体只增加 self。
 
 本次改造的实现、检查结果、浏览器证据和待完成的发布门禁见[执行记录](docs/conversation-share-rendering/08-execution-record.md)。
