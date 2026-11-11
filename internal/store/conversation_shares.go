@@ -24,6 +24,9 @@ type ConversationShare struct {
 	ConversationID  string
 	SnapshotVersion int
 	SnapshotJSON    []byte
+	Kind            string
+	Title           string
+	DescriptionJSON []byte
 	CreatedAt       time.Time
 	ExpiresAt       *time.Time
 	LastAccessedAt  *time.Time
@@ -37,6 +40,7 @@ type ConversationShareResource struct {
 	MIMEType string
 	Size     int64
 	SHA256   string
+	Path     string
 }
 
 var conversationShareResourceID = regexp.MustCompile(`^[a-f0-9]{24}$`)
@@ -89,19 +93,13 @@ func (db *DB) CreateConversationShareWithResources(
 	if len(snapshotJSON) == 0 {
 		return ConversationShare{}, errors.New("conversation snapshot is required")
 	}
-	seenResources := make(map[string]struct{}, len(resources))
+	if err := validateShareResources(resources); err != nil {
+		return ConversationShare{}, err
+	}
 	for _, resource := range resources {
-		if !conversationShareResourceID.MatchString(resource.ID) || resource.Name == "" ||
-			len(resource.Name) > 255 || strings.ContainsAny(resource.Name, "/\\") || strings.ContainsFunc(resource.Name, unicode.IsControl) ||
-			!conversationShareResourceMIME.MatchString(resource.MIMEType) || resource.MIMEType != strings.ToLower(resource.MIMEType) || resource.Size < 0 ||
-			len(resource.MIMEType) > 100 ||
-			!conversationShareResourceHash.MatchString(resource.SHA256) {
-			return ConversationShare{}, errors.New("invalid conversation share resource")
+		if resource.Path != "" {
+			return ConversationShare{}, errors.New("conversation resources do not accept package paths")
 		}
-		if _, exists := seenResources[resource.ID]; exists {
-			return ConversationShare{}, errors.New("duplicate conversation share resource")
-		}
-		seenResources[resource.ID] = struct{}{}
 	}
 	if expiresAt != nil && !expiresAt.After(createdAt) {
 		return ConversationShare{}, errors.New("expiration must be after creation")

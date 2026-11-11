@@ -2,6 +2,7 @@ package desktop
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -14,6 +15,7 @@ import (
 	"net/textproto"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -256,7 +258,7 @@ func TestConversationShareDatabaseFailureRemovesCommittedResourceDirectory(t *te
 	if err := db.Close(); err != nil {
 		t.Fatal(err)
 	}
-	response := performConversationShareRequestWithExpiration(server, "30d", []byte(validConversationSnapshot))
+	response := performConversationShareRequestWithExpiration(server, "permanent", []byte(validConversationSnapshot))
 	if response.Code != http.StatusInternalServerError {
 		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
 	}
@@ -298,7 +300,7 @@ func TestConversationShareRevokeRemovesFrozenResourceDirectory(t *testing.T) {
 	request := httptest.NewRequest(http.MethodPost, conversationSharesPath, &payload)
 	request.Header.Set("Content-Type", writer.FormDataContentType())
 	request.Header.Set(conversationSnapshotVersionHeader, conversationSnapshotVersion)
-	request.Header.Set(conversationShareExpirationHeader, "30d")
+	request.Header.Set(conversationShareExpirationHeader, "permanent")
 	request.Header.Set(conversationShareConversationIDHeader, "chat-test")
 	request.Header.Set("Authorization", "Bearer "+defaultDesktopJWT)
 	created := httptest.NewRecorder()
@@ -328,7 +330,40 @@ func TestConversationShareRevokeRemovesFrozenResourceDirectory(t *testing.T) {
 	}
 }
 
-func TestConversationShareOnceSessionReadsFrozenAttachment(t *testing.T) {
+func TestSanitizeSharedHTMLRemovesActiveContent(t *testing.T) {
+	source := []byte(`<html><head><style>p{color:red}</style></head><body><script>alert(1)</script><p style="color:blue">safe</p><img src="https://bad.example/x.png"><img src="data:image/png;base64,AAAA"><iframe src="https://bad.example"></iframe></body></html>`)
+	result := string(sanitizeSharedHTML(source))
+	for _, fragment := range []string{"alert(1)", "<script", "<iframe", "bad.example"} {
+		if strings.Contains(result, fragment) {
+			t.Fatalf("unsafe fragment %q in %s", fragment, result)
+		}
+	}
+	if !strings.Contains(result, "safe") || !strings.Contains(result, "data:image/png;base64,AAAA") {
+		t.Fatalf("safe content lost: %s", result)
+	}
+}
+
+func TestSanitizeSharedHTMLDropsDocumentTitleAndPreservesBody(t *testing.T) {
+	for _, title := range []string{
+		`<title>MCP 服务上线计划 · 会议纪要摘要</title>`,
+		`<TITLE>MCP 服务上线计划 &amp; 会议纪要摘要</TITLE>`,
+	} {
+		t.Run(title, func(t *testing.T) {
+			source := []byte(`<html><head>` + title + `<style>h1{color:blue}</style></head><body><h1>会议正文标题</h1><p title="补充说明">会议内容</p></body></html>`)
+			result := string(sanitizeSharedHTML(source))
+			if strings.Contains(result, "MCP 服务上线计划") || strings.Contains(result, "会议纪要摘要") {
+				t.Fatalf("document title leaked into preview: %s", result)
+			}
+			for _, fragment := range []string{`<style>h1{color:blue}</style>`, `<h1>会议正文标题</h1>`, `<p title="补充说明">会议内容</p>`} {
+				if !strings.Contains(result, fragment) {
+					t.Fatalf("body content or safe styling lost: missing %q in %s", fragment, result)
+				}
+			}
+		})
+	}
+}
+
+func TestConversationSharePermanentReadsFrozenAttachmentUntilRevoked(t *testing.T) {
 	cfg := desktopTestConfig(t)
 	cfg.SharePublicBaseURL = "https://share.example.test"
 	server, db := newDesktopTestServerWithConfig(t, cfg)
@@ -364,7 +399,7 @@ func TestConversationShareOnceSessionReadsFrozenAttachment(t *testing.T) {
 	request := httptest.NewRequest(http.MethodPost, conversationSharesPath, &payload)
 	request.Header.Set("Content-Type", writer.FormDataContentType())
 	request.Header.Set(conversationSnapshotVersionHeader, conversationSnapshotVersion)
-	request.Header.Set(conversationShareExpirationHeader, "once")
+	request.Header.Set(conversationShareExpirationHeader, "permanent")
 	request.Header.Set(conversationShareConversationIDHeader, "chat-test")
 	request.Header.Set("Authorization", "Bearer "+defaultDesktopJWT)
 	created := httptest.NewRecorder()
@@ -382,15 +417,14 @@ func TestConversationShareOnceSessionReadsFrozenAttachment(t *testing.T) {
 		t.Fatalf("HEAD status=%d", head.Code)
 	}
 	first := performConversationShareRequest(server, http.MethodGet, pagePath, nil, "")
-	if first.Code != http.StatusOK || len(first.Result().Cookies()) != 1 {
+	if first.Code != http.StatusOK || len(first.Result().Cookies()) != 0 {
 		t.Fatalf("first access status=%d cookies=%v", first.Code, first.Result().Cookies())
 	}
-	if second := performConversationShareRequest(server, http.MethodGet, pagePath, nil, ""); second.Code != http.StatusNotFound {
+	if second := performConversationShareRequest(server, http.MethodGet, pagePath, nil, ""); second.Code != http.StatusOK {
 		t.Fatalf("second browser status=%d", second.Code)
 	}
 	read := func(path string) *httptest.ResponseRecorder {
 		req := httptest.NewRequest(http.MethodGet, path, nil)
-		req.AddCookie(first.Result().Cookies()[0])
 		rec := httptest.NewRecorder()
 		server.ServeHTTP(rec, req)
 		return rec
@@ -411,10 +445,8 @@ func TestConversationShareOnceSessionReadsFrozenAttachment(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = db.CreateConversationShareWithResources(request.Context(), otherShareID, "owner", "other-chat", store.ConversationSnapshotVersion,
-		[]byte(`{"version":1}`), []store.ConversationShareResource{{ID: otherAttachmentID,
-			Name: "other.html", MIMEType: "text/html", Size: int64(len(body)), SHA256: hex.EncodeToString(hash[:])}},
-		now, nil, false)
+	_, err = db.CreateConversationShareWithResources(request.Context(), otherShareID, "owner", "other-chat", store.ConversationSnapshotVersion, []byte(`{"version":1}`), []store.ConversationShareResource{{ID: otherAttachmentID,
+		Name: "other.html", MIMEType: "text/html", Size: int64(len(body)), SHA256: hex.EncodeToString(hash[:])}}, now, nil, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -437,14 +469,80 @@ func TestConversationShareOnceSessionReadsFrozenAttachment(t *testing.T) {
 	if pdfPreview := read(pagePath + "/attachments/" + pdfID + "/preview"); pdfPreview.Code != http.StatusNotFound {
 		t.Fatalf("pdf preview status=%d", pdfPreview.Code)
 	}
-	now = now.Add(31 * time.Minute)
-	if expired := read(attachmentPath); expired.Code != http.StatusNotFound {
-		t.Fatalf("expired attachment status=%d", expired.Code)
+	now = now.Add(100 * 365 * 24 * time.Hour)
+	if response := read(attachmentPath + "?embed=1"); response.Code != http.StatusOK {
+		t.Fatalf("permanent attachment status=%d", response.Code)
+	}
+	if err := db.RevokeConversationShare(request.Context(), share.ID, "42", now); err != nil {
+		t.Fatal(err)
+	}
+	if response := read(attachmentPath); response.Code != http.StatusNotFound {
+		t.Fatalf("revoked attachment status=%d", response.Code)
 	}
 	if err := server.CleanupConversationShareResources(request.Context()); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(filepath.Join(cfg.ConversationShareResourceDir, "shares", share.ID)); !os.IsNotExist(err) {
-		t.Fatalf("expired resource directory still exists: %v", err)
+		t.Fatalf("revoked resource directory still exists: %v", err)
+	}
+}
+
+func TestConversationShareCleanupRetriesFailedFileRemoval(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX directory permission failure injection; Windows uses its existing filesystem semantics")
+	}
+	cfg := desktopTestConfig(t)
+	cfg.SharePublicBaseURL = "https://share.example.test"
+	server, db := newDesktopTestServerWithConfig(t, cfg)
+	id, err := store.NewConversationShareID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	const resourceID = "0123456789abcdef01234567"
+	body := []byte("frozen")
+	digest := sha256.Sum256(body)
+	stage, err := server.conversationShareResources.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stage.Abort()
+	if _, err := stage.Write(resourceID, bytes.NewReader(body), int64(len(body))); err != nil {
+		t.Fatal(err)
+	}
+	if err := stage.Commit(id); err != nil {
+		t.Fatal(err)
+	}
+	_, err = db.CreateConversationShareWithResources(context.Background(), id, "42", "chat", 1, []byte(`{}`), []store.ConversationShareResource{{ID: resourceID, Name: "file.txt", MIMEType: "text/plain", Size: int64(len(body)), SHA256: hex.EncodeToString(digest[:])}}, time.Now(), nil, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resourceDir := filepath.Join(cfg.ConversationShareResourceDir, "shares", id, "resources")
+	if err := os.Chmod(resourceDir, 0); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chmod(resourceDir, 0700)
+	if err := db.RevokeConversationShare(context.Background(), id, "42", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	_ = server.CleanupConversationShareResources(context.Background())
+	ids, err := db.ConversationShareResourceCleanupIDs(context.Background(), time.Now())
+	if err != nil || len(ids) != 1 || ids[0] != id {
+		t.Fatal("file removal failure lost retry metadata", err)
+	}
+	if response := performConversationShareRequest(server, http.MethodGet, publicConversationSharePagePath+id, nil, ""); response.Code != http.StatusNotFound {
+		t.Fatal("failed cleanup reopened share")
+	}
+	if err := os.Chmod(resourceDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := server.CleanupConversationShareResources(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	ids, err = db.ConversationShareResourceCleanupIDs(context.Background(), time.Now())
+	if err != nil || len(ids) != 0 {
+		t.Fatal("file removal retry failed", err)
+	}
+	if _, err := os.Stat(filepath.Dir(resourceDir)); !os.IsNotExist(err) {
+		t.Fatal("resource directory remains", err)
 	}
 }

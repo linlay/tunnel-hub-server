@@ -1,6 +1,7 @@
 package desktop
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
@@ -62,67 +63,17 @@ func (s *Server) handleCreateConversationShare(w http.ResponseWriter, r *http.Re
 		writeError(w, http.StatusBadRequest, "unsupported conversation snapshot version")
 		return
 	}
-	if s.conversationShareResources == nil {
-		writeError(w, http.StatusServiceUnavailable, "conversation share resource storage is unavailable")
-		return
-	}
-	shareURL, err := s.conversationShareBaseURL()
-	if err != nil {
-		writeError(w, http.StatusServiceUnavailable, err.Error())
-		return
-	}
-	shareID, err := store.NewConversationShareID()
-	if err != nil {
-		s.writeInternal(w, "create conversation share id", err)
-		return
-	}
-	stage, err := s.conversationShareResources.Begin()
-	if err != nil {
-		s.writeInternal(w, "stage conversation share resources", err)
-		return
-	}
-	defer stage.Abort()
-	snapshot, resources, err := decodeConversationShare(w, r, stage, s.Config.ShareLimits)
-	if err != nil {
-		if errors.Is(err, errConversationShareResourceStorage) {
-			s.writeInternal(w, "write conversation share resources", err)
-			return
-		}
-		var sizeError *conversationShareSizeError
-		if errors.As(err, &sizeError) {
-			writeJSON(w, http.StatusRequestEntityTooLarge, sizeError)
-		} else {
-			writeError(w, http.StatusBadRequest, err.Error())
-		}
-		return
-	}
-	if err := stage.Commit(shareID); err != nil {
-		s.writeInternal(w, "commit conversation share resources", err)
-		return
-	}
-	now := s.now().UTC()
-	var expiresAt *time.Time
-	if policy.duration > 0 {
-		value := now.Add(policy.duration)
-		expiresAt = &value
-	}
-	share, err := s.DB.CreateConversationShareWithResources(
-		r.Context(),
-		shareID,
-		principal.UserID,
-		conversationID,
-		store.ConversationSnapshotVersion,
-		snapshot,
-		resources,
-		now,
-		expiresAt,
-		policy.singleUse,
-	)
-	if err != nil {
-		if cleanupErr := s.conversationShareResources.Delete(shareID); cleanupErr != nil {
-			s.Logger.Error("remove failed conversation share resources", "shareId", shareID, "error", cleanupErr)
-		}
-		s.writeInternal(w, "create conversation share", err)
+	share, shareURL, ok := s.publishShare(w, r, principal.UserID, decodeLegacyShare(conversationID),
+		s.conversationShareResources, func(ctx context.Context, share store.ConversationShare, resources []store.ConversationShareResource) (store.ConversationShare, error) {
+			var expiresAt *time.Time
+			if policy.duration > 0 {
+				value := share.CreatedAt.Add(policy.duration)
+				expiresAt = &value
+			}
+			return s.DB.CreateConversationShareWithResources(ctx, share.ID, share.OwnerUserID, share.ConversationID,
+				share.SnapshotVersion, share.SnapshotJSON, resources, share.CreatedAt, expiresAt, policy.singleUse)
+		})
+	if !ok {
 		return
 	}
 	writeJSON(w, http.StatusCreated, conversationShareRecordResponseFromStore(share, shareURL))
@@ -292,6 +243,10 @@ func (s *Server) handleGetPublicConversationSharePage(w http.ResponseWriter, r *
 			s.Logger.Error("record conversation share access", "shareId", share.ID, "error", err)
 		}
 	}
+	s.writeConversationSharePage(w, r, share)
+}
+
+func (s *Server) writeConversationSharePage(w http.ResponseWriter, r *http.Request, share store.ConversationShare) {
 	if s.conversationShareRenderer == nil {
 		s.Logger.Error("render conversation share", "shareId", share.ID, "error", "renderer unavailable")
 		writePublicConversationShareError(w, http.StatusInternalServerError)

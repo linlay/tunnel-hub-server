@@ -19,6 +19,9 @@ import (
 //go:embed schema_sqlite.sql
 var sqliteSchema string
 
+//go:embed schema_shares_sqlite.sql
+var sqliteShareSchema string
+
 const sqliteSchemaVersion = 4
 
 func OpenSQLite(ctx context.Context, path string) (*DB, error) {
@@ -148,10 +151,17 @@ func (db *DB) migrateSQLite(ctx context.Context, resourceDir string) error {
 	default:
 		return fmt.Errorf("SQLite schema version %d is not supported", version)
 	}
+	for _, statement := range strings.Split(sqliteShareSchema, ";") {
+		if strings.TrimSpace(statement) != "" {
+			if _, err := tx.ExecContext(ctx, statement); err != nil {
+				return fmt.Errorf("initialize share tables: %w", err)
+			}
+		}
+	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit SQLite schema: %w", err)
 	}
-	return nil
+	return db.verifyShareTables(ctx)
 }
 
 func migrateSQLiteDesktopRevocation(ctx context.Context, tx *sql.Tx) error {

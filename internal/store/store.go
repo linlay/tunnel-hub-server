@@ -620,7 +620,18 @@ func (db *DB) ListDesktopWebApps(ctx context.Context) ([]DesktopWebApp, error) {
 }
 
 func (db *DB) GetActiveDesktopWebAppRouteByHost(ctx context.Context, host string) (DesktopWebAppRoute, error) {
-	row := db.sql.QueryRowContext(ctx, `
+	return scanDesktopWebAppRoute(db.sql.QueryRowContext(ctx, activeDesktopWebAppRouteQuery+` AND w.public_host = ?`, tunnel.NormalizeHost(host)))
+}
+
+func (db *DB) GetActiveDesktopWebAppRouteByID(ctx context.Context, id string) (DesktopWebAppRoute, error) {
+	return scanDesktopWebAppRoute(db.sql.QueryRowContext(ctx, activeDesktopWebAppRouteQuery+` AND w.id = ?`, id))
+}
+
+func (db *DB) GetActiveOwnedDesktopWebAppRoute(ctx context.Context, owner, deviceID, name string) (DesktopWebAppRoute, error) {
+	return scanDesktopWebAppRoute(db.sql.QueryRowContext(ctx, activeDesktopWebAppRouteQuery+` AND d.owner_user_id = ? AND d.display_device_id = ? AND w.name = ?`, owner, deviceID, name))
+}
+
+const activeDesktopWebAppRouteQuery = `
 		SELECT
 			d.device_id, d.display_device_id, d.device_name, d.owner_user_id, d.owner_email, d.owner_name, d.public_host, d.created_at, d.updated_at,
 			w.id, w.device_id, w.name, w.route_id, w.public_host, w.target_url, w.active, w.created_at, w.updated_at,
@@ -628,8 +639,10 @@ func (db *DB) GetActiveDesktopWebAppRouteByHost(ctx context.Context, host string
 		FROM desktop_webapps w
 		JOIN desktop_devices d ON d.device_id = w.device_id
 		JOIN routes r ON r.id = w.route_id
-		WHERE w.public_host = ? AND w.active = 1 AND r.active = 1 AND d.revoked_at IS NULL
-	`, tunnel.NormalizeHost(host))
+		WHERE w.active = 1 AND r.active = 1 AND d.revoked_at IS NULL
+	`
+
+func scanDesktopWebAppRoute(row rowScanner) (DesktopWebAppRoute, error) {
 	var result DesktopWebAppRoute
 	var deviceName, ownerEmail, ownerName sql.NullString
 	var routeTokenID sql.NullString

@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"fmt"
 )
 
 // Migrate creates the current schema and performs the one-way legacy share-resource migration.
@@ -57,4 +58,25 @@ func (db *DB) desktopHostError(err error) error {
 		return ErrDesktopDeviceHostConflict
 	}
 	return err
+}
+
+// Validate required columns as well as CREATE IF NOT EXISTS, which cannot repair
+// a database previously modified by the retired destructive migration.
+func (db *DB) verifyShareTables(ctx context.Context) error {
+	for _, query := range []string{
+		`SELECT id,owner_user_id,conversation_id,snapshot_version,snapshot_json,created_at,expires_at,revoked_at,single_use FROM conversation_shares WHERE 1=0`,
+		`SELECT share_id,token_hash,expires_at FROM conversation_share_claims WHERE 1=0`,
+		`SELECT id,owner_user_id,conversation_id,kind,title,description_json,snapshot_version,snapshot_json,created_at,revoked_at FROM shares WHERE 1=0`,
+		`SELECT share_id,resource_id,name,mime_type,size_bytes,sha256,logical_path FROM share_resources WHERE 1=0`,
+		`SELECT share_id,last_accessed_at FROM share_access WHERE 1=0`,
+	} {
+		rows, err := db.sql.QueryContext(ctx, query)
+		if err != nil {
+			return fmt.Errorf("incompatible share schema; restore a matching database and resource backup before switching versions: %w", err)
+		}
+		if err := rows.Close(); err != nil {
+			return err
+		}
+	}
+	return nil
 }

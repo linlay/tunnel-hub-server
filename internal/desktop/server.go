@@ -10,12 +10,14 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"path/filepath"
 	"strings"
 	"time"
 
 	"example.invalid/tunnel-hub-server/internal/auth"
 	"example.invalid/tunnel-hub-server/internal/config"
 	"example.invalid/tunnel-hub-server/internal/proxy"
+	"example.invalid/tunnel-hub-server/internal/sharecontract"
 	"example.invalid/tunnel-hub-server/internal/sharefiles"
 	"example.invalid/tunnel-hub-server/internal/store"
 	"example.invalid/tunnel-hub-server/internal/tunnel"
@@ -37,6 +39,7 @@ type Server struct {
 	recordConversationShareAccess func(context.Context, string, time.Time) error
 	conversationShareRenderer     conversationShareRenderer
 	conversationShareResources    *sharefiles.Store
+	shareResources                *sharefiles.Store
 }
 
 type conversationShareRenderer interface {
@@ -57,10 +60,14 @@ func NewServer(db *store.DB, cfg config.RelayConfig, logger *slog.Logger, ssoJWT
 	if ssoJWT == nil {
 		return nil, errors.New("SSO JWT verifier is required")
 	}
-	var resources *sharefiles.Store
+	var resources, genericResources *sharefiles.Store
 	if strings.TrimSpace(cfg.ConversationShareResourceDir) != "" {
 		var err error
 		resources, err = sharefiles.New(cfg.ConversationShareResourceDir)
+		if err != nil {
+			return nil, err
+		}
+		genericResources, err = sharefiles.New(filepath.Join(cfg.ConversationShareResourceDir, "v2"))
 		if err != nil {
 			return nil, err
 		}
@@ -73,6 +80,7 @@ func NewServer(db *store.DB, cfg config.RelayConfig, logger *slog.Logger, ssoJWT
 		now:                           time.Now,
 		recordConversationShareAccess: db.RecordConversationShareAccess,
 		conversationShareResources:    resources,
+		shareResources:                genericResources,
 	}, nil
 }
 
@@ -83,10 +91,13 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			writePublicConversationShareError(w, http.StatusMethodNotAllowed)
 			return
 		}
-		if strings.Contains(r.URL.Path, "/attachments/") {
+		parts := strings.SplitN(strings.TrimPrefix(r.URL.Path, publicConversationSharePagePath), "/", 3)
+		if len(parts) > 1 && parts[1] == "preview" {
+			s.handleSharePreviewResource(w, r)
+		} else if len(parts) > 1 && parts[1] == "attachments" {
 			s.handleGetPublicConversationShareAttachment(w, r)
 		} else {
-			s.handleGetPublicConversationSharePage(w, r)
+			s.handlePublicShare(w, r)
 		}
 		return
 	}
@@ -95,6 +106,8 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	switch {
+	case r.URL.Path == sharecontract.ManagementPath || strings.HasPrefix(r.URL.Path, sharecontract.ManagementPath+"/"):
+		s.handleShares(w, r)
 	case r.URL.Path == "/api/desktop/account-devices":
 		s.handleAccountDevices(w, r)
 	case strings.HasPrefix(r.URL.Path, "/api/desktop/account-devices/"):
@@ -145,11 +158,38 @@ func (s *Server) handleDeviceSubresource(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusNotFound, "not found")
 		return
 	}
+	if r.Method == http.MethodGet {
+		s.handleGetPublishedWebApp(w, r, deviceID, webAppName)
+		return
+	}
 	if r.Method != http.MethodPut {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
 	s.handleRegisterWebApp(w, r, deviceID, webAppName)
+}
+
+// Read the existing publication without creating, activating or updating it.
+func (s *Server) handleGetPublishedWebApp(w http.ResponseWriter, r *http.Request, deviceID, name string) {
+	principal, ok := s.authorizeRegistration(w, r)
+	if !ok {
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	if r.URL.RawQuery != "" || tunnel.ValidateDesktopDeviceID(deviceID) != nil || validateWebAppName(name) != nil {
+		writeError(w, http.StatusBadRequest, "invalid publication identity")
+		return
+	}
+	binding, err := s.DB.GetActiveOwnedDesktopWebAppRoute(r.Context(), principal.UserID, deviceID, name)
+	if errors.Is(err, store.ErrNotFound) {
+		writeError(w, http.StatusNotFound, "published webapp not found")
+		return
+	}
+	if err != nil {
+		s.writeInternal(w, "read published webapp", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, s.webAppResponse(store.RegisterDesktopWebAppResult{Device: binding.Device, WebApp: binding.WebApp, Route: binding.Route}))
 }
 
 func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
@@ -373,6 +413,7 @@ func (s *Server) relayURL() string {
 func (s *Server) webAppResponse(result store.RegisterDesktopWebAppResult) webAppResponse {
 	publicHost := result.WebApp.PublicHost
 	return webAppResponse{
+		WebAppID:   result.WebApp.ID,
 		DeviceID:   result.Device.DeviceID,
 		Name:       result.WebApp.Name,
 		PublicHost: publicHost,
@@ -465,6 +506,7 @@ func (p webAppPayload) active() bool {
 }
 
 type webAppResponse struct {
+	WebAppID   string `json:"webAppId"`
 	DeviceID   string `json:"deviceId"`
 	Name       string `json:"name"`
 	PublicHost string `json:"publicHost"`

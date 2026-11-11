@@ -21,6 +21,9 @@ import (
 //go:embed schema.sql
 var schema string
 
+//go:embed schema_shares.sql
+var shareSchema string
+
 func mysqlConfig(cfg config.MySQLConfig) (*mysql.Config, error) {
 	if err := cfg.Validate(); err != nil {
 		return nil, err
@@ -106,7 +109,7 @@ func validateMySQLServer(version string, packet, minimumPacketBytes int64) error
 func (db *DB) Close() error { return db.sql.Close() }
 
 func (db *DB) migrateMySQL(ctx context.Context, resourceDir string) error {
-	for _, statement := range strings.Split(schema, ";") {
+	for _, statement := range strings.Split(schema+"\n"+shareSchema, ";") {
 		if strings.TrimSpace(statement) == "" {
 			continue
 		}
@@ -122,6 +125,9 @@ func (db *DB) migrateMySQL(ctx context.Context, resourceDir string) error {
 		if _, err := db.sql.ExecContext(ctx, `ALTER TABLE desktop_devices ADD COLUMN revoked_at DATETIME(6) NULL`); err != nil {
 			return fmt.Errorf("add MySQL Desktop revocation: %w", err)
 		}
+	}
+	if err := db.verifyShareTables(ctx); err != nil {
+		return err
 	}
 	return db.migrateLegacyConversationShareAttachments(ctx, resourceDir)
 }
