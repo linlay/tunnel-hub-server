@@ -2,6 +2,7 @@ package shareassets
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"crypto/sha512"
 	"embed"
@@ -45,6 +46,7 @@ type assetManifest struct {
 }
 
 type Bundle struct {
+	observeResource      func(context.Context, string)
 	assetSet             string
 	template             []byte
 	files                fs.FS
@@ -223,7 +225,12 @@ func (b *Bundle) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	header.Set("Cross-Origin-Resource-Policy", "cross-origin")
 	header.Set("X-Content-Type-Options", "nosniff")
 	header.Set("Content-Type", assetContentType(relativePath))
-	b.fileServer.ServeHTTP(w, r)
+	response := &assetResponseWriter{ResponseWriter: w}
+	b.fileServer.ServeHTTP(response, r)
+	if r.Method == http.MethodGet && b.observeResource != nil && !response.failed &&
+		(response.status == http.StatusOK || response.status == http.StatusPartialContent || response.status == http.StatusNotModified) {
+		b.observeResource(r.Context(), assetSet)
+	}
 }
 
 func serveTemplate(w http.ResponseWriter, r *http.Request, template []byte) {

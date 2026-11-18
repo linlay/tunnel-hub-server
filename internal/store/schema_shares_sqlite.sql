@@ -1,3 +1,15 @@
+CREATE TABLE IF NOT EXISTS share_template_usage_daily (
+	asset_set TEXT NOT NULL,
+	usage_day TEXT NOT NULL,
+	share_id TEXT NOT NULL,
+	first_observed_at TIMESTAMP NOT NULL,
+	render_count INTEGER NOT NULL DEFAULT 0,
+	resource_request_count INTEGER NOT NULL DEFAULT 0,
+	last_rendered_at TIMESTAMP,
+	last_resource_requested_at TIMESTAMP,
+	PRIMARY KEY (asset_set, usage_day, share_id)
+);
+
 CREATE TABLE IF NOT EXISTS shares (
 	id TEXT PRIMARY KEY,
 	owner_user_id TEXT NOT NULL,

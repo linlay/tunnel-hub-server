@@ -6,7 +6,7 @@
 
 `tunnel-hub-server` 是 Tunnel Hub 的 Go 后端，核心边界是 Relay、Agent/Desktop 出站连接、管理 API、Desktop 注册 API、MySQL/SQLite 持久化和公网 HTTP/WebSocket 转发。
 
-管理前端在 sibling 项目 `tunnel-hub-website`，Desktop 协议调试台在 sibling 项目 `tunnel-hub-tester`。Desktop public mini site 是本仓库内的独立子项目 `tunnel-hub-public/`，作为单独静态容器部署；不要把管理后台 React/Vite 前端重新放回本项目。
+完整管理前端原设计为 sibling 项目 `tunnel-hub-website`，当前工作区没有该项目。按用户确认，分享模板的只读管理页内嵌于本服务（`/api/admin/share-templates/view`），复用现有管理员登录和 API，不引入 React/Vite 管理前端或独立构建链。Desktop 协议调试台在 sibling 项目 `tunnel-hub-tester`。Desktop public mini site 是本仓库内的独立子项目 `tunnel-hub-public/`，作为单独静态容器部署。
 
 ## 2. 技术栈
 
@@ -74,6 +74,7 @@ Relay 入口在 `cmd/relay/main.go`，启动顺序是：
 - `desktop_sessions`: Desktop tunnel 在线历史，以 deviceKey 关联设备。
 - `events`: 管理操作和系统事件。
 - `traffic_events`: Desktop/WebApp/普通 route 的访问统计。
+- `share_template_usage_daily`: 对话模板资源版本的每日渲染和资源请求聚合，独立于分享内容与有效性；采集起点不是发布时间，无访问记录不证明可清理。不得把版本统计改成逐分享版本绑定。
 - `conversation_shares`、`conversation_share_resources`、`conversation_share_access`、`conversation_share_claims`: 保留当前 main 的对话存储、资源元数据、最近访问与一次性领取状态；原到期列、一次性列、CHECK 和会话关联约束保持不变。
 - `shares`、`share_resources`、`share_access`: 通用分享的内容、kind、标题、描述、资源及最近访问状态；每次创建独占内容和资源，不向旧表双写。v2 创建的对话也保存在这里。管理列表只投影新旧元数据，不加载正文和描述 BLOB。
 - 资源目录：旧对话继续使用根目录的 `shares/` 和 `.staging/`，通用分享复用同一文件实现，使用根目录下的 `v2/`。两个清理范围必须隔离，防止旧 Hub 清理新分享资源。
@@ -99,6 +100,7 @@ Relay 入口在 `cmd/relay/main.go`，启动顺序是：
 - `POST /api/admin/sessions/{id}/close`
 - `GET /api/admin/events`
 - `GET /api/admin/metrics`
+- `GET /api/admin/share-templates?days=7|30`、`GET /api/admin/share-templates/{assetSet}/shares?days=7|30`：管理员只读版本清单与使用元数据；内嵌页面入口 `/api/admin/share-templates/view`
 - `GET /api/components`
 - `POST /api/desktop/devices/register`
 - `PUT /api/desktop/devices/{deviceId}/webapps/{name}`；同路径 `GET` 只读查询当前所有者已有 active 发布及 webAppId，不注册或更新

@@ -269,7 +269,10 @@ func (s *Server) writeConversationSharePage(w http.ResponseWriter, r *http.Reque
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Content-Length", strconv.Itoa(len(html)))
 	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write(html)
+	n, writeErr := w.Write(html)
+	if r.Method == http.MethodGet && writeErr == nil && n == len(html) && s.recordConversationShareRender != nil {
+		s.recordConversationShareRender(r.Context(), share.ID)
+	}
 }
 
 const conversationShareSessionCookieName = "conversation_share_session"

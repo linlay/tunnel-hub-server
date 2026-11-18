@@ -1,3 +1,15 @@
+CREATE TABLE IF NOT EXISTS share_template_usage_daily (
+	asset_set VARCHAR(64) NOT NULL,
+	usage_day VARCHAR(10) NOT NULL,
+	share_id VARCHAR(128) NOT NULL,
+	first_observed_at DATETIME(6) NOT NULL,
+	render_count BIGINT NOT NULL DEFAULT 0,
+	resource_request_count BIGINT NOT NULL DEFAULT 0,
+	last_rendered_at DATETIME(6),
+	last_resource_requested_at DATETIME(6),
+	PRIMARY KEY (asset_set, usage_day, share_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+
 CREATE TABLE IF NOT EXISTS shares (
 	id VARCHAR(128) PRIMARY KEY,
 	owner_user_id VARCHAR(255) NOT NULL,

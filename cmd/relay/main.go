@@ -100,6 +100,33 @@ func run() error {
 	go desktopServer.RunConversationShareCleanup(cleanupContext)
 	conversationAssets := shareassets.NewBundle()
 	desktopServer.SetConversationShareRenderer(conversationAssets)
+	versions, err := conversationAssets.Versions()
+	if err != nil {
+		return fmt.Errorf("inspect share template versions: %w", err)
+	}
+	adminServer.SetShareTemplateVersions(versions)
+	assetSets := make([]string, 0, len(versions))
+	for _, version := range versions {
+		assetSets = append(assetSets, version.AssetSet)
+	}
+	observationContext, cancelObservation := context.WithTimeout(context.Background(), 5*time.Second)
+	if err := db.StartShareTemplateObservation(observationContext, assetSets, time.Now()); err != nil {
+		logger.Error("start share template observation", "error", err)
+	}
+	cancelObservation()
+	recordTemplateUsage := func(ctx context.Context, assetSet, shareID string) {
+		ctx, cancel := context.WithTimeout(ctx, 250*time.Millisecond)
+		defer cancel()
+		if err := db.RecordShareTemplateUsage(ctx, assetSet, shareID, time.Now()); err != nil {
+			logger.Error("record share template usage", "assetSet", assetSet, "error", err)
+		}
+	}
+	desktopServer.SetConversationShareRenderObserver(func(ctx context.Context, shareID string) {
+		recordTemplateUsage(ctx, conversationAssets.CurrentAssetSet(), shareID)
+	})
+	conversationAssets.SetResourceObserver(func(ctx context.Context, assetSet string) {
+		recordTemplateUsage(ctx, assetSet, "")
+	})
 	static := staticHandler(cfg.WebsiteDist)
 
 	root := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
