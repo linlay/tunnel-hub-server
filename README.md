@@ -352,6 +352,15 @@ MySQL 启动只幂等新增通用分享表，不改变旧表、不批量撤销�
 
 `GET/HEAD /assets/conversation-export/{sha256}/{file}` 提供随 Relay 编译且通过内容 Hash 校验的资源集；当前 manifest 决定新分享页使用的资源集，历史资源集继续服务已有 HTML。分享渲染包由 WebClient 显式同步后随 Relay 原子发布，普通 WebClient 发布不修改它。
 
+分享模板使用情况的内嵌管理页位于 Tunnel API origin 的 `/api/admin/share-templates/view`。它随 Relay 编译发布，复用 `/api/admin/login` 的本地管理员账号和 HttpOnly 会话 Cookie，不需要独立前端项目、构建或新增代理路径。页面壳不含管理数据；下列只读接口继续使用原有管理员 Cookie／SSO JWT 鉴权。页面登录表单仅支持现有本地管理员登录，SSO JWT 调用方使用接口。
+
+- `GET /api/admin/share-templates?days=7|30`（默认 30）：返回当前运行构建内的资源版本、当前启用标记、文件数和字节数，以及区间内页面渲染次数、去重分享数、资源请求数。区间按 UTC 自然日包含今天；`startDay/endDay` 为实际日期，最近访问时间覆盖全部已采集记录。
+- `GET /api/admin/share-templates/{assetSet}/shares?days=7|30`：返回区间内实际渲染过该版本的最近 100 条分享 ID、标题、渲染次数和最近渲染时间，包含已失效分享。只读元数据，不读取 snapshot/description BLOB，也不打开或领取一次性分享。
+
+唯一新增的 `share_template_usage_daily` 表按版本、UTC 日期与分享 ID 聚合；空分享 ID 的桶保存资源请求，启动时为各内嵌版本写入零计数桶以记录统计起点，重复启动不覆盖计数。`usage:null` 表示没有采集起点；已开始采集但次数为零表示「未观察到使用」，不表示从未使用或可以删除。`observedSince` 是采集起点，不能当作发布时间。旧数据无法补算，浏览器和边缘缓存命中无法观测；混合部署旧实例时也不是完整流量统计。
+
+只有成功写出完整页面的 GET 记录渲染；HEAD、失败、resolve、通用元数据和包预览不记入对话模板渲染。通过原资源路径验证且响应 200／206／304 的 GET 记录对应资源版本，HEAD、404、无效 Range 和写出失败不计数；模板下载入口本身不计数。采集沿用现有数据库，写入设置 250 ms 超时，失败记日志但不改变公开响应。没有新增队列、清理任务、模板切换或逐分享版本绑定；当前模板、安全响应头、过期／撤销／一次性领取规则与永久分享的历史资源保留要求不变。
+
 Snapshot V1 兼容新增可选 `attachmentIds`、HTML `mediaRefs` 和 `omittedResources`，上传入口验证成功/省略身份及所有关联。资源以规范的当前 Chat 相对引用登记；不接受跨 Chat、内部目录或路径别名。媒体预览与下载继续通过同一分享鉴权和 `ServeContent` 支持 GET/HEAD/Range；SVG 仅在图片上下文使用，下载保持原字节和 attachment 响应。
 
 可选 `turn.error` 和已有 `awaiting-answer` 节点中的已提交内容由 Platform 投影、WebClient 展示，Hub 原样保存，不解释交互业务。先发布兼容这些字段的渲染资源，再发布 Platform／Desktop；无需数据库或 JSONL 迁移。旧分享可继续读取，缺失的交互明细和具体运行错误需从原对话重新生成。

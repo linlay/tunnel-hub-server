@@ -1,6 +1,6 @@
 {
   "profile": "conversation-export-assets",
-  "assetSet": "ee3d5abec9a1fba71612cc4e96d051adebd09186d6eda17f1333ecfa445bae43",
+  "assetSet": "db95305cb9a40cd5fd4afbe5a85805f94845f12b267c25734a06f586453fffc9",
   "files": [
     {
       "path": "fonts/KaTeX_AMS-Regular.ttf",
@@ -878,11 +878,11 @@
       "integrity": "sha384-LDVmO9U8MKfQ7Drd2P82UnrKWQI7lfrSmul2z7z2zvdlByCdMhvjdk1PT43ki70f"
     },
     {
-      "path": "icons/spritef1496162a868ca7e295e.svg",
-      "bytes": 71539,
+      "path": "icons/spritee6111aac016e7c66a983.svg",
+      "bytes": 71765,
       "contentType": "image/svg+xml",
-      "sha256": "97bab3f8344f4413c4dad588102bc9020dd06b15806039dba4b569fd00d3803c",
-      "integrity": "sha384-cJtfs5GA3fYVDvAz6hVoX0uC9BKD2o2bb0MNrYs1YSyuI2M6v3zkQ+dn7f4s6eD9"
+      "sha256": "dfa8e048d734f36d1af924cc29945f02cdc2a612e608f197db54443294ad7fee",
+      "integrity": "sha384-sBW9yiJ8FHZZ9vNQbTngZrIzap3LKHxdUOAAa5E6CEdovjIb1P0+mMmgSbhaTNT9"
     },
     {
       "path": "icons/zenminda3a27a526f353dd13304.svg",
@@ -893,17 +893,17 @@
     },
     {
       "path": "runtime.css",
-      "bytes": 238721,
+      "bytes": 244516,
       "contentType": "text/css; charset=utf-8",
-      "sha256": "f6c45cb95ca34342ce85cdb083ad4fc373b6840056cca884b31eb2f885b41046",
-      "integrity": "sha384-NjPWTOJYgztxdEKDDuCd3QQ45CNeZn5WCkufznlZvHvG14x+SBtcLvloV/bCtP6k"
+      "sha256": "a11ff89150debf9365c1fec36c7a64191dee3b772ca4cea9b56cc8ddac31d4c6",
+      "integrity": "sha384-4uwPRO3iCPnHL7+bY2srII6nd8X3tB0XQ65EH/s9os/USzodCl4o1nalRcNE6pMv"
     },
     {
       "path": "runtime.js",
-      "bytes": 1314967,
+      "bytes": 1322211,
       "contentType": "application/javascript; charset=utf-8",
-      "sha256": "84f24343c6958fe603dce27e0438e280f3f49f5b9614f3cf872ae87a05a0ba7b",
-      "integrity": "sha384-G8oT+5O9N2pnzLtSmMhAwhqWLuassWIOl6CNXP7soURCr9wU01/ylydYowSXuMmK"
+      "sha256": "d888b63af6af4db06e41cd47c3821714550ca2d4d934bfecc3ed858a3339d096",
+      "integrity": "sha384-GHc4R9Ka5Hd+fkTaVUw17F95cukBbWHr+ov5l9HRHVzyUqlskZnSDfp54UbRohKr"
     },
     {
       "path": "runtime.js.LICENSE.txt",

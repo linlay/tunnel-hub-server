@@ -37,6 +37,7 @@ type Server struct {
 	manager                       *proxy.Manager
 	now                           func() time.Time
 	recordConversationShareAccess func(context.Context, string, time.Time) error
+	recordConversationShareRender func(context.Context, string)
 	conversationShareRenderer     conversationShareRenderer
 	conversationShareResources    *sharefiles.Store
 	shareResources                *sharefiles.Store
@@ -51,6 +52,11 @@ func (s *Server) SetPresenceManager(manager *proxy.Manager) { s.manager = manage
 
 func (s *Server) SetConversationShareRenderer(renderer conversationShareRenderer) {
 	s.conversationShareRenderer = renderer
+}
+
+// Configure before serving. Telemetry is separate from the renderer contract.
+func (s *Server) SetConversationShareRenderObserver(observer func(context.Context, string)) {
+	s.recordConversationShareRender = observer
 }
 
 func NewServer(db *store.DB, cfg config.RelayConfig, logger *slog.Logger, ssoJWT *auth.SSOJWTVerifier) (*Server, error) {
