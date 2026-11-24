@@ -312,7 +312,7 @@ curl -X POST https://hub.example.test/api/desktop/devices/register \
 
 `service:{type:"webapp",webAppId}` 只引用现有注册 ID；创建时核实发布仍 active、设备未撤销且属于分享所有者。公开 `?action=service` 再检查同一分享撤销状态与当前绑定，303 跳转至原注册公网 Host；不把分享站当代理、不接收 upstream、不转发所有者 SSO。当前服务、离线 502、HTTP/WebSocket 与访客权限继续由原 WebApp 发布链路处理。停止发布或移除绑定返回明确不可用页并保留冻结预览。撤销分享只关闭该短链及其私有资源，原公开地址和其他分享不受影响；停止公开服务仍使用原发布操作。
 
-自包含包的 `preview.entrypoint` 必须命中本分享资源的逻辑路径且为 text/html。可信外层使用 `sandbox="allow-scripts"` 的 opaque iframe，配合 credentialless、no-referrer 和仅限本分享 preview 路径的 frame-src；外层不运行包脚本或处理包消息。`/share/{id}/preview/{path}` 每次检查描述、清单归属、撤销及文件 Hash，返回严格 CSP 和无凭据 CORS，模块/JSON/字体/图片可加载。脚本、样式、图片、字体及连接仅允许本包资源路径；禁止任意网络、嵌套 frame、Worker、表单、弹窗、顶层导航与包内下载。包资源要求浏览器 Fetch Metadata，拒绝 document/object/worker 或缺失目的地的读取，保证 SVG/XHTML 等可执行文档也不能作为顶层页面绕开外层导航限制。普通资源下载仍走 action=download；普通 HTML 附件仍清洗并禁用脚本。
+自包含包的 `preview.entrypoint` 必须命中本分享资源的逻辑路径且为 text/html。可信外层使用 `sandbox="allow-scripts"` 的 opaque iframe，配合 credentialless、no-referrer 和仅限本分享 preview 路径的 frame-src；外层不运行包脚本或处理包消息。`/share/{id}/preview/{path}` 每次检查描述、清单归属、撤销及文件 Hash，返回严格 CSP 和无凭据 CORS，模块/JSON/字体/图片可加载。脚本、样式、图片、字体及连接仅允许本包资源路径；禁止任意网络、嵌套 frame、Worker、表单、弹窗、顶层导航与包内下载。包资源要求浏览器 Fetch Metadata，拒绝 document/object/worker 或缺失目的地的读取，保证 SVG/XHTML 等可执行文档也不能作为顶层页面绕开外层导航限制。普通资源下载仍走 action=download；普通对话 HTML 附件沿用独立附件页和既有隔离策略。
 
 预览 CSP 使用配置的 `SHARE_PUBLIC_BASE_URL`，应通过记录返回的 canonical URL 浏览包。此方案已在 macOS Chrome 156 实测；其他平台/浏览器需按 QA 验证。手工浏览器回归夹具为 `internal/desktop/share_preview_browser_test.go`：显式设置独立临时 QA 目录、临时 TMPDIR 和 SQLite 后运行 TestSharePreviewBrowserHarness；常规测试不启动该服务。包样例只用于验证，不是新业务应用。未修改 WebClient 导出源码或已编译资源集。
 
@@ -374,6 +374,8 @@ Snapshot V1 兼容新增可选 `attachmentIds`、HTML `mediaRefs` 和 `omittedRe
 可选 `turn.error` 和已有 `awaiting-answer` 节点中的已提交内容由 Platform 投影、WebClient 展示，Hub 原样保存，不解释交互业务。先发布兼容这些字段的渲染资源，再发布 Platform／Desktop；无需数据库或 JSONL 迁移。旧分享可继续读取，缺失的交互明细和具体运行错误需从原对话重新生成。
 
 HTML 的普通 preview 请求重定向到独立附件页；`?embed=1&assetSet=<父页面版本>` 返回指定资源集内带 SRI/匿名 CORS 的 bootstrap，启用其他模板或重启后仍使用原版本。指定版本不可用时返回 503，不回退到 current；参数非法返回 400。旧运行时的 `?embed=1` 固定使用内置兼容 bootstrap，不跟随当前模板切换；现存历史集合的 bootstrap 字节一致，由回归测试约束，维护内置包时须保留这项兼容性。网络 iframe 保持 opaque origin，只允许脚本；父页从已授权下载接口读取 HTML 与显式媒体映射，经文档绑定 MessagePort 交付一次。guest 创建 Blob 媒体并执行原 HTML；HTTP CSP 拒绝 connect/frame/worker/object/form/base，仅允许约定的内联及 HTTPS 静态依赖。附件原文自带的第三方 HTTPS 依赖不属于模板资源集。已删除服务端 HTML 清洗旧路径，不提供任意 URL RPC、资源代理或 Cookie 放宽。父页 CSP 的图片和媒体只增加 self。
+
+正文 HTML 代码块使用 `GET/HEAD /share/{shareId}/html-preview?assetSet=<父页面版本>`。该入口只返回指定版本的受信任 bootstrap 壳，不接收、解析或存储正文。只允许有效的对话分享，旧分享沿用撤销、到期和已有一次性领取会话检查，不领取、不续期、不签发 Cookie；版本缺失返回 503，不回退 current。正文通过文档绑定 MessagePort 一次交付，DOMPurify 清理预览副本；HTTP CSP 只允许该版本 bootstrap 脚本、内联样式及必要的 data/blob 媒体，禁止内容脚本、任意外部资源、嵌套页面、表单、顶层导航和宿主能力。此入口不修改父页 CSP，也不复用业务包的 `/preview/` 路由。先部署此接口，再由管理员上传并启用新版对话模板；历史资源和快照保持原样。
 
 本次改造的实现、检查结果、浏览器证据和待完成的发布门禁见[执行记录](docs/conversation-share-rendering/08-execution-record.md)。
 

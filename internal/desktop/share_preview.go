@@ -13,8 +13,8 @@ import (
 	"example.invalid/tunnel-hub-server/internal/store"
 )
 
-// Explicit package resources only. Ordinary HTML attachments retain their
-// sanitizer and no-script policy in the conversation adapter.
+// Explicit package resources only. Conversation HTML attachments and inline
+// code use their own document-bound preview shells.
 func (s *Server) handleSharePreviewResource(w http.ResponseWriter, r *http.Request) {
 	parts := strings.SplitN(strings.TrimPrefix(r.URL.Path, sharecontract.PublicPath), "/", 3)
 	if len(parts) != 3 || parts[1] != "preview" || !sharecontract.ValidShareID(parts[0]) || !sharecontract.ValidResourcePath(parts[2]) || r.URL.EscapedPath() != r.URL.Path {

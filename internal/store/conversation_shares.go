@@ -267,6 +267,32 @@ func (db *DB) PeekPublicConversationShare(ctx context.Context, id string, now ti
 	return share, err
 }
 
+// CheckPublicConversationShareAccess reads metadata only. Unlike the page entry,
+// it never creates a claim or extends its lifetime.
+func (db *DB) CheckPublicConversationShareAccess(ctx context.Context, id string, now time.Time, presentedHash []byte) error {
+	var singleUse bool
+	var storedHash []byte
+	var sessionExpiry *time.Time
+	err := db.sql.QueryRowContext(ctx, `SELECT s.single_use, c.token_hash, c.expires_at
+		FROM conversation_shares AS s LEFT JOIN conversation_share_claims AS c ON c.share_id = s.id
+		WHERE s.id = ? AND s.snapshot_version = 1 AND s.revoked_at IS NULL
+		AND (s.expires_at IS NULL OR s.expires_at > ?)`, id, databaseTime(now)).Scan(&singleUse, &storedHash, &sessionExpiry)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrNotFound
+	}
+	if err != nil {
+		return err
+	}
+	if !conversationShareSessionAllowed(singleUse, now, presentedHash, storedHash, sessionExpiry) {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func conversationShareSessionAllowed(singleUse bool, now time.Time, presentedHash, storedHash []byte, expiry *time.Time) bool {
+	return !singleUse || (len(presentedHash) == 32 && expiry != nil && expiry.After(now) && subtle.ConstantTimeCompare(storedHash, presentedHash) == 1)
+}
+
 func (db *DB) ReadPublicConversationShareResource(ctx context.Context, shareID, resourceID string,
 	now time.Time, presentedHash []byte) (ConversationShareResource, error) {
 	var resource ConversationShareResource
@@ -289,8 +315,7 @@ func (db *DB) ReadPublicConversationShareResource(ctx context.Context, shareID, 
 	if err != nil {
 		return ConversationShareResource{}, err
 	}
-	if singleUse && (len(presentedHash) != 32 || sessionExpiry == nil ||
-		!sessionExpiry.After(now) || subtle.ConstantTimeCompare(storedHash, presentedHash) != 1) {
+	if !conversationShareSessionAllowed(singleUse, now, presentedHash, storedHash, sessionExpiry) {
 		return ConversationShareResource{}, ErrNotFound
 	}
 	return resource, nil

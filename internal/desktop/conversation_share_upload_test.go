@@ -331,39 +331,6 @@ func TestConversationShareRevokeRemovesFrozenResourceDirectory(t *testing.T) {
 	}
 }
 
-func TestSanitizeSharedHTMLRemovesActiveContent(t *testing.T) {
-	source := []byte(`<html><head><style>p{color:red}</style></head><body><script>alert(1)</script><p style="color:blue">safe</p><img src="https://bad.example/x.png"><img src="data:image/png;base64,AAAA"><iframe src="https://bad.example"></iframe></body></html>`)
-	result := string(sanitizeSharedHTML(source))
-	for _, fragment := range []string{"alert(1)", "<script", "<iframe", "bad.example"} {
-		if strings.Contains(result, fragment) {
-			t.Fatalf("unsafe fragment %q in %s", fragment, result)
-		}
-	}
-	if !strings.Contains(result, "safe") || !strings.Contains(result, "data:image/png;base64,AAAA") {
-		t.Fatalf("safe content lost: %s", result)
-	}
-}
-
-func TestSanitizeSharedHTMLDropsDocumentTitleAndPreservesBody(t *testing.T) {
-	for _, title := range []string{
-		`<title>MCP 服务上线计划 · 会议纪要摘要</title>`,
-		`<TITLE>MCP 服务上线计划 &amp; 会议纪要摘要</TITLE>`,
-	} {
-		t.Run(title, func(t *testing.T) {
-			source := []byte(`<html><head>` + title + `<style>h1{color:blue}</style></head><body><h1>会议正文标题</h1><p title="补充说明">会议内容</p></body></html>`)
-			result := string(sanitizeSharedHTML(source))
-			if strings.Contains(result, "MCP 服务上线计划") || strings.Contains(result, "会议纪要摘要") {
-				t.Fatalf("document title leaked into preview: %s", result)
-			}
-			for _, fragment := range []string{`<style>h1{color:blue}</style>`, `<h1>会议正文标题</h1>`, `<p title="补充说明">会议内容</p>`} {
-				if !strings.Contains(result, fragment) {
-					t.Fatalf("body content or safe styling lost: missing %q in %s", fragment, result)
-				}
-			}
-		})
-	}
-}
-
 func TestConversationSharePermanentReadsFrozenAttachmentUntilRevoked(t *testing.T) {
 	cfg := desktopTestConfig(t)
 	cfg.SharePublicBaseURL = "https://share.example.test"
