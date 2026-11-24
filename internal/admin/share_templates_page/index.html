@@ -9,7 +9,7 @@
 </head>
 <body>
 <main>
-  <header><div><p class="eyebrow">分享服务 / 管理</p><h1>模板与版本</h1><p class="muted">查看当前启用版本与历史资源的使用情况。</p></div><button id="logout" hidden>退出登录</button></header>
+  <header><div><p class="eyebrow">分享服务 / 管理</p><h1>模板与版本</h1><p class="muted">上传完整模板包，手动启用，并查看版本使用情况。</p></div><button id="logout" hidden>退出登录</button></header>
   <p id="message" role="status" aria-live="polite"></p>
   <section id="login-panel" class="card" hidden>
     <h2>管理员登录</h2><p class="muted">使用现有本地管理员账号。已有管理会话可直接进入。</p>
@@ -22,13 +22,18 @@
   <section id="dashboard" hidden>
     <div class="notice">分享页打开时使用当前模板。历史资源可能仍被已导出的 HTML 使用；未观察到请求不代表可以删除。</div>
     <div class="toolbar">
+      <label>模板 ZIP<input id="template-file" type="file" accept=".zip,application/zip"></label>
+      <button id="upload" disabled>上传</button><span id="upload-limit" class="muted"></span>
+    </div>
+    <p id="template-status" role="status"></p>
+    <div class="toolbar">
       <label>统计范围<select id="days"><option value="7">近 7 天</option><option value="30" selected>近 30 天</option></select></label>
       <label>筛选<select id="filter"><option value="all">全部版本</option><option value="current">当前启用</option><option value="used">近期有使用</option><option value="idle">近期无使用记录</option><option value="unknown">统计未知</option></select></label>
       <button id="refresh">刷新</button><span id="summary" class="muted"></span>
     </div>
     <p id="window" class="muted"></p>
     <div class="table-wrap card"><table>
-      <thead><tr><th>资源版本</th><th>近期使用</th><th>页面渲染</th><th>分享数</th><th>资源请求</th><th>最近观察到使用</th><th>资源大小</th><th>统计起点</th><th>详情</th></tr></thead>
+      <thead><tr><th>资源版本</th><th>构建来源</th><th>近期使用</th><th>页面渲染</th><th>分享数</th><th>资源请求</th><th>最近观察到使用</th><th>资源大小</th><th>统计起点</th><th>操作</th></tr></thead>
       <tbody id="versions"></tbody>
     </table></div>
     <p class="footnote">按 UTC 自然日汇总，含今天；次数为服务端成功响应的记录，不等于访客数。浏览器及边缘缓存命中不计入资源请求。统计起点之前、采集失败及未部署统计的实例无法追溯。版本标识可选中复制。</p>

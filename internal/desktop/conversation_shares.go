@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"example.invalid/tunnel-hub-server/internal/shareassets"
 	"example.invalid/tunnel-hub-server/internal/store"
 )
 
@@ -249,10 +250,10 @@ func (s *Server) handleGetPublicConversationSharePage(w http.ResponseWriter, r *
 func (s *Server) writeConversationSharePage(w http.ResponseWriter, r *http.Request, share store.ConversationShare) {
 	if s.conversationShareRenderer == nil {
 		s.Logger.Error("render conversation share", "shareId", share.ID, "error", "renderer unavailable")
-		writePublicConversationShareError(w, http.StatusInternalServerError)
+		writePublicConversationShareError(w, http.StatusServiceUnavailable)
 		return
 	}
-	html, err := s.conversationShareRenderer.Render(
+	html, assetSet, err := s.conversationShareRenderer.RenderVersion(
 		share.SnapshotJSON,
 		s.Config.SharePublicBaseURL,
 		s.Config.BrandID,
@@ -262,7 +263,11 @@ func (s *Server) writeConversationSharePage(w http.ResponseWriter, r *http.Reque
 	)
 	if err != nil {
 		s.Logger.Error("render conversation share", "shareId", share.ID, "error", err)
-		writePublicConversationShareError(w, http.StatusInternalServerError)
+		status := http.StatusInternalServerError
+		if errors.Is(err, shareassets.ErrUnavailable) {
+			status = http.StatusServiceUnavailable
+		}
+		writePublicConversationShareError(w, status)
 		return
 	}
 	setPublicConversationShareHeaders(w.Header())
@@ -271,7 +276,7 @@ func (s *Server) writeConversationSharePage(w http.ResponseWriter, r *http.Reque
 	w.WriteHeader(http.StatusOK)
 	n, writeErr := w.Write(html)
 	if r.Method == http.MethodGet && writeErr == nil && n == len(html) && s.recordConversationShareRender != nil {
-		s.recordConversationShareRender(r.Context(), share.ID)
+		s.recordConversationShareRender(r.Context(), assetSet, share.ID)
 	}
 }
 

@@ -9,11 +9,13 @@ import (
 	"io"
 	"mime"
 	"net/http"
+	"net/url"
 	"os"
 	"regexp"
 	"strconv"
 	"strings"
 
+	"example.invalid/tunnel-hub-server/internal/shareassets"
 	"example.invalid/tunnel-hub-server/internal/sharefiles"
 	"example.invalid/tunnel-hub-server/internal/store"
 	"golang.org/x/net/html"
@@ -124,8 +126,11 @@ func writePublicConversationShareAttachmentError(w http.ResponseWriter, status i
 }
 
 func (s *Server) handleGetPublicConversationShareAttachment(w http.ResponseWriter, r *http.Request) {
-	if r.URL.RawQuery != "" && r.URL.RawQuery != "embed=1" {
-		writeError(w, http.StatusBadRequest, "attachment path does not accept query parameters")
+	query, queryErr := url.ParseQuery(r.URL.RawQuery)
+	if queryErr != nil || len(query) > 2 ||
+		(len(query) > 0 && (len(query["embed"]) != 1 || query.Get("embed") != "1")) ||
+		(len(query) == 2 && (len(query["assetSet"]) != 1 || !regexp.MustCompile(`^[a-f0-9]{64}$`).MatchString(query.Get("assetSet")))) {
+		writeError(w, http.StatusBadRequest, "invalid attachment preview parameters")
 		return
 	}
 	path := strings.TrimPrefix(r.URL.Path, publicConversationSharePagePath)
@@ -190,12 +195,16 @@ func (s *Server) serveShareResource(w http.ResponseWriter, r *http.Request, shar
 			return
 		}
 		if s.conversationShareRenderer == nil {
-			writePublicConversationShareAttachmentError(w, http.StatusInternalServerError)
+			writePublicConversationShareAttachmentError(w, http.StatusServiceUnavailable)
 			return
 		}
-		body, err := s.conversationShareRenderer.RenderHTMLPreview(s.Config.SharePublicBaseURL)
+		body, err := s.conversationShareRenderer.RenderHTMLPreview(s.Config.SharePublicBaseURL, r.URL.Query().Get("assetSet"))
 		if err != nil {
-			writePublicConversationShareAttachmentError(w, http.StatusInternalServerError)
+			status := http.StatusInternalServerError
+			if errors.Is(err, shareassets.ErrUnavailable) {
+				status = http.StatusServiceUnavailable
+			}
+			writePublicConversationShareAttachmentError(w, status)
 			return
 		}
 		header.Set("Content-Type", "text/html; charset=utf-8")

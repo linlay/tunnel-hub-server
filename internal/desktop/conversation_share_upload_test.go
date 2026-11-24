@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"example.invalid/tunnel-hub-server/internal/config"
+	"example.invalid/tunnel-hub-server/internal/shareassets"
 	"example.invalid/tunnel-hub-server/internal/sharefiles"
 	"example.invalid/tunnel-hub-server/internal/store"
 )
@@ -366,7 +367,10 @@ func TestSanitizeSharedHTMLDropsDocumentTitleAndPreservesBody(t *testing.T) {
 func TestConversationSharePermanentReadsFrozenAttachmentUntilRevoked(t *testing.T) {
 	cfg := desktopTestConfig(t)
 	cfg.SharePublicBaseURL = "https://share.example.test"
+	cfg.BrandID, cfg.ProductName = "test", "Test"
 	server, db := newDesktopTestServerWithConfig(t, cfg)
+	bundle := shareassets.NewManagedBundle(t.TempDir())
+	server.SetConversationShareRenderer(bundle)
 	now := time.Date(2026, 9, 20, 0, 0, 0, 0, time.UTC)
 	server.now = func() time.Time { return now }
 	const id = "0123456789abcdef01234567"
@@ -439,6 +443,19 @@ func TestConversationSharePermanentReadsFrozenAttachmentUntilRevoked(t *testing.
 	}
 	if csp := preview.Header().Get("Content-Security-Policy"); !strings.Contains(csp, "sandbox allow-scripts") || strings.Contains(csp, "allow-same-origin") || !strings.Contains(csp, "connect-src 'none'") {
 		t.Fatalf("preview CSP=%q", csp)
+	}
+	version := bundle.CurrentAssetSet()
+	pinned := read(attachmentPath + "?embed=1&assetSet=" + version)
+	if pinned.Code != http.StatusOK || !strings.Contains(pinned.Body.String(), version+"/html-preview-bootstrap.js") {
+		t.Fatalf("pinned preview status=%d body=%s", pinned.Code, pinned.Body.String())
+	}
+	if missing := read(attachmentPath + "?embed=1&assetSet=" + strings.Repeat("0", 64)); missing.Code != http.StatusServiceUnavailable {
+		t.Fatalf("missing version fell back to current: %d", missing.Code)
+	}
+	for _, query := range []string{"assetSet=" + version, "embed=1&assetSet=", "embed=1&assetSet=../current", "embed=1&unknown=1", "embed=1&embed=1", "embed=1&assetSet=" + version + "&assetSet=" + version, "embed=1&assetSet=%zz"} {
+		if invalid := read(attachmentPath + "?" + query); invalid.Code != http.StatusBadRequest {
+			t.Fatalf("invalid query %q status=%d", query, invalid.Code)
+		}
 	}
 	const otherAttachmentID = "ffffffffffffffffffffffff"
 	otherShareID, err := store.NewConversationShareID()

@@ -12,15 +12,28 @@ import (
 // Version describes the assets embedded in this running build, not a deployment
 // history or a binding from a share to a renderer.
 type Version struct {
-	AssetSet  string `json:"assetSet"`
-	Current   bool   `json:"current"`
-	FileCount int    `json:"fileCount"`
-	SizeBytes int64  `json:"sizeBytes"`
+	CanActivate bool         `json:"canActivate"`
+	Build       *BuildSource `json:"build,omitempty"`
+	Error       string       `json:"error,omitempty"`
+	AssetSet    string       `json:"assetSet"`
+	Current     bool         `json:"current"`
+	FileCount   int          `json:"fileCount"`
+	SizeBytes   int64        `json:"sizeBytes"`
 }
 
-func (b *Bundle) CurrentAssetSet() string { return b.assetSet }
+func (b *Bundle) CurrentAssetSet() string {
+	if b.managed != nil {
+		b.managed.mu.RLock()
+		defer b.managed.mu.RUnlock()
+		return b.managed.current
+	}
+	return b.assetSet
+}
 
 func (b *Bundle) Versions() ([]Version, error) {
+	if b.managed != nil {
+		return b.managed.versions()
+	}
 	entries, err := fs.ReadDir(b.files, ".")
 	if err != nil {
 		return nil, err

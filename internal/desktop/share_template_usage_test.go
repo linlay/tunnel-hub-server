@@ -5,9 +5,11 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	"example.invalid/tunnel-hub-server/internal/sharecontract"
+	"example.invalid/tunnel-hub-server/internal/store"
 )
 
 func TestTemplateUsageRecordsLegacyAndV2PagesOnly(t *testing.T) {
@@ -15,7 +17,12 @@ func TestTemplateUsageRecordsLegacyAndV2PagesOnly(t *testing.T) {
 	cfg.SharePublicBaseURL = "https://share.example.test"
 	server, _ := newDesktopTestServerWithConfig(t, cfg)
 	var recorded []string
-	server.SetConversationShareRenderObserver(func(_ context.Context, id string) { recorded = append(recorded, id) })
+	server.SetConversationShareRenderObserver(func(_ context.Context, version, id string) {
+		if version != "fixture-version" {
+			t.Error("wrong version", version)
+		}
+		recorded = append(recorded, id)
+	})
 	created := performConversationShareRequestWithExpiration(server, "permanent", []byte(validConversationSnapshot))
 	var legacy conversationShareRecordResponse
 	if err := json.Unmarshal(created.Body.Bytes(), &legacy); err != nil || created.Code != 201 {
@@ -57,6 +64,28 @@ type failedUsageRenderer struct {
 	capturingConversationShareRenderer
 }
 
-func (*failedUsageRenderer) Render([]byte, string, string, string, string, bool) ([]byte, error) {
-	return nil, errors.New("render failed")
+func (*failedUsageRenderer) RenderVersion([]byte, string, string, string, string, bool) ([]byte, string, error) {
+	return nil, "", errors.New("render failed")
+}
+
+type switchingUsageRenderer struct {
+	testConversationShareRenderer
+	current string
+}
+
+func (r *switchingUsageRenderer) RenderVersion(_ []byte, _, _, _, _ string, _ bool) ([]byte, string, error) {
+	fixed := r.current
+	r.current = "B"
+	return []byte("rendered " + fixed), fixed, nil
+}
+func TestUsageUsesRenderedVersionAfterCurrentChanges(t *testing.T) {
+	renderer := &switchingUsageRenderer{current: "A"}
+	server := &Server{conversationShareRenderer: renderer}
+	var observed string
+	server.SetConversationShareRenderObserver(func(_ context.Context, version, id string) { observed = version })
+	w := httptest.NewRecorder()
+	server.writeConversationSharePage(w, httptest.NewRequest("GET", "/share/example", nil), store.ConversationShare{ID: "example"})
+	if w.Code != 200 || w.Body.String() != "rendered A" || observed != "A" || renderer.current != "B" {
+		t.Fatal(w.Code, w.Body.String(), observed)
+	}
 }

@@ -6,7 +6,7 @@
 
 `tunnel-hub-server` 是 Tunnel Hub 的 Go 后端，核心边界是 Relay、Agent/Desktop 出站连接、管理 API、Desktop 注册 API、MySQL/SQLite 持久化和公网 HTTP/WebSocket 转发。
 
-完整管理前端原设计为 sibling 项目 `tunnel-hub-website`，当前工作区没有该项目。按用户确认，分享模板的只读管理页内嵌于本服务（`/api/admin/share-templates/view`），复用现有管理员登录和 API，不引入 React/Vite 管理前端或独立构建链。Desktop 协议调试台在 sibling 项目 `tunnel-hub-tester`。Desktop public mini site 是本仓库内的独立子项目 `tunnel-hub-public/`，作为单独静态容器部署。
+完整管理前端原设计为 sibling 项目 `tunnel-hub-website`，当前工作区没有该项目。按用户确认，分享模板的上传、启用与使用统计管理页内嵌于本服务（`/api/admin/share-templates/view`），复用现有管理员登录和 API，不引入 React/Vite 管理前端或独立构建链。Desktop 协议调试台在 sibling 项目 `tunnel-hub-tester`。Desktop public mini site 是本仓库内的独立子项目 `tunnel-hub-public/`，作为单独静态容器部署。
 
 ## 2. 技术栈
 
@@ -39,7 +39,7 @@ Relay 入口在 `cmd/relay/main.go`，启动顺序是：
 - `*.m.example.test/api/upload`: Mobile 上传入口，只从请求 Host 确定 Desktop，内部发送 `ns=ap`, `type=/api/upload`；multipart 不允许携带 `publicHost`。
 - `*.m.example.test/api/resource`: Mobile 资源入口，内部发送 `ns=ap`, `type=/api/resource` 和 `{file,pushURL}`；Desktop 通过 ticket 保护的 `/api/push/{id}` 回推文件。
 - `*-wa.example.test`: Desktop WebApp public HTTP/WebSocket。Relay 通过 WebApp route 与所属 deviceKey 打开 Desktop stream，向 Desktop 发送 `ns=wa` 的 `http.request` 或 `websocket.connect` 元数据。
-- `share.example.test`: 分享只读站点。公开边缘网关将 `/share/*` 和 `/assets/conversation-export/*` 转发到 Relay；Tunnel API origin 也暴露对话模板。Relay 按冻结描述提供内置对话、隔离业务预览或明确支持的动作；对话 `ConversationSnapshotV1` 继续注入当前唯一模板。通用分享仅在所有者撤销后失效；旧对话分享继续执行到期与一次性领取策略。对话模板和 manifest 由 WebClient 的独立发布命令替换，历史内容寻址资产保留，并从编译期 `embed.FS` 返回。
+- `share.example.test`: 分享只读站点。公开边缘网关将 `/share/*` 和 `/assets/conversation-export/*` 转发到 Relay；Tunnel API origin 也暴露对话模板。Relay 按冻结描述提供内置对话、隔离业务预览或明确支持的动作；对话 `ConversationSnapshotV1` 继续注入当前唯一模板。通用分享仅在所有者撤销后失效；旧对话分享继续执行到期与一次性领取策略。对话完整模板包由 WebClient 独立 release 生成 ZIP，管理员上传后手动启用；shareassets 独占资源根下 templates 及持久 current，历史资源含编译期 embed.FS 继续保留。
 
 ## 4. 目录结构
 
@@ -54,7 +54,7 @@ Relay 入口在 `cmd/relay/main.go`，启动顺序是：
 - `internal/desktop`: Desktop device 和 Desktop WebApp 注册 API。
 - `internal/proxy`: Relay/Agent 转发实现、yamux session、active agent manager、traffic event 记录。
 - `internal/sharecontract`: 通用分享 v1 DTO、包内路径、选择参数和形态校验；不解释市场或接收方业务上下文。
-- `internal/shareassets`: 公开对话显示模板、manifest、当前 asset-set、历史内容寻址资源集与服务端渲染器；新分享页只使用当前 manifest 指向的资源集。
+- `internal/shareassets`: 公开对话显示模板、manifest、持久选择的完整模板包、历史内容寻址资源集与服务端渲染器；新页面使用当前选择。首次初始化从既有内置资源生成符合上传格式的完整包，只更新版本引用与包元数据，原内置资源字节及 URL 保留；日常模板发布只上传 ZIP，不同步 Hub 源码。
 - `internal/store`: MySQL/SQLite schema、连接、少量方言适配、共享 DAO 和领域模型。
 - `internal/tunnel`: 隧道协议结构、JSON frame、WebSocket frame、Host/path/upstream 工具。
 - `deploy`: Nginx/Caddy 示例配置。
@@ -100,7 +100,7 @@ Relay 入口在 `cmd/relay/main.go`，启动顺序是：
 - `POST /api/admin/sessions/{id}/close`
 - `GET /api/admin/events`
 - `GET /api/admin/metrics`
-- `GET /api/admin/share-templates?days=7|30`、`GET /api/admin/share-templates/{assetSet}/shares?days=7|30`：管理员只读版本清单与使用元数据；内嵌页面入口 `/api/admin/share-templates/view`
+- `GET /api/admin/share-templates?days=7|30`、`GET /api/admin/share-templates/{assetSet}/shares?days=7|30`：管理员实时版本清单与使用元数据；内嵌页面入口 `/api/admin/share-templates/view`
 - `GET /api/components`
 - `POST /api/desktop/devices/register`
 - `PUT /api/desktop/devices/{deviceId}/webapps/{name}`；同路径 `GET` 只读查询当前所有者已有 active 发布及 webAppId，不注册或更新
@@ -109,6 +109,7 @@ Relay 入口在 `cmd/relay/main.go`，启动顺序是：
 - `GET /share/{shareId}`；preview/resolve/desktop/download 行为按通用契约选择，未接入行为明确拒绝
 - `GET/HEAD /share/{shareId}/preview/{logicalPath}`：仅显式包描述下的本 ID 资源，Fetch Metadata、严格 CSP、opaque sandbox 与外层精确 frame-src 一并保留，禁止放开 same-origin/宿主 bridge 或新增裸文件旁路
 - `GET/HEAD /share/{shareId}?action=service`：只引用已核实归属的现有 WebApp 注册 ID，复验撤销/active 后跳原公网 Host；不新建代理、转发 SSO 或把撤销短链等同停止原服务
+- `POST /api/admin/share-templates/upload`、`POST /api/admin/share-templates/{assetSet}/activate`：管理员上传与手动启用，要求同源校验及 X-Template-Action: 1。
 - `GET/HEAD /assets/conversation-export/{assetSet}/{file}`
 - `POST https://<desktop>.m.example.test/api/upload`
 - `GET https://<desktop>.m.example.test/api/resource?file=<chat-relative-path>`
@@ -139,7 +140,7 @@ Relay 入口在 `cmd/relay/main.go`，启动顺序是：
 - 附件 API 的 Desktop 身份只来自 `<desktop>.m.example.test` Host；不得从 body、query 或其他客户端字段接受 `publicHost` 覆盖。
 - 管理 token 手动创建当前禁用；Desktop 注册不创建 tunnel token、device secret 或轮换凭据。
 - 普通退出不撤销设备。主动移除后的重新注册只能用官网验签后的固定会话创建时间恢复原记录，比较和恢复必须在现有注册事务中完成；保留设备主键、名称和公网地址，不以 JWT 签发时间代替登录时间。
-- 对话显示资产必须由 Agent WebClient 同一次构建同步，路径中的 64 位 hash 是不可变集合身份；handler 只接受白名单路径并返回长期 immutable、CORS/CORP 与 `nosniff` 响应头。永久分享存在时不得清理历史集合。
+- 对话显示资产必须由 Agent WebClient 同一次构建打包，默认发布不再同步 Hub 源码；显式 sync 仅维护内置初始包，路径中的 64 位 hash 是不可变集合身份；handler 只接受白名单路径并返回长期 immutable、CORS/CORP 与 `nosniff` 响应头。永久分享存在时不得清理历史集合。
 - Go 改动提交前运行 `gofmt -w` 和相关 `go test`。
 - React/Vite 改动同时运行 `tunnel-hub-public` 的 `npm test` 和 `npm run build`。Public 镜像构建不得注入运行时标题；容器启动时必须通过 `PUBLIC_SITE_TITLE` 生成纯文本 runtime 配置。
 

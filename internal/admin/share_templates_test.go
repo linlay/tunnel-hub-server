@@ -13,8 +13,10 @@ import (
 
 func TestShareTemplateAPIAuthReadOnlyAndUnknownUsage(t *testing.T) {
 	server, db := newAdminTestServer(t)
-	current, unknown := strings.Repeat("a", 64), strings.Repeat("b", 64)
-	server.SetShareTemplateVersions([]shareassets.Version{{AssetSet: current, Current: true, FileCount: 2, SizeBytes: 12}, {AssetSet: unknown}})
+	bundle := shareassets.NewManagedBundle(t.TempDir())
+	server.SetShareTemplates(bundle)
+	current := bundle.CurrentAssetSet()
+	versions, _ := bundle.Versions()
 	if err := db.StartShareTemplateObservation(t.Context(), []string{current}, time.Now()); err != nil {
 		t.Fatal(err)
 	}
@@ -34,7 +36,7 @@ func TestShareTemplateAPIAuthReadOnlyAndUnknownUsage(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
 		t.Fatal(err)
 	}
-	if rec.Code != 200 || response.Days != 7 || len(response.Items) != 2 || response.Items[0].Usage == nil || response.Items[0].Usage.RenderCount != 0 || response.Items[1].Usage != nil || rec.Header().Get("Cache-Control") != "no-store" {
+	if rec.Code != 200 || response.Days != 7 || len(response.Items) != len(versions) || response.Items[0].Usage == nil || response.Items[0].Usage.RenderCount != 0 || response.Items[1].Usage != nil || rec.Header().Get("Cache-Control") != "no-store" {
 		t.Fatalf("response=%s", rec.Body.String())
 	}
 	for _, tc := range []struct {
@@ -67,7 +69,7 @@ func TestShareTemplateAPIAuthReadOnlyAndUnknownUsage(t *testing.T) {
 
 func TestShareTemplatePageShellAndLocalSession(t *testing.T) {
 	server, db := newAdminTestServer(t)
-	server.SetShareTemplateVersions([]shareassets.Version{})
+	server.SetShareTemplates(shareassets.NewManagedBundle(t.TempDir()))
 	for _, path := range []string{"/api/admin/share-templates/view", "/api/admin/share-templates/view/app.js", "/api/admin/share-templates/view/style.css"} {
 		rec := httptest.NewRecorder()
 		server.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))

@@ -23,12 +23,12 @@ import (
 const adminSessionCookieName = "tunnel_hub_session"
 
 type Server struct {
-	DB                    *store.DB
-	Manager               *proxy.Manager
-	Config                config.RelayConfig
-	Logger                *slog.Logger
-	ssoJWT                *auth.SSOJWTVerifier
-	shareTemplateVersions []shareassets.Version
+	DB             *store.DB
+	Manager        *proxy.Manager
+	Config         config.RelayConfig
+	Logger         *slog.Logger
+	ssoJWT         *auth.SSOJWTVerifier
+	shareTemplates *shareassets.Bundle
 }
 
 func NewServer(db *store.DB, manager *proxy.Manager, cfg config.RelayConfig, logger *slog.Logger, ssoJWT *auth.SSOJWTVerifier) (*Server, error) {

@@ -1,9 +1,11 @@
 package shareassets
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io/fs"
 	"net/http"
@@ -30,11 +32,11 @@ func responseStyleNonce(t *testing.T, body string) string {
 func TestStyleNonceIsUniquePerRenderAndDoesNotRewriteSnapshot(t *testing.T) {
 	bundle := NewBundle()
 	snapshot := []byte(`{"version":1,"title":"` + styleNonceMarker + `"}`)
-	first, err := bundle.Render(snapshot, "https://share.example.test", "example", "Example", "", true)
+	first, _, err := bundle.RenderVersion(snapshot, "https://share.example.test", "example", "Example", "", true)
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := bundle.Render(snapshot, "https://share.example.test", "example", "Example", "", true)
+	second, _, err := bundle.RenderVersion(snapshot, "https://share.example.test", "example", "Example", "", true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -95,6 +97,25 @@ func TestEmbeddedAssetSetDirectoryMatchesContentHash(t *testing.T) {
 	if err := json.Unmarshal(manifestBytes, &manifest); err != nil {
 		t.Fatal(err)
 	}
+	// These pre-upload resource-only sets are fixed legacy byte baselines.
+	// Later full-package IDs cannot be recomputed without their historical HTML.
+	legacySets := map[string]bool{
+		"055d7f779a2c178ea6dcb03b0123745f126b673aff7f8f9a216e8956cb660235": true,
+		"0a3285bfd83dc57f4cc00d2effa202988ea6d9735835cf6951009b74600f02e2": true,
+		"194486663943b1ce381cac3d06018da1e4589b77e9ed6fff6b66ce1c30ba2228": true,
+		"34cc34ac97f501fd89a9d05ee5764dc080741b8a968a6a28c68ad0a6551f8048": true,
+		"3d641cbc1310d58d0335aa17f746a99061e5d30e7bc1b5fa16de095a6b3fc80f": true,
+		"517e5e91336a7810a30a985f37666deded49d85bbabc5dd6d83559d3aa00bbee": true,
+		"536661c61fb309fe8e31ce8716e5a7ffe74d4ebaa6aaf4b0de1d71fed161a1c8": true,
+		"6bf7d89bf7f11ad0513428d0b2b3bdc0db9b59733d05a38b699b2b47fcf45c44": true,
+		"748f7dee897a48399833b093368054d29b4a607f0300d0e68bbdf53b463c2afe": true,
+		"958e38fff76f9ee34a58fe41909203b755b6ed3668f698594d80cbbaa2449f2f": true,
+		"aa527449c30f06c4de12325adc9d48e3459125e5efa2c42ea578ac186ffeebee": true,
+		"c7aa11284fd73021b4238ecd00977e0e161dad4c3376dfd2c2603315b568dcac": true,
+		"db95305cb9a40cd5fd4afbe5a85805f94845f12b267c25734a06f586453fffc9": true,
+		"ee3d5abec9a1fba71612cc4e96d051adebd09186d6eda17f1333ecfa445bae43": true,
+		"f9bdc1237af18ddd2a3449a9694cc4e274fdf4d2e0f12762e81735aa27a3fc9b": true,
+	}
 	currentSetFound := false
 	for _, set := range sets {
 		if !set.IsDir() || len(set.Name()) != 64 {
@@ -102,7 +123,15 @@ func TestEmbeddedAssetSetDirectoryMatchesContentHash(t *testing.T) {
 		}
 		if set.Name() == manifest.AssetSet {
 			currentSetFound = true
+			managed := NewManagedBundle(t.TempDir())
+			if _, err := managed.selected(); err != nil {
+				t.Fatal(err)
+			}
 		}
+		if !legacySets[set.Name()] {
+			continue
+		}
+		delete(legacySets, set.Name())
 		root := path.Join("files", set.Name())
 		var filenames []string
 		if err := fs.WalkDir(embeddedFiles, root, func(filename string, entry fs.DirEntry, walkErr error) error {
@@ -130,6 +159,9 @@ func TestEmbeddedAssetSetDirectoryMatchesContentHash(t *testing.T) {
 		if got := hex.EncodeToString(digest.Sum(nil)); got != set.Name() {
 			t.Fatalf("asset set directory=%s content hash=%s", set.Name(), got)
 		}
+	}
+	if len(legacySets) != 0 {
+		t.Fatal("legacy resources were removed", legacySets)
 	}
 	if !currentSetFound {
 		t.Fatalf("current asset set %s is missing", manifest.AssetSet)
@@ -237,9 +269,9 @@ func TestHandlerServesEveryCurrentManifestAsset(t *testing.T) {
 	}
 }
 
-func TestBundleHTMLPreviewUsesOnlyTheCurrentIntegrityCheckedBootstrap(t *testing.T) {
+func TestBundleHTMLPreviewUsesOnlyTheVersionedIntegrityCheckedBootstrap(t *testing.T) {
 	bundle := NewBundle()
-	body, err := bundle.RenderHTMLPreview("https://share.example.test")
+	body, err := bundle.RenderHTMLPreview("https://share.example.test", bundle.assetSet)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -256,7 +288,7 @@ func TestBundleHTMLPreviewUsesOnlyTheCurrentIntegrityCheckedBootstrap(t *testing
 	if strings.Contains(markup, "runtime.js") || strings.Count(markup, "<script") != 1 {
 		t.Fatal("guest shell contains a second runtime")
 	}
-	if _, err := bundle.RenderHTMLPreview("https://share.example.test/path"); err == nil {
+	if _, err := bundle.RenderHTMLPreview("https://share.example.test/path", bundle.assetSet); err == nil {
 		t.Fatal("non-origin URL accepted")
 	}
 	req := httptest.NewRequest(http.MethodGet, PublicPathPrefix+bundle.assetSet+"/html-preview-bootstrap.js", nil)
@@ -267,10 +299,31 @@ func TestBundleHTMLPreviewUsesOnlyTheCurrentIntegrityCheckedBootstrap(t *testing
 	}
 }
 
+func TestUnversionedPreviewCompatibilityMatchesEmbeddedHistory(t *testing.T) {
+	bundle := NewBundle()
+	want, err := fs.ReadFile(bundle.files, bundle.assetSet+"/html-preview-bootstrap.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	versions, err := bundle.Versions()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, version := range versions {
+		body, err := fs.ReadFile(bundle.files, version.AssetSet+"/html-preview-bootstrap.js")
+		if errors.Is(err, fs.ErrNotExist) {
+			continue // Predates HTML preview support.
+		}
+		if err != nil || !bytes.Equal(body, want) {
+			t.Fatalf("unversioned preview compatibility changed for %s: %v", version.AssetSet, err)
+		}
+	}
+}
+
 func TestBundleRendersHTMLSafeSnapshotWithCurrentAssets(t *testing.T) {
 	bundle := NewBundle()
 	snapshot := []byte(`{"version":1,"title":"</script>&  "}`)
-	html, err := bundle.Render(snapshot, "https://share.example.test", "zenmind", "ZenMind", "", true)
+	html, _, err := bundle.RenderVersion(snapshot, "https://share.example.test", "zenmind", "ZenMind", "", true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -291,7 +344,7 @@ func TestBundleRendersHTMLSafeSnapshotWithCurrentAssets(t *testing.T) {
 func TestBundleRendersReshareCapabilityWithoutChangingLocalTemplate(t *testing.T) {
 	bundle := NewBundle()
 	for _, allowed := range []bool{true, false} {
-		page, err := bundle.Render([]byte(`{"version":1}`), "https://share.example.test", "example", "Example", "", allowed)
+		page, _, err := bundle.RenderVersion([]byte(`{"version":1}`), "https://share.example.test", "example", "Example", "", allowed)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -312,7 +365,7 @@ func TestBundleInjectsOnlyValidatedPublicBrand(t *testing.T) {
 		{"zenmind", `ZenMind "<&>`},
 		{"cutej", "CuteJ"},
 	} {
-		page, err := bundle.Render(snapshot, "https://share.example.test", brand.id, brand.name, "", true)
+		page, _, err := bundle.RenderVersion(snapshot, "https://share.example.test", brand.id, brand.name, "", true)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -325,11 +378,11 @@ func TestBundleInjectsOnlyValidatedPublicBrand(t *testing.T) {
 		}
 	}
 	for _, id := range []string{"", "bad:scheme", "UPPER", "a/b", "javascript", "https"} {
-		if _, err := bundle.Render(snapshot, "https://share.example.test", id, "Valid", "", true); err == nil {
+		if _, _, err := bundle.RenderVersion(snapshot, "https://share.example.test", id, "Valid", "", true); err == nil {
 			t.Fatalf("accepted unsafe brand scheme %q", id)
 		}
 	}
-	if _, err := bundle.Render(snapshot, "https://share.example.test", "valid", " ", "", true); err == nil {
+	if _, _, err := bundle.RenderVersion(snapshot, "https://share.example.test", "valid", " ", "", true); err == nil {
 		t.Fatal("accepted empty product name")
 	}
 	if !strings.Contains(string(bundle.template), publicBrandMeta) {
@@ -343,7 +396,7 @@ func TestBundleInjectsOnlyValidatedPublicBrand(t *testing.T) {
 func TestBundleInjectsOnlyValidatedProductDownloadPage(t *testing.T) {
 	bundle := NewBundle()
 	snapshot := []byte(`{"version":1,"title":"shared"}`)
-	page, err := bundle.Render(
+	page, _, err := bundle.RenderVersion(
 		snapshot,
 		"https://share.example.test",
 		"zenmind",
@@ -366,12 +419,12 @@ func TestBundleInjectsOnlyValidatedProductDownloadPage(t *testing.T) {
 		"/relative/download",
 		"https://user:secret@download.example.test/product",
 	} {
-		if _, err := bundle.Render(snapshot, "https://share.example.test", "zenmind", "ZenMind", value, true); err == nil {
+		if _, _, err := bundle.RenderVersion(snapshot, "https://share.example.test", "zenmind", "ZenMind", value, true); err == nil {
 			t.Fatalf("accepted unsafe product download page %q", value)
 		}
 	}
 
-	page, err = bundle.Render(snapshot, "https://share.example.test", "zenmind", "ZenMind", "", true)
+	page, _, err = bundle.RenderVersion(snapshot, "https://share.example.test", "zenmind", "ZenMind", "", true)
 	if err != nil {
 		t.Fatal(err)
 	}

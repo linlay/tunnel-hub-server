@@ -5,12 +5,16 @@ let versions = [];
 let loadSequence = 0;
 let detailSequence = 0;
 let activeDays = "30";
+let uploadEnabled = false;
+let maxUploadBytes = 0;
+let writing = false;
 
 function message(text, error = false) {
   el("message").textContent = text;
   el("message").className = error ? "error" : "muted";
 }
 function showLogin() {
+  loadSequence++; uploadEnabled = false; el("upload").disabled = true; el("refresh").disabled = false;
   versions = [];
   el("versions").replaceChildren();
   el("summary").textContent = "";
@@ -24,15 +28,21 @@ function showLogin() {
   el("logout").hidden = true;
   el("login-panel").hidden = false;
 }
-async function request(path, options = {}) {
-  const response = await fetch(path, { ...options, credentials: "same-origin", cache: "no-store", signal: AbortSignal.timeout(15000) });
+async function request(path, options = {}, timeout = 15000) {
+  let response;
+  try { response = await fetch(path, { ...options, credentials: "same-origin", cache: "no-store", signal: AbortSignal.timeout(timeout) }); }
+  catch (error) { throw new Error(options.headers?.["X-Template-Action"] ? "操作结果待确认，请刷新查看；不会自动重试。" : "连接失败，请刷新重试。"); }
   if (response.status === 401) {
-    const error = new Error(options.method === "POST" ? "账号或密码无效。" : "请登录管理员账号。已有会话可能已过期。");
+    const error = new Error(path === "/api/admin/login" ? "账号或密码无效。" : "请登录管理员账号。已有会话可能已过期。");
     error.status = 401;
     throw error;
   }
-  if (!response.ok) throw new Error(response.status === 403 ? "当前账号没有管理员权限。" : "读取失败，请稍后重试（" + response.status + "）。");
-  return response.json();
+  if (!response.ok) {
+    const messages = { 400: "模板包或请求无效。", 403: "权限或同源校验未通过。", 404: "版本不存在，请刷新。", 409: "已有版本损坏或冲突，请选择其他有效版本。", 413: "模板包超过大小限制。", 415: "请选择 ZIP 模板包。", 503: "模板存储暂不可用。" };
+    throw new Error(messages[response.status] || "操作失败（" + response.status + "）。");
+  }
+  try { return await response.json(); }
+  catch (error) { throw new Error(options.headers?.["X-Template-Action"] ? "操作响应未完整收到，结果待确认，请刷新查看。" : "响应无效，请刷新重试。"); }
 }
 function time(value) {
   return value ? new Date(value).toLocaleString("zh-CN", { hour12: false }) : "—";
@@ -55,8 +65,13 @@ function render() {
     const row = document.createElement("tr");
     const version = cell(row, "");
     const hash = document.createElement("code"); hash.className = "version"; hash.textContent = item.assetSet;
-    const badge = document.createElement("span"); badge.className = "badge" + (item.current ? " current" : ""); badge.textContent = item.current ? "当前启用" : "历史保留";
+    const badge = document.createElement("span"); badge.className = "badge" + (item.error ? " error" : item.current ? " current" : ""); badge.textContent = item.current ? (item.error ? "当前不可用" : "当前启用") : (item.error ? "不可用" : item.canActivate ? "可启用" : "仅历史资源");
     version.append(hash, badge);
+    if (item.error) { const detail = document.createElement("p"); detail.className = "error"; detail.textContent = item.error; version.append(detail); }
+    const source = cell(row, "", "source");
+    const commit = document.createElement("code"); commit.textContent = item.build?.commit ? item.build.commit.slice(0, 12) : "未记录"; commit.title = item.build?.commit || "未记录";
+    const full = document.createElement("details"); const label = document.createElement("summary"); label.textContent = "完整 commit"; full.append(label, document.createTextNode(item.build?.commit || "未记录"));
+    source.append(commit, document.createElement("br"), document.createTextNode(item.build?.dirty === true ? "含未提交改动" : item.build?.dirty === false ? "工作区干净" : "工作区状态未知"), full);
     const usage = item.usage;
     cell(row, !usage ? "统计未知" : used(item) ? "有使用记录" : "未观察到使用");
     cell(row, usage ? usage.renderCount.toLocaleString() : "—");
@@ -67,10 +82,11 @@ function render() {
     cell(row, (item.sizeBytes / 1024 / 1024).toFixed(1) + " MiB · " + item.fileCount + " 文件");
     cell(row, usage ? time(usage.observedSince) : "未知", "date");
     const button = document.createElement("button"); button.textContent = "查看分享";
-    button.addEventListener("click", () => showDetail(item)); cell(row, "").append(button);
+    button.addEventListener("click", () => showDetail(item)); const actions = cell(row, ""); actions.append(button);
+    if (item.canActivate && (!item.current || item.error)) { const activate = document.createElement("button"); activate.textContent = "启用"; activate.disabled = writing; activate.addEventListener("click", () => writeTemplate(item.assetSet)); actions.append(activate); }
     el("versions").append(row);
   }
-  if (!items.length) { const row = document.createElement("tr"); cell(row, "没有符合筛选条件的版本。").colSpan = 9; el("versions").append(row); }
+  if (!items.length) { const row = document.createElement("tr"); cell(row, "没有符合筛选条件的版本。").colSpan = 10; el("versions").append(row); }
 }
 async function load() {
   const sequence = ++loadSequence;
@@ -82,9 +98,15 @@ async function load() {
     const data = await request(endpoint + "?days=" + days);
     if (sequence !== loadSequence) return;
     versions = data.items; activeDays = days;
+    uploadEnabled = data.uploadEnabled; maxUploadBytes = data.maxUploadBytes;
+    el("upload").disabled = writing || !uploadEnabled;
+    el("upload-limit").textContent = "最大 " + Math.round(maxUploadBytes / 1024 / 1024) + " MiB；" + (uploadEnabled ? "上传后需手动启用。" : "上传不可用，请检查模板存储权限。");
+    el("template-status").textContent = (data.currentAssetSet ? "当前选择：" + data.currentAssetSet : "当前选择不可用") + (data.error ? " · " + data.error : "");
+    el("template-status").className = data.error ? "error" : "muted";
     el("login-panel").hidden = true; el("dashboard").hidden = false; el("logout").hidden = false;
     el("window").textContent = "统计区间：" + data.startDay + " 至 " + data.endDay + "（UTC）。统计起点晚于区间开始的版本，仅覆盖实际采集时间。";
     render(); message("已更新 · " + new Date().toLocaleTimeString("zh-CN"));
+    return true;
   } catch (error) {
     if (sequence === loadSequence) {
       versions = []; el("versions").replaceChildren(); el("summary").textContent = ""; el("window").textContent = "";
@@ -128,6 +150,20 @@ el("logout").addEventListener("click", async () => {
   catch (error) { if (error.status === 401) showLogin(); message(error.message, true); }
   finally { el("logout").disabled = false; el("refresh").disabled = false; }
 });
+async function writeTemplate(assetSet) {
+  if (writing) return;
+  const file = el("template-file").files[0];
+  if (!assetSet && (!file || !/\.zip$/i.test(file.name) || file.size > maxUploadBytes)) { message("请选择限制大小内的 ZIP 文件。", true); return; }
+  writing = true; loadSequence++; el("upload").disabled = true; el("logout").disabled = true; render(); message(assetSet ? "正在启用…" : "正在上传…");
+  try {
+    const result = await request(endpoint + (assetSet ? "/" + encodeURIComponent(assetSet) + "/activate" : "/upload"), { method: "POST", headers: { "X-Template-Action": "1", ...(!assetSet ? { "Content-Type": "application/zip" } : {}) }, ...(!assetSet ? { body: file } : {}) }, 120000);
+    const refreshed = await load();
+    if (!assetSet) el("template-file").value = "";
+    if (refreshed) message(assetSet ? "已启用。" : result.alreadyExists ? "版本已存在，沿用已有来源。" : "已上传，尚未启用。");
+  } catch (error) { if (error.status === 401) showLogin(); message(error.message, true); }
+  finally { writing = false; el("upload").disabled = !uploadEnabled; el("logout").disabled = false; render(); }
+}
+el("upload").addEventListener("click", () => writeTemplate());
 el("filter").addEventListener("change", render);
 el("days").addEventListener("change", load);
 el("refresh").addEventListener("click", load);
