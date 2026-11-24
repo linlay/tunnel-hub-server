@@ -17,7 +17,11 @@ func TestShareTemplateAPIAuthReadOnlyAndUnknownUsage(t *testing.T) {
 	server.SetShareTemplates(bundle)
 	current := bundle.CurrentAssetSet()
 	versions, _ := bundle.Versions()
-	if err := db.StartShareTemplateObservation(t.Context(), []string{current}, time.Now()); err != nil {
+	if err := db.StartShareTemplateObservation(t.Context(), []string{current}, time.Now().Add(-48*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	latest := versions[len(versions)-1].AssetSet // Highest hash must still sort before current.
+	if err := db.StartShareTemplateObservation(t.Context(), []string{latest}, time.Now()); err != nil {
 		t.Fatal(err)
 	}
 	for _, path := range []string{"/api/admin/share-templates", "/api/admin/share-templates/" + current + "/shares"} {
@@ -36,7 +40,7 @@ func TestShareTemplateAPIAuthReadOnlyAndUnknownUsage(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
 		t.Fatal(err)
 	}
-	if rec.Code != 200 || response.Days != 7 || len(response.Items) != len(versions) || response.Items[0].Usage == nil || response.Items[0].Usage.RenderCount != 0 || response.Items[1].Usage != nil || rec.Header().Get("Cache-Control") != "no-store" {
+	if rec.Code != 200 || response.Days != 7 || len(response.Items) != len(versions) || response.Items[0].AssetSet != latest || response.Items[1].AssetSet != current || response.Items[0].Usage == nil || response.Items[0].Usage.RenderCount != 0 || response.Items[2].Usage != nil || rec.Header().Get("Cache-Control") != "no-store" {
 		t.Fatalf("response=%s", rec.Body.String())
 	}
 	for _, tc := range []struct {

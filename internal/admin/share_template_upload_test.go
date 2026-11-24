@@ -102,6 +102,17 @@ func TestTemplateUploadActivateAndRecovery(t *testing.T) {
 	if w.Code != 200 || bundle.CurrentAssetSet() != initial || !strings.Contains(w.Body.String(), id) {
 		t.Fatal(w.Code, w.Body.String())
 	}
+	list := httptest.NewRecorder()
+	server.ServeHTTP(list, authedAdminRequest("GET", "/api/admin/share-templates", ""))
+	var response struct {
+		Items []shareTemplateItem `json:"items"`
+	}
+	if err := json.Unmarshal(list.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if list.Code != 200 || len(response.Items) == 0 || response.Items[0].AssetSet != id || response.Items[0].Usage == nil || response.Items[0].Usage.ObservedSince == nil || response.Items[0].Current {
+		t.Fatal("new upload must precede the active version using existing observation time", list.Body.String())
+	}
 	// Re-upload same bytes with different provenance, retaining the first record.
 	second, same := templateUploadFixture(t, root, "<!--new HTML-->", strings.Repeat("b", 40))
 	if same != id {

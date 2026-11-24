@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"os"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -94,6 +95,15 @@ func (s *Server) handleShareTemplates(w http.ResponseWriter, r *http.Request) {
 		s.writeInternal(w, "list template usage", err)
 		return
 	}
+	// Uploads already start observation. Reuse that time for recency, without
+	// treating historical initialization times as publication timestamps.
+	sort.SliceStable(versions, func(i, j int) bool {
+		a, b := usage[versions[i].AssetSet].ObservedSince, usage[versions[j].AssetSet].ObservedSince
+		if a == nil {
+			return false
+		}
+		return b == nil || a.After(*b)
+	})
 	items := make([]shareTemplateItem, 0, len(versions))
 	for _, version := range versions {
 		item := shareTemplateItem{Version: version}
