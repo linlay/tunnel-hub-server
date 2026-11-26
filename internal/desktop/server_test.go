@@ -1315,8 +1315,8 @@ func newDesktopTestServerWithConfig(t *testing.T, cfg config.RelayConfig) (*Serv
 
 type testConversationShareRenderer struct{}
 
-func (testConversationShareRenderer) Render(snapshot []byte, _, _, _, _ string, _ bool) ([]byte, error) {
-	return append([]byte(nil), snapshot...), nil
+func (testConversationShareRenderer) RenderVersion(snapshot []byte, _, _, _, _ string, _ bool) ([]byte, string, error) {
+	return append([]byte(nil), snapshot...), "fixture-version", nil
 }
 
 func desktopTestVerifier(t *testing.T, cfg config.RelayConfig) *auth.SSOJWTVerifier {
@@ -1617,6 +1617,6 @@ func waitForTrafficEvent(t *testing.T, db *store.DB, objectType, publicHost, kin
 	return store.TrafficEvent{}
 }
 
-func (testConversationShareRenderer) RenderHTMLPreview(_ string) ([]byte, error) {
+func (testConversationShareRenderer) RenderHTMLPreview(_, _ string) ([]byte, error) {
 	return []byte(`<script src="/html-preview-bootstrap.js"></script>`), nil
 }

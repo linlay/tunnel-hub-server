@@ -241,7 +241,7 @@ docker compose up -d --build
 - `hub.example.test/api/admin`, `/api/desktop`, `/api/components`, `/tunnel`: 转发到 Relay；`/api/upload`、`/api/resource` 和旧 `/api/download` 明确返回 404。
 - `*.m.example.test`: `<device>-<frontendPort>.m.example.test` 的全部路径，以及普通设备 Host 的 WebSocket upgrade、`POST /api/upload` 和 `GET /api/resource` 转发到 Relay；普通 `<device>.m.example.test` HTTP 转发到 public Desktop site。
 - `*-wa.example.test`: 由 `*.example.test` 通配符入口直接转发到 Relay。
-- `share.example.test/share/*` 由公开边缘网关直接转发到 Relay。Relay 查询当前配置的数据库后返回 HTML；`/assets/conversation-export/*` 在分享 origin 和 Tunnel API origin 都返回编入 Relay 的不可变 JS/CSS/font 资产，供线上分享、落盘导出和本地 loopback 环境复用。HTML 资源 origin 由 Desktop Worker 按当前 Tunnel 配置注入，不绑定固定域名。
+- `share.example.test/share/*` 由公开边缘网关直接转发到 Relay。Relay 查询当前配置的数据库后返回 HTML；`/assets/conversation-export/*` 在分享 origin 和 Tunnel API origin 都返回已发布的不可变 JS/CSS/font 资产（含内置历史资源），供线上分享、落盘导出和本地 loopback 环境复用。HTML 资源 origin 由 Desktop Worker 按当前 Tunnel 配置注入，不绑定固定域名。
 
 Tunnel 端模板在 `deploy/nginx/tunnel-hub.conf.template` 和 `deploy/caddy/Caddyfile.template`，其中包含分享 origin 的 `/share/*`，以及分享/Tunnel API 两个 origin 的 `/assets/conversation-export/*` 直连 Relay 规则。上线前必须替换全部 `{{...}}` 占位符；分享关闭时删除分享 Host block。
 
@@ -312,7 +312,7 @@ curl -X POST https://hub.example.test/api/desktop/devices/register \
 
 `service:{type:"webapp",webAppId}` 只引用现有注册 ID；创建时核实发布仍 active、设备未撤销且属于分享所有者。公开 `?action=service` 再检查同一分享撤销状态与当前绑定，303 跳转至原注册公网 Host；不把分享站当代理、不接收 upstream、不转发所有者 SSO。当前服务、离线 502、HTTP/WebSocket 与访客权限继续由原 WebApp 发布链路处理。停止发布或移除绑定返回明确不可用页并保留冻结预览。撤销分享只关闭该短链及其私有资源，原公开地址和其他分享不受影响；停止公开服务仍使用原发布操作。
 
-自包含包的 `preview.entrypoint` 必须命中本分享资源的逻辑路径且为 text/html。可信外层使用 `sandbox="allow-scripts"` 的 opaque iframe，配合 credentialless、no-referrer 和仅限本分享 preview 路径的 frame-src；外层不运行包脚本或处理包消息。`/share/{id}/preview/{path}` 每次检查描述、清单归属、撤销及文件 Hash，返回严格 CSP 和无凭据 CORS，模块/JSON/字体/图片可加载。脚本、样式、图片、字体及连接仅允许本包资源路径；禁止任意网络、嵌套 frame、Worker、表单、弹窗、顶层导航与包内下载。包资源要求浏览器 Fetch Metadata，拒绝 document/object/worker 或缺失目的地的读取，保证 SVG/XHTML 等可执行文档也不能作为顶层页面绕开外层导航限制。普通资源下载仍走 action=download；普通 HTML 附件仍清洗并禁用脚本。
+自包含包的 `preview.entrypoint` 必须命中本分享资源的逻辑路径且为 text/html。可信外层使用 `sandbox="allow-scripts"` 的 opaque iframe，配合 credentialless、no-referrer 和仅限本分享 preview 路径的 frame-src；外层不运行包脚本或处理包消息。`/share/{id}/preview/{path}` 每次检查描述、清单归属、撤销及文件 Hash，返回严格 CSP 和无凭据 CORS，模块/JSON/字体/图片可加载。脚本、样式、图片、字体及连接仅允许本包资源路径；禁止任意网络、嵌套 frame、Worker、表单、弹窗、顶层导航与包内下载。包资源要求浏览器 Fetch Metadata，拒绝 document/object/worker 或缺失目的地的读取，保证 SVG/XHTML 等可执行文档也不能作为顶层页面绕开外层导航限制。普通资源下载仍走 action=download；普通对话 HTML 附件沿用独立附件页和既有隔离策略。
 
 预览 CSP 使用配置的 `SHARE_PUBLIC_BASE_URL`，应通过记录返回的 canonical URL 浏览包。此方案已在 macOS Chrome 156 实测；其他平台/浏览器需按 QA 验证。手工浏览器回归夹具为 `internal/desktop/share_preview_browser_test.go`：显式设置独立临时 QA 目录、临时 TMPDIR 和 SQLite 后运行 TestSharePreviewBrowserHarness；常规测试不启动该服务。包样例只用于验证，不是新业务应用。未修改 WebClient 导出源码或已编译资源集。
 
@@ -350,13 +350,34 @@ MySQL 启动只幂等新增通用分享表，不改变旧表、不批量撤销�
 
 已经运行过旧版破坏性迁移的数据库不属于上述增量升级路径：被删除的时效和领取数据无法由默认值还原，须在隔离副本中恢复匹配的数据库与资源备份后验证。启动结构检查会拒绝缺少旧字段的数据库，不会自动补列或重新公开退役记录。
 
-`GET/HEAD /assets/conversation-export/{sha256}/{file}` 提供随 Relay 编译且通过内容 Hash 校验的资源集；当前 manifest 决定新分享页使用的资源集，历史资源集继续服务已有 HTML。分享渲染包由 WebClient 显式同步后随 Relay 原子发布，普通 WebClient 发布不修改它。
+`GET/HEAD /assets/conversation-export/{assetSet}/{file}` 提供通过完整内容 SHA-256 校验的不可变资源。WebClient 的 `npm run release:conversation-export` 输出完整 ZIP，管理员在现有版本页上传后手动启用；上传不改变当前版本。新页面使用持久选择的完整包，历史资源 URL 和字节保留，不删除、不 GC。
+
+单 Relay 独占 `CONVERSATION_SHARE_RESOURCE_DIR/templates`。首次空目录初始化使用既有内置渲染资源，按完整包算法计算身份并持久保存模板包与 `current`；只调整包元数据及模板中的版本引用，不更新 JS/CSS/font 或页面内容，缺失的构建来源记为 null。原内置资源 URL 继续提供原字节。以后重启/更换二进制仍读取持久选择。上传包不可覆盖；同内容不同 commit 视为已存在，保留首次来源。commit/dirty 的 null 表示未知，来源不是签名。
+
+首次升级需部署支持上传的 Hub，并在升级前备份资源卷、核对单写者实例；本次保留既有内置初始资源，后续模板 release 只生成 ZIP，不要求同步 Hub 源码。显式 sync/check-sync 仅用于另行维护内置包。后续 ZIP 上传与启用无需重建/重启 Hub。回滚模板通过启用已保留完整版本完成，历史仅资源条目不能启用。请保留支持上传能力的 Hub 回退版本：更老的二进制可能不能服务运行时上传版本的 URL。
+
+当前模板不可用时模板/分享返回 503，管理入口和有效历史资源仍可用；检查版本页错误并显式启用有效完整包恢复，不自动回退。current 缺失/非法、当前包损坏或持久化结果不确定时不静默覆盖。崩溃残留 `.upload-*` / `.current-*` 不作为版本、不自动清理；人工核对归属后处理。
+
+分享模板使用情况的内嵌管理页位于 Tunnel API origin 的 `/api/admin/share-templates/view`。它随 Relay 编译发布，复用 `/api/admin/login` 的本地管理员账号和 HttpOnly 会话 Cookie，不需要独立前端项目、构建或新增代理路径。页面壳不含管理数据；下列接口继续使用原有管理员 Cookie／SSO JWT 鉴权。页面登录表单仅支持现有本地管理员登录，SSO JWT 调用方使用接口。
+
+- `GET /api/admin/share-templates?days=7|30`（默认 30）：返回实时版本、当前选择/错误、可启用性、build 来源、上传能力/限制、文件数和字节数，以及区间内页面渲染次数、去重分享数、资源请求数。区间按 UTC 自然日包含今天；`startDay/endDay` 为实际日期，最近访问时间覆盖全部已采集记录。
+- `POST /api/admin/share-templates/upload`：`Content-Type: application/zip`，原始 ZIP body，最大 64 MiB；返回 assetSet/alreadyExists，不启用。
+- `POST /api/admin/share-templates/{assetSet}/activate`：启用有效完整包，返回 currentAssetSet。两种写请求要求 `X-Template-Action: 1`；有 Origin 时必须可信同源，转发头不能放开校验。页面上传超时/断连时先刷新确认结果，不自动重试。
+- `GET /api/admin/share-templates/{assetSet}/shares?days=7|30`：返回区间内实际渲染过该版本的最近 100 条分享 ID、标题、渲染次数和最近渲染时间，包含已失效分享。只读元数据，不读取 snapshot/description BLOB，也不打开或领取一次性分享。
+
+唯一新增的 `share_template_usage_daily` 表按版本、UTC 日期与分享 ID 聚合；空分享 ID 的桶保存资源请求，启动及上传时为已知版本写入零计数桶以记录统计起点，重复启动不覆盖计数。`usage:null` 表示没有采集起点；已开始采集但次数为零表示「未观察到使用」，不表示从未使用或可以删除。`observedSince` 是采集起点，不能当作发布时间。旧数据无法补算，浏览器和边缘缓存命中无法观测；混合部署旧实例时也不是完整流量统计。
+
+管理列表复用 `observedSince` 倒序排列，让最近上传并开始采集的版本优先显示；未知时间置后，相同时间保留原顺序。旧资源的统一初始化时间仍是统计起点，不代表历史上传时间。
+
+只有成功写出完整页面的 GET 记录渲染；HEAD、失败、resolve、通用元数据和包预览不记入对话模板渲染。通过原资源路径验证且响应 200／206／304 的 GET 记录对应资源版本，HEAD、404、无效 Range 和写出失败不计数；模板下载入口本身不计数。采集沿用现有数据库，写入设置 250 ms 超时，失败记日志但不改变公开响应。没有新增队列、清理任务或逐分享版本绑定；统计使用本次实际渲染的模板版本，安全响应头、过期／撤销／一次性领取规则与永久分享的历史资源保留要求不变。
 
 Snapshot V1 兼容新增可选 `attachmentIds`、HTML `mediaRefs` 和 `omittedResources`，上传入口验证成功/省略身份及所有关联。资源以规范的当前 Chat 相对引用登记；不接受跨 Chat、内部目录或路径别名。媒体预览与下载继续通过同一分享鉴权和 `ServeContent` 支持 GET/HEAD/Range；SVG 仅在图片上下文使用，下载保持原字节和 attachment 响应。
 
 可选 `turn.error` 和已有 `awaiting-answer` 节点中的已提交内容由 Platform 投影、WebClient 展示，Hub 原样保存，不解释交互业务。先发布兼容这些字段的渲染资源，再发布 Platform／Desktop；无需数据库或 JSONL 迁移。旧分享可继续读取，缺失的交互明细和具体运行错误需从原对话重新生成。
 
-HTML 的普通 preview 请求重定向到独立附件页；`?embed=1` 返回当前 assetSet 内带 SRI/匿名 CORS 的固定 bootstrap。网络 iframe 保持 opaque origin，只允许脚本；父页从已授权下载接口读取 HTML 与显式媒体映射，经文档绑定 MessagePort 交付一次。guest 创建 Blob 媒体并执行原 HTML；HTTP CSP 拒绝 connect/frame/worker/object/form/base，仅允许约定的内联及 HTTPS 静态依赖。已删除服务端 HTML 清洗旧路径，不提供任意 URL RPC、资源代理或 Cookie 放宽。父页 CSP 的图片和媒体只增加 self。
+HTML 的普通 preview 请求重定向到独立附件页；`?embed=1&assetSet=<父页面版本>` 返回指定资源集内带 SRI/匿名 CORS 的 bootstrap，启用其他模板或重启后仍使用原版本。指定版本不可用时返回 503，不回退到 current；参数非法返回 400。旧运行时的 `?embed=1` 固定使用内置兼容 bootstrap，不跟随当前模板切换；现存历史集合的 bootstrap 字节一致，由回归测试约束，维护内置包时须保留这项兼容性。网络 iframe 保持 opaque origin，只允许脚本；父页从已授权下载接口读取 HTML 与显式媒体映射，经文档绑定 MessagePort 交付一次。guest 创建 Blob 媒体并执行原 HTML；HTTP CSP 拒绝 connect/frame/worker/object/form/base，仅允许约定的内联及 HTTPS 静态依赖。附件原文自带的第三方 HTTPS 依赖不属于模板资源集。已删除服务端 HTML 清洗旧路径，不提供任意 URL RPC、资源代理或 Cookie 放宽。父页 CSP 的图片和媒体只增加 self。
+
+正文 HTML 代码块使用 `GET/HEAD /share/{shareId}/html-preview?assetSet=<父页面版本>`。该入口只返回指定版本的受信任 bootstrap 壳，不接收、解析或存储正文。只允许有效的对话分享，旧分享沿用撤销、到期和已有一次性领取会话检查，不领取、不续期、不签发 Cookie；版本缺失返回 503，不回退 current。正文通过文档绑定 MessagePort 一次交付，DOMPurify 清理预览副本；HTTP CSP 只允许该版本 bootstrap 脚本、内联样式及必要的 data/blob 媒体，禁止内容脚本、任意外部资源、嵌套页面、表单、顶层导航和宿主能力。此入口不修改父页 CSP，也不复用业务包的 `/preview/` 路由。先部署此接口，再由管理员上传并启用新版对话模板；历史资源和快照保持原样。
 
 本次改造的实现、检查结果、浏览器证据和待完成的发布门禁见[执行记录](docs/conversation-share-rendering/08-execution-record.md)。
 

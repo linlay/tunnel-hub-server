@@ -15,6 +15,7 @@ import (
 	"example.invalid/tunnel-hub-server/internal/auth"
 	"example.invalid/tunnel-hub-server/internal/config"
 	"example.invalid/tunnel-hub-server/internal/proxy"
+	"example.invalid/tunnel-hub-server/internal/shareassets"
 	"example.invalid/tunnel-hub-server/internal/store"
 	"example.invalid/tunnel-hub-server/internal/tunnel"
 )
@@ -22,11 +23,12 @@ import (
 const adminSessionCookieName = "tunnel_hub_session"
 
 type Server struct {
-	DB      *store.DB
-	Manager *proxy.Manager
-	Config  config.RelayConfig
-	Logger  *slog.Logger
-	ssoJWT  *auth.SSOJWTVerifier
+	DB             *store.DB
+	Manager        *proxy.Manager
+	Config         config.RelayConfig
+	Logger         *slog.Logger
+	ssoJWT         *auth.SSOJWTVerifier
+	shareTemplates *shareassets.Bundle
 }
 
 func NewServer(db *store.DB, manager *proxy.Manager, cfg config.RelayConfig, logger *slog.Logger, ssoJWT *auth.SSOJWTVerifier) (*Server, error) {
@@ -80,6 +82,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.requireAuth(w, r, s.handleEvents)
 	case path == "/metrics" && r.Method == http.MethodGet:
 		s.requireAuth(w, r, s.handleMetrics)
+	case path == "/share-templates/view" || strings.HasPrefix(path, "/share-templates/view/"):
+		s.serveShareTemplatesPage(w, r)
+	case path == "/share-templates" || strings.HasPrefix(path, "/share-templates/"):
+		s.requireAuth(w, r, s.handleShareTemplates)
 	default:
 		writeError(w, http.StatusNotFound, "not found")
 	}

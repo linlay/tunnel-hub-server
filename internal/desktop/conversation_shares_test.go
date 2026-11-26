@@ -27,10 +27,10 @@ type capturingConversationShareRenderer struct {
 	canReshare             bool
 }
 
-func (renderer *capturingConversationShareRenderer) Render(snapshot []byte, _, _, _, productDownloadPageURL string, canReshare bool) ([]byte, error) {
+func (renderer *capturingConversationShareRenderer) RenderVersion(snapshot []byte, _, _, _, productDownloadPageURL string, canReshare bool) ([]byte, string, error) {
 	renderer.productDownloadPageURL = productDownloadPageURL
 	renderer.canReshare = canReshare
-	return append([]byte(nil), snapshot...), nil
+	return append([]byte(nil), snapshot...), "fixture-version", nil
 }
 
 func TestConversationShareDeepLinkInheritsResharePolicy(t *testing.T) {
@@ -750,6 +750,6 @@ func assertConversationShareList(
 	}
 }
 
-func (*capturingConversationShareRenderer) RenderHTMLPreview(_ string) ([]byte, error) {
+func (*capturingConversationShareRenderer) RenderHTMLPreview(_, _ string) ([]byte, error) {
 	return []byte(`<script src="/html-preview-bootstrap.js"></script>`), nil
 }

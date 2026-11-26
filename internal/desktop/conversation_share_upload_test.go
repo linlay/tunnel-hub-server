@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"example.invalid/tunnel-hub-server/internal/config"
+	"example.invalid/tunnel-hub-server/internal/shareassets"
 	"example.invalid/tunnel-hub-server/internal/sharefiles"
 	"example.invalid/tunnel-hub-server/internal/store"
 )
@@ -330,43 +331,13 @@ func TestConversationShareRevokeRemovesFrozenResourceDirectory(t *testing.T) {
 	}
 }
 
-func TestSanitizeSharedHTMLRemovesActiveContent(t *testing.T) {
-	source := []byte(`<html><head><style>p{color:red}</style></head><body><script>alert(1)</script><p style="color:blue">safe</p><img src="https://bad.example/x.png"><img src="data:image/png;base64,AAAA"><iframe src="https://bad.example"></iframe></body></html>`)
-	result := string(sanitizeSharedHTML(source))
-	for _, fragment := range []string{"alert(1)", "<script", "<iframe", "bad.example"} {
-		if strings.Contains(result, fragment) {
-			t.Fatalf("unsafe fragment %q in %s", fragment, result)
-		}
-	}
-	if !strings.Contains(result, "safe") || !strings.Contains(result, "data:image/png;base64,AAAA") {
-		t.Fatalf("safe content lost: %s", result)
-	}
-}
-
-func TestSanitizeSharedHTMLDropsDocumentTitleAndPreservesBody(t *testing.T) {
-	for _, title := range []string{
-		`<title>MCP 服务上线计划 · 会议纪要摘要</title>`,
-		`<TITLE>MCP 服务上线计划 &amp; 会议纪要摘要</TITLE>`,
-	} {
-		t.Run(title, func(t *testing.T) {
-			source := []byte(`<html><head>` + title + `<style>h1{color:blue}</style></head><body><h1>会议正文标题</h1><p title="补充说明">会议内容</p></body></html>`)
-			result := string(sanitizeSharedHTML(source))
-			if strings.Contains(result, "MCP 服务上线计划") || strings.Contains(result, "会议纪要摘要") {
-				t.Fatalf("document title leaked into preview: %s", result)
-			}
-			for _, fragment := range []string{`<style>h1{color:blue}</style>`, `<h1>会议正文标题</h1>`, `<p title="补充说明">会议内容</p>`} {
-				if !strings.Contains(result, fragment) {
-					t.Fatalf("body content or safe styling lost: missing %q in %s", fragment, result)
-				}
-			}
-		})
-	}
-}
-
 func TestConversationSharePermanentReadsFrozenAttachmentUntilRevoked(t *testing.T) {
 	cfg := desktopTestConfig(t)
 	cfg.SharePublicBaseURL = "https://share.example.test"
+	cfg.BrandID, cfg.ProductName = "test", "Test"
 	server, db := newDesktopTestServerWithConfig(t, cfg)
+	bundle := shareassets.NewManagedBundle(t.TempDir())
+	server.SetConversationShareRenderer(bundle)
 	now := time.Date(2026, 9, 20, 0, 0, 0, 0, time.UTC)
 	server.now = func() time.Time { return now }
 	const id = "0123456789abcdef01234567"
@@ -439,6 +410,19 @@ func TestConversationSharePermanentReadsFrozenAttachmentUntilRevoked(t *testing.
 	}
 	if csp := preview.Header().Get("Content-Security-Policy"); !strings.Contains(csp, "sandbox allow-scripts") || strings.Contains(csp, "allow-same-origin") || !strings.Contains(csp, "connect-src 'none'") {
 		t.Fatalf("preview CSP=%q", csp)
+	}
+	version := bundle.CurrentAssetSet()
+	pinned := read(attachmentPath + "?embed=1&assetSet=" + version)
+	if pinned.Code != http.StatusOK || !strings.Contains(pinned.Body.String(), version+"/html-preview-bootstrap.js") {
+		t.Fatalf("pinned preview status=%d body=%s", pinned.Code, pinned.Body.String())
+	}
+	if missing := read(attachmentPath + "?embed=1&assetSet=" + strings.Repeat("0", 64)); missing.Code != http.StatusServiceUnavailable {
+		t.Fatalf("missing version fell back to current: %d", missing.Code)
+	}
+	for _, query := range []string{"assetSet=" + version, "embed=1&assetSet=", "embed=1&assetSet=../current", "embed=1&unknown=1", "embed=1&embed=1", "embed=1&assetSet=" + version + "&assetSet=" + version, "embed=1&assetSet=%zz"} {
+		if invalid := read(attachmentPath + "?" + query); invalid.Code != http.StatusBadRequest {
+			t.Fatalf("invalid query %q status=%d", query, invalid.Code)
+		}
 	}
 	const otherAttachmentID = "ffffffffffffffffffffffff"
 	otherShareID, err := store.NewConversationShareID()

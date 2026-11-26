@@ -37,20 +37,26 @@ type Server struct {
 	manager                       *proxy.Manager
 	now                           func() time.Time
 	recordConversationShareAccess func(context.Context, string, time.Time) error
+	recordConversationShareRender func(context.Context, string, string)
 	conversationShareRenderer     conversationShareRenderer
 	conversationShareResources    *sharefiles.Store
 	shareResources                *sharefiles.Store
 }
 
 type conversationShareRenderer interface {
-	Render(snapshot []byte, assetOrigin, brandID, productName, productDownloadPageURL string, canReshare bool) ([]byte, error)
-	RenderHTMLPreview(shareOrigin string) ([]byte, error)
+	RenderVersion(snapshot []byte, assetOrigin, brandID, productName, productDownloadPageURL string, canReshare bool) ([]byte, string, error)
+	RenderHTMLPreview(shareOrigin, assetSet string) ([]byte, error)
 }
 
 func (s *Server) SetPresenceManager(manager *proxy.Manager) { s.manager = manager }
 
 func (s *Server) SetConversationShareRenderer(renderer conversationShareRenderer) {
 	s.conversationShareRenderer = renderer
+}
+
+// Configure before serving. Telemetry is separate from the renderer contract.
+func (s *Server) SetConversationShareRenderObserver(observer func(context.Context, string, string)) {
+	s.recordConversationShareRender = observer
 }
 
 func NewServer(db *store.DB, cfg config.RelayConfig, logger *slog.Logger, ssoJWT *auth.SSOJWTVerifier) (*Server, error) {
@@ -92,7 +98,9 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		parts := strings.SplitN(strings.TrimPrefix(r.URL.Path, publicConversationSharePagePath), "/", 3)
-		if len(parts) > 1 && parts[1] == "preview" {
+		if len(parts) == 2 && parts[1] == "html-preview" {
+			s.handleConversationHTMLPreview(w, r)
+		} else if len(parts) > 1 && parts[1] == "preview" {
 			s.handleSharePreviewResource(w, r)
 		} else if len(parts) > 1 && parts[1] == "attachments" {
 			s.handleGetPublicConversationShareAttachment(w, r)

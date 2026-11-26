@@ -2,6 +2,7 @@ package shareassets
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"crypto/sha512"
 	"embed"
@@ -36,15 +37,16 @@ var reservedSchemes = map[string]bool{"http": true, "https": true, "javascript":
 var embeddedFiles embed.FS
 
 type assetManifest struct {
-	Profile  string `json:"profile"`
-	AssetSet string `json:"assetSet"`
-	Files    []struct {
-		Path      string `json:"path"`
-		Integrity string `json:"integrity"`
-	} `json:"files"`
+	Profile  string       `json:"profile"`
+	AssetSet string       `json:"assetSet"`
+	Build    *BuildSource `json:"build"`
+	Files    []assetFile  `json:"files"`
 }
 
 type Bundle struct {
+	assetPaths           map[string]bool
+	managed              *templateStore
+	observeResource      func(context.Context, string)
 	assetSet             string
 	template             []byte
 	files                fs.FS
@@ -53,16 +55,24 @@ type Bundle struct {
 }
 
 func NewBundle() *Bundle {
+	b, err := newEmbeddedBundle()
+	if err != nil {
+		panic(err)
+	}
+	return b
+}
+
+func newEmbeddedBundle() (*Bundle, error) {
 	manifestBytes, err := embeddedFiles.ReadFile("conversation-assets.json")
 	if err != nil {
-		panic("conversation export manifest is unavailable: " + err.Error())
+		return nil, errors.New("conversation export manifest is unavailable: " + err.Error())
 	}
 	var manifest assetManifest
 	if err := json.Unmarshal(manifestBytes, &manifest); err != nil ||
 		manifest.Profile != "conversation-export-assets" ||
 		!regexp.MustCompile(`^[a-f0-9]{64}$`).MatchString(manifest.AssetSet) ||
 		len(manifest.Files) == 0 {
-		panic("conversation export manifest is invalid")
+		return nil, errors.New("conversation export manifest is invalid")
 	}
 	template, err := embeddedFiles.ReadFile("conversation.template.html")
 	if err != nil || bytes.Count(template, []byte(snapshotMarker)) != 1 ||
@@ -70,32 +80,32 @@ func NewBundle() *Bundle {
 		bytes.Count(template, []byte(localBrandIDMarker)) != 1 ||
 		bytes.Count(template, []byte(canReshareMeta)) != 1 ||
 		bytes.Count(template, []byte(styleNonceMarker)) != 2 {
-		panic("conversation export template is invalid")
+		return nil, errors.New("conversation export template is invalid")
 	}
 	files, err := fs.Sub(embeddedFiles, "files")
 	if err != nil {
-		panic("conversation export assets are unavailable: " + err.Error())
+		return nil, errors.New("conversation export assets are unavailable: " + err.Error())
 	}
 	var htmlPreviewIntegrity string
 	for _, file := range manifest.Files {
 		if !relativeAssetPath.MatchString(file.Path) {
-			panic("conversation export manifest contains an invalid asset path")
+			return nil, errors.New("conversation export manifest contains an invalid asset path")
 		}
 		info, statErr := fs.Stat(files, path.Join(manifest.AssetSet, file.Path))
 		if statErr != nil || !info.Mode().IsRegular() {
-			panic("conversation export manifest references a missing asset")
+			return nil, errors.New("conversation export manifest references a missing asset")
 		}
 		if file.Path == "html-preview-bootstrap.js" {
 			body, readErr := fs.ReadFile(files, path.Join(manifest.AssetSet, file.Path))
 			digest := sha512.Sum384(body)
 			if readErr != nil || file.Integrity != "sha384-"+base64.StdEncoding.EncodeToString(digest[:]) {
-				panic("conversation HTML bootstrap integrity mismatch")
+				return nil, errors.New("conversation HTML bootstrap integrity mismatch")
 			}
 			htmlPreviewIntegrity = file.Integrity
 		}
 	}
 	if htmlPreviewIntegrity == "" {
-		panic("conversation HTML bootstrap is missing")
+		return nil, errors.New("conversation HTML bootstrap is missing")
 	}
 	return &Bundle{
 		assetSet:             manifest.AssetSet,
@@ -103,28 +113,70 @@ func NewBundle() *Bundle {
 		files:                files,
 		fileServer:           http.StripPrefix(PublicPathPrefix, http.FileServer(http.FS(files))),
 		htmlPreviewIntegrity: htmlPreviewIntegrity,
-	}
+	}, nil
 }
 
 // RenderHTMLPreview returns only trusted bootstrap markup. User HTML is delivered
 // once by the authenticated parent over a document-bound MessagePort.
-func (b *Bundle) RenderHTMLPreview(shareOrigin string) ([]byte, error) {
+func (b *Bundle) RenderHTMLPreview(shareOrigin, assetSet string) ([]byte, error) {
+	var integrity string
+	if assetSet == "" {
+		// Existing unversioned runtimes all use the embedded bootstrap protocol.
+		// Keep that compatibility shell stable instead of following current.
+		assetSet, integrity = b.assetSet, b.htmlPreviewIntegrity
+	} else {
+		if !assetSetPattern.MatchString(assetSet) {
+			return nil, ErrUnavailable
+		}
+		if b.managed != nil {
+			b.managed.mu.RLock()
+			version := b.managed.inventory[assetSet]
+			stored := b.managed.bundles[assetSet]
+			b.managed.mu.RUnlock()
+			if version.Error != "" {
+				return nil, ErrUnavailable
+			}
+			if stored != nil {
+				integrity = stored.htmlPreviewIntegrity
+			}
+		}
+		if integrity == "" {
+			// Embedded historical sets have immutable files but may have no template.
+			if b.files == nil {
+				return nil, ErrUnavailable
+			}
+			body, err := fs.ReadFile(b.files, assetSet+"/html-preview-bootstrap.js")
+			if err != nil {
+				return nil, ErrUnavailable
+			}
+			integrity = fileIntegrity(body)
+		}
+	}
 	origin, err := normalizedOrigin(shareOrigin)
 	if err != nil {
 		return nil, err
 	}
-	if !regexp.MustCompile(`^sha384-[A-Za-z0-9+/]{64}$`).MatchString(b.htmlPreviewIntegrity) {
-		return nil, errors.New("HTML preview bootstrap is unavailable")
+	if !regexp.MustCompile(`^sha384-[A-Za-z0-9+/]{64}$`).MatchString(integrity) {
+		return nil, ErrUnavailable
 	}
-	scriptURL := origin + PublicPathPrefix + b.assetSet + "/html-preview-bootstrap.js"
-	return []byte(`<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="conversation-share-origin" content="` + html.EscapeString(origin) + `"><script defer src="` + html.EscapeString(scriptURL) + `" crossorigin="anonymous" integrity="` + html.EscapeString(b.htmlPreviewIntegrity) + `"></script></head><body></body></html>`), nil
+	scriptURL := origin + PublicPathPrefix + assetSet + "/html-preview-bootstrap.js"
+	return []byte(`<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="conversation-share-origin" content="` + html.EscapeString(origin) + `"><script defer src="` + html.EscapeString(scriptURL) + `" crossorigin="anonymous" integrity="` + html.EscapeString(integrity) + `"></script></head><body></body></html>`), nil
 }
 
 func NewHandler() http.Handler {
 	return NewBundle()
 }
 
-func (b *Bundle) Render(snapshot []byte, assetOrigin, brandID, productName, productDownloadPageURL string, canReshare bool) ([]byte, error) {
+func (b *Bundle) RenderVersion(snapshot []byte, assetOrigin, brandID, productName, productDownloadPageURL string, canReshare bool) ([]byte, string, error) {
+	active, err := b.selected()
+	if err != nil {
+		return nil, "", err
+	}
+	html, err := active.render(snapshot, assetOrigin, brandID, productName, productDownloadPageURL, canReshare)
+	return html, active.assetSet, err
+}
+
+func (b *Bundle) render(snapshot []byte, assetOrigin, brandID, productName, productDownloadPageURL string, canReshare bool) ([]byte, error) {
 	if !json.Valid(snapshot) {
 		return nil, errors.New("conversation snapshot is invalid")
 	}
@@ -200,7 +252,12 @@ func (b *Bundle) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if r.URL.Path == TemplatePublicPath {
-		serveTemplate(w, r, b.template)
+		active, err := b.selected()
+		if err != nil {
+			http.Error(w, "conversation export template is unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		serveTemplate(w, r, active.template)
 		return
 	}
 	relativePath := strings.TrimPrefix(r.URL.Path, PublicPathPrefix)
@@ -211,8 +268,43 @@ func (b *Bundle) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	info, err := fs.Stat(b.files, relativePath)
+	files, fileServer := b.files, b.fileServer
+	var stored *Bundle
+	if b.managed != nil {
+		b.managed.mu.RLock()
+		version, known := b.managed.inventory[assetSet]
+		stored = b.managed.bundles[assetSet]
+		b.managed.mu.RUnlock()
+		if known && version.Error != "" {
+			http.NotFound(w, r)
+			return
+		}
+		if stored != nil {
+			files, fileServer = stored.files, stored.fileServer
+		}
+	}
+	if files == nil {
+		http.NotFound(w, r)
+		return
+	}
+	info, err := fs.Stat(files, relativePath)
 	if err != nil || !info.Mode().IsRegular() {
+		// A missing requested name is a normal 404; only a declared resource
+		// missing from a managed package invalidates that version.
+		if stored != nil && stored.assetPaths[assetPath] {
+			s := b.managed
+			s.mu.Lock()
+			v := s.inventory[assetSet]
+			v.CanActivate = false
+			v.Error = "published resource unavailable"
+			s.inventory[assetSet] = v
+			delete(s.bundles, assetSet)
+			if s.current == assetSet {
+				s.active = nil
+				s.err = ErrUnavailable
+			}
+			s.mu.Unlock()
+		}
 		http.NotFound(w, r)
 		return
 	}
@@ -223,7 +315,12 @@ func (b *Bundle) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	header.Set("Cross-Origin-Resource-Policy", "cross-origin")
 	header.Set("X-Content-Type-Options", "nosniff")
 	header.Set("Content-Type", assetContentType(relativePath))
-	b.fileServer.ServeHTTP(w, r)
+	response := &assetResponseWriter{ResponseWriter: w}
+	fileServer.ServeHTTP(response, r)
+	if r.Method == http.MethodGet && b.observeResource != nil && !response.failed &&
+		(response.status == http.StatusOK || response.status == http.StatusPartialContent || response.status == http.StatusNotModified) {
+		b.observeResource(r.Context(), assetSet)
+	}
 }
 
 func serveTemplate(w http.ResponseWriter, r *http.Request, template []byte) {
